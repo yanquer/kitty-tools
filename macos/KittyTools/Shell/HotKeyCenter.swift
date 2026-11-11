@@ -224,32 +224,30 @@ enum HotKeyAction: String, CaseIterable {
   /// nil = 默认不设键（静默替换这类用得少、又容易误触的）
   var defaultHotKey: HotKey? {
     switch self {
-    // C = Clipboard，和 ⌥D / ⌥S / ⌥Space / ⌥A 同一组单 ⌥ 键。
-    // 15.0–15.1 上只带 ⌥ 的组合注册不了，快捷键页会提示（下面的 ⌥ 键同样）
-    case .clipboard: HotKey(keyCode: kVK_ANSI_C, modifiers: optionKey)
-    // Bob 的划词翻译默认键；⌘⇧T 会占浏览器的「重新打开关闭的标签页」
-    case .selectionTranslate: HotKey(keyCode: kVK_ANSI_D, modifiers: optionKey)
-    // Bob 的输入翻译用 ⌥A（这里给了截图），取 ⌥T（T = Translate），和其它功能一样是单 ⌥ 键（体检 A15，2026-09-28）；
-    // 只影响没改过这个键的人（hotKey 没存过才取默认）
-    case .inputTranslate: HotKey(keyCode: kVK_ANSI_T, modifiers: optionKey)
+    // 沿用用户的 Maccy 唤起键；默认值只在这个动作没有保存过快捷键时采用。
+    case .clipboard: HotKey(keyCode: kVK_ANSI_J, modifiers: cmdKey)
+    // 沿用用户的 Bob 划词翻译和显示翻译窗口快捷键。
+    // 15.0–15.1 上只带 ⌥ 的组合注册不了，快捷键页会提示（下面的 ⌥ 键同样）。
+    case .selectionTranslate: HotKey(keyCode: kVK_ANSI_A, modifiers: optionKey)
+    case .inputTranslate: HotKey(keyCode: kVK_ANSI_F, modifiers: optionKey)
     // Bob 的截图翻译默认键；不占各 App 的 ⌘⇧S「另存为」
     case .screenshotTranslate: HotKey(keyCode: kVK_ANSI_S, modifiers: optionKey)
     // Alfred 的默认键
     case .launcher: HotKey(keyCode: kVK_Space, modifiers: optionKey)
-    // iShot 的框选截图默认键
-    case .screenshot: HotKey(keyCode: kVK_ANSI_A, modifiers: optionKey)
+    // 沿用用户的 Snipaste 截图快捷键。
+    case .screenshot: HotKey(keyCode: kVK_ANSI_Q, modifiers: optionKey)
     // iShot 的默认键，可以连按
     case .screenshotLastRegion: HotKey(keyCode: kVK_ANSI_X, modifiers: optionKey)
-    // iShot 的默认键（O = OCR）
-    case .recognizeText: HotKey(keyCode: kVK_ANSI_O, modifiers: optionKey)
+    // 沿用用户的 Bob 截图 OCR 快捷键；识字仍按现有行为直接复制结果。
+    case .recognizeText: HotKey(keyCode: kVK_ANSI_D, modifiers: optionKey)
     // 选中文字直接换成译文，不弹窗（Bob 的静默划词翻译也不设默认键）
     case .translateReplace: nil
     // R = Record，和截图框选里将来（第 2 批）按 R 转录屏对上
     case .screenRecord: HotKey(keyCode: kVK_ANSI_R, modifiers: optionKey)
     // 录音不设默认键（录音第 5 批：从菜单栏、启动器进，要快捷键到 设置 › 快捷键 里自己设）
     case .audioRecord: nil
-    // 同上（第二轮体检 F1）
-    case .pinClipboard: nil
+    // 沿用用户的 Snipaste 贴图快捷键。
+    case .pinClipboard: HotKey(keyCode: kVK_ANSI_W, modifiers: optionKey)
     // 截图历史（2026-10-26 拍板 C2）：不占默认键，要的人自己设
     case .shotHistory: nil
     // 晾衣绳（第十族，2026-10-26 拍板 C1）：主入口是鼠标停到菜单栏那一条上，键给要的人自己设
@@ -286,7 +284,7 @@ enum HotKeyAction: String, CaseIterable {
   }
 
   /// stored：各动作存的数据（nil = 没存过）。没存过取默认，但默认键已被别的动作自己设走时让给它、这个当没设：
-  /// 改了默认键（A15 输入翻译 ⌘⇧I → ⌥T）以后，早先把 ⌥T 手动给了别的动作的人不该被新默认顶掉（抢先注册会让那个动作
+  /// 改了默认键以后，早先把新默认组合手动给了别的动作的人不该被新默认顶掉（抢先注册会让那个动作
   /// 每次启动都注册失败）。只比别的动作存下的值，不递归取默认
   func resolve(stored: (HotKeyAction) -> Data?) -> HotKey? {
     let decode = { (data: Data) in try? JSONDecoder().decode(HotKey.self, from: data) }

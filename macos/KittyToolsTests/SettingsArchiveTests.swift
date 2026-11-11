@@ -305,7 +305,7 @@ struct SettingsArchiveTests {
     #expect(stored(.screenshot, in: target) == HotKeyAction.screenshot.defaultHotKey)
   }
 
-  /// 文件把截图设成了剪贴板的默认键 ⌥C：导入后截图用它，没动过的剪贴板让位、当没设（不会两个动作抢同一个键）
+  /// 文件把截图设成了剪贴板的默认键 ⌘J：导入后截图用它，没动过的剪贴板让位、当没设（不会两个动作抢同一个键）
   @Test func importedHotkeyTakesOverAnotherDefault() throws {
     let (target, name) = try suite()
     defer { target.removePersistentDomain(forName: name) }

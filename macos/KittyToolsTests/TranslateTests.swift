@@ -288,7 +288,7 @@ struct HistoryStoreTests {
   @Test func silentReplaceHasNoDefaultHotKey() {
     #expect(HotKeyAction.translateReplace.defaultHotKey == nil)
     // 只能加在末尾（注册 id 是下标）：录屏（2026-09-30）接在划词翻译并替换后面，录音（录音第 5 批，不设默认键）再接在后面，
-    // 钉住剪贴板里的图（第二轮体检 F1，不设默认键）又接在后面，状态屏（2026-10-10，不设默认键）再接在后面，
+    // 钉住剪贴板里的图（第二轮体检 F1，现默认 ⌥W）又接在后面，状态屏（2026-10-10，不设默认键）再接在后面，
     // 便签的三个（2026-10-12，只有快速记一条有默认键）接在后面，启动台（2026-10-18，不设默认键）再接在后面，
     // 截图历史（2026-10-26，不设默认键）接在后面——它在菜单和启动器里排在钉图后面，但枚举里只能往末尾加——
     // 打开刘海岛（2026-10-26，不设默认键）再接在后面，晾衣绳（第十族，2026-10-26，不设默认键）接在后面，
@@ -301,7 +301,8 @@ struct HistoryStoreTests {
     #expect(HotKeyAction.reminderNew.defaultHotKey == nil)
     #expect(HotKeyAction.home.defaultHotKey == nil)
     #expect(HotKeyAction.audioRecord.defaultHotKey == nil)
-    #expect(HotKeyAction.pinClipboard.defaultHotKey == nil)
+    #expect(
+      HotKeyAction.pinClipboard.defaultHotKey == HotKey(keyCode: kVK_ANSI_W, modifiers: optionKey))
   }
 
   /// 「翻译 ↩」胶囊（N5）：原文非空、且和上次翻译的原文（去首尾空白）不同才出现

@@ -1,5 +1,5 @@
 // 快捷键界面的纯函数单测：键帽拆分（速查表 / 录制框 / 引导共用）、注册失败原因（-9868 只在只带 ⌥ 时才是系统限制）、
-// 速查表 sheet 的高度放得进设置窗、录制时拒绝各 App 通用的编辑键、默认键（输入翻译 ⌥T）。
+// 速查表 sheet 的高度放得进设置窗、录制时拒绝各 App 通用的编辑键、全局默认键与用户自定义键的优先级。
 
 import Carbon.HIToolbox
 import Testing
@@ -69,34 +69,56 @@ struct ShortcutsTests {
     #expect(HotKey.reservedEditKeys.count == 12)
   }
 
-  /// 默认键：输入翻译是 ⌥T（体检 A15，和其它功能一样单 ⌥）；默认键互不重复、都不是通用编辑键
+  /// 全局默认键沿用用户现有应用的习惯，录屏为 ⌥R；所有默认键有效、互不重复。
   @Test func defaultHotKeys() {
-    #expect(
-      HotKeyAction.inputTranslate.defaultHotKey == HotKey(keyCode: kVK_ANSI_T, modifiers: optionKey)
-    )
+    let expected: [(HotKeyAction, Int, Int)] = [
+      (.clipboard, kVK_ANSI_J, cmdKey),
+      (.selectionTranslate, kVK_ANSI_A, optionKey),
+      (.inputTranslate, kVK_ANSI_F, optionKey),
+      (.screenshotTranslate, kVK_ANSI_S, optionKey),
+      (.launcher, kVK_Space, optionKey),
+      (.screenshot, kVK_ANSI_Q, optionKey),
+      (.screenshotLastRegion, kVK_ANSI_X, optionKey),
+      (.recognizeText, kVK_ANSI_D, optionKey),
+      (.screenRecord, kVK_ANSI_R, optionKey),
+      (.pinClipboard, kVK_ANSI_W, optionKey),
+      (.noteCapture, kVK_ANSI_N, optionKey),
+    ]
+    for (action, code, modifiers) in expected {
+      let hotKey = HotKey(keyCode: code, modifiers: modifiers)
+      #expect(action.defaultHotKey == hotKey)
+      #expect(action.resolve { _ in nil } == hotKey)
+    }
     let defaults = HotKeyAction.allCases.compactMap(\.defaultHotKey)
+    #expect(defaults.count == expected.count)
     #expect(Set(defaults).count == defaults.count)
-    #expect(defaults.allSatisfy { !$0.isReservedEditKey })
+    #expect(defaults.allSatisfy(\.isUsable))
   }
 
-  /// 默认键让给用户自己设的：早先把 ⌥T 手动给了「划词翻译并替换」，输入翻译没设过也不再取默认 ⌥T（免得抢先注册、
-  /// 那个动作每次启动都注册失败）；清除过（空数据）照旧是 nil，别的动作没占就照常取默认
-  @Test func defaultYieldsToUserBinding() throws {
-    let optionT = HotKey(keyCode: kVK_ANSI_T, modifiers: optionKey)
-    let optionTData = try JSONEncoder().encode(optionT)
+  /// 新默认键让给用户自己设的组合，已保存的旧键和清除状态照常保留；只用内存里的偏好数据。
+  @Test(arguments: [
+    HotKeyAction.clipboard, .selectionTranslate, .inputTranslate, .screenshotTranslate, .screenshot,
+    .recognizeText, .screenRecord, .pinClipboard,
+  ])
+  func defaultYieldsToUserBinding(action: HotKeyAction) throws {
+    let hotKey = try #require(action.defaultHotKey)
+    let hotKeyData = try JSONEncoder().encode(hotKey)
     var stored: [HotKeyAction: Data] = [:]
-    #expect(HotKeyAction.inputTranslate.resolve { stored[$0] } == optionT)
-    stored[.translateReplace] = optionTData
-    #expect(HotKeyAction.inputTranslate.resolve { stored[$0] } == nil)
-    #expect(HotKeyAction.translateReplace.resolve { stored[$0] } == optionT)
-    // 输入翻译自己存了 ⌥T（两边都存同一个键不该出现，存了就照存的）；清除过的是 nil
-    stored[.inputTranslate] = optionTData
-    #expect(HotKeyAction.inputTranslate.resolve { stored[$0] } == optionT)
-    stored[.inputTranslate] = Data()
-    #expect(HotKeyAction.inputTranslate.resolve { stored[$0] } == nil)
+    #expect(action.resolve { stored[$0] } == hotKey)
+    stored[.translateReplace] = hotKeyData
+    #expect(action.resolve { stored[$0] } == nil)
+    #expect(HotKeyAction.translateReplace.resolve { stored[$0] } == hotKey)
+    stored[action] = hotKeyData
+    #expect(action.resolve { stored[$0] } == hotKey)
+    // 已保存的键优先，包括用户曾明确保存的旧默认键。
+    let oldKey = HotKey(keyCode: kVK_ANSI_T, modifiers: optionKey)
+    stored[action] = try JSONEncoder().encode(oldKey)
+    #expect(action.resolve { stored[$0] } == oldKey)
+    stored[action] = Data()
+    #expect(action.resolve { stored[$0] } == nil)
     // 被清除的动作不占默认键
     stored = [.translateReplace: Data()]
-    #expect(HotKeyAction.inputTranslate.resolve { stored[$0] } == optionT)
+    #expect(action.resolve { stored[$0] } == hotKey)
   }
 
   /// 速查表左栏按设置页分类：和设置侧栏同序、通用排最后，钉图归截图、录屏录音归录制、刘海岛和「设置」归通用。

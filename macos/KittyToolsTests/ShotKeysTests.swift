@@ -74,9 +74,9 @@ struct ShotKeysTests {
     #expect(
       ShotKey.problem(with: HotKey(keyCode: kVK_ANSI_T, modifiers: 0), for: .pin, in: defaults)
         == nil)
-    // 和全局快捷键一样（截图的默认 ⌥A）
-    let optionA = HotKey(keyCode: kVK_ANSI_A, modifiers: optionKey)
-    #expect(ShotKey.problem(with: optionA, for: .pin, in: defaults) == "和全局快捷键「截图」重复")
+    // 和全局快捷键一样（截图的默认 ⌥Q）
+    let optionQ = HotKey(keyCode: kVK_ANSI_Q, modifiers: optionKey)
+    #expect(ShotKey.problem(with: optionQ, for: .pin, in: defaults) == "和全局快捷键「截图」重复")
     // 范围外的修饰键位不收
     #expect(!ShotKey.isUsable(HotKey(keyCode: UInt32(kVK_ANSI_T), modifiers: UInt32(1 << 20))))
   }
