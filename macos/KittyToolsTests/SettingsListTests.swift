@@ -12,6 +12,18 @@ import Testing
 @testable import KittyTools
 
 struct SettingsListTests {
+  @Test func islandActionPreferencesSanitize() {
+    let stored = "noteCapture\nunknown\nscreenshot\nnoteCapture\n"
+    #expect(
+      Prefs.islandActionsOrder(stored: stored) == [
+        "noteCapture", "screenshot", "recognizeText", "screenshotTranslate", "screenRecord",
+        "audioRecord",
+      ])
+    #expect(
+      Prefs.islandActionsOff(stored: "audioRecord\nunknown\naudioRecord\nscreenshot")
+        == ["audioRecord", "screenshot"])
+  }
+
   /// 侧栏顺序和菜单栏、快捷键页、引导同序：翻译在截图前面（体检 B51），录制紧跟截图（2026-10-03 拆出来），
   /// 便签、状态屏排在录制后面（状态屏 Z11，便签 2026-10-12；两页的先后同快捷键页的分节）；
   /// 启动台（第八族，2026-10-18）排在便签后面、状态屏前面（F38；和菜单栏、快捷键页同序）；
@@ -22,7 +34,7 @@ struct SettingsListTests {
     let pages = SettingsPage.allCases
     #expect(
       pages == [
-        .general, .clipboard, .launcher, .translate, .screenshot, .record, .notes, .reminders,
+        .general, .island, .clipboard, .launcher, .translate, .screenshot, .record, .notes, .reminders,
         .statusScreen, .launchpad, .dockPreview, .windowSwitcher, .windowLayout, .finderMenu,
         .hotkeys, .about,
       ])
@@ -32,7 +44,7 @@ struct SettingsListTests {
     #expect(
       SettingsPage.sidebar(SettingsPage.visible(launchpad: false), off: []).map(\.pages)
         == [
-          [.general], [.clipboard, .launcher, .translate], [.screenshot, .record],
+          [.general, .island], [.clipboard, .launcher, .translate], [.screenshot, .record],
           [.notes, .reminders, .statusScreen],
           [.dockPreview, .windowSwitcher, .windowLayout, .finderMenu],
           [.hotkeys, .about],
@@ -44,7 +56,7 @@ struct SettingsListTests {
       SettingsPage.allCases, off: [.notes, .dockPreview, .launchpad, .record])
     #expect(
       closed.map(\.pages) == [
-        [.general], [.clipboard, .launcher, .translate], [.screenshot],
+        [.general, .island], [.clipboard, .launcher, .translate], [.screenshot],
         [.reminders, .statusScreen], [.windowSwitcher, .windowLayout, .finderMenu],
         [.hotkeys, .about], [.record, .notes, .launchpad, .dockPreview],
       ])
