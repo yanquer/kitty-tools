@@ -266,8 +266,30 @@ nonisolated struct FinderLink: Equatable {
     return signed(auditToken: token, as: id + ".finder")
   }
 
-  /// 这个审计令牌对应的进程是本团队签名、id 是 identifier 的（同 Updater.requirement 的写法）
+  /// 核对发送方与当前 App 的签名团队相同且 id 匹配，自行编译时采用实际使用的开发证书团队。
   static func signed(auditToken: Data, as identifier: String) -> Bool {
+    var ownCode: SecCode?
+    let selfStatus = SecCodeCopySelf([], &ownCode)
+    guard selfStatus == errSecSuccess, let ownCode else {
+      Log.finder.error("读取当前 App 签名失败：SecCodeCopySelf，状态 \(selfStatus)")
+      return false
+    }
+    var ownStaticCode: SecStaticCode?
+    let staticStatus = SecCodeCopyStaticCode(ownCode, [], &ownStaticCode)
+    guard staticStatus == errSecSuccess, let ownStaticCode else {
+      Log.finder.error("读取当前 App 签名失败：SecCodeCopyStaticCode，状态 \(staticStatus)")
+      return false
+    }
+    var information: CFDictionary?
+    let informationStatus = SecCodeCopySigningInformation(
+      ownStaticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &information)
+    guard informationStatus == errSecSuccess,
+      let team = (information as? [String: Any])?[kSecCodeInfoTeamIdentifier as String] as? String,
+      !team.isEmpty
+    else {
+      Log.finder.error("读取当前 App 签名团队失败：状态 \(informationStatus)，拒绝访达扩展请求")
+      return false
+    }
     var code: SecCode?
     guard
       SecCodeCopyGuestWithAttributes(
@@ -276,7 +298,7 @@ nonisolated struct FinderLink: Equatable {
     else { return false }
     var requirement: SecRequirement?
     let text =
-      "identifier \"\(identifier)\" and anchor apple generic and certificate leaf[subject.OU] = \"HTX9F4KG39\""
+      "identifier \"\(identifier)\" and anchor apple generic and certificate leaf[subject.OU] = \"\(team)\""
     guard SecRequirementCreateWithString(text as CFString, [], &requirement) == errSecSuccess,
       let requirement
     else { return false }

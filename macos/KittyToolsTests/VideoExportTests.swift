@@ -33,11 +33,14 @@ struct VideoExportTests {
     #expect(frames.count == 20)
     #expect(frames.last?.time == CMTime(value: 19, timescale: 15))
     #expect(abs((frames.last?.delay ?? 0) - 13.0 / 15) < 1e-9)
-    #expect(abs(frames.map(\.delay).reduce(0, +) - 32.0 / 15) < 1e-9)
+    // 先明确求和结果的类型，避免 Swift 6.3 在 #expect 展开后反复推断算术重载。
+    let totalDelay: Double = frames.map(\.delay).reduce(0, +)
+    #expect(abs(totalDelay - 32.0 / 15) < 1e-9)
     // 超过 60 s 时停到第 60 s
     let capped = VideoExport.frames(duration: 90, videoEnd: 20)
     #expect(capped.count == 300)
-    #expect(abs(capped.map(\.delay).reduce(0, +) - 60) < 1e-9)
+    let cappedDelay: Double = capped.map(\.delay).reduce(0, +)
+    #expect(abs(cappedDelay - 60) < 1e-9)
   }
 
   @Test func sizeCapsWidthAt960() {

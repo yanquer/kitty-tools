@@ -693,7 +693,7 @@ final class OverlayPanel: NSPanel {
           NSRect(x: frame.minX, y: frame.minY, width: clamped, height: frame.height), display: false
         )
       }
-      if let user = userFrame { userFrame = (user.topLeft, clamped) }
+      if let user = userFrame { userFrame = (user.topLeft, CGFloat(clamped)) }
     }
     // 挂在图标下面时用图标所在的那块屏（键盘、旁白点开的，鼠标不一定在那儿）
     let point = below.map { NSPoint(x: $0.midX, y: $0.midY) } ?? NSEvent.mouseLocation

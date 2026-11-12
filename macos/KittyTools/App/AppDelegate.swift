@@ -2196,6 +2196,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   ) {
     // 工具栏「翻译」就地盖回截图上，还是交出去走翻译浮窗：看设置 › 翻译「把译文直接盖回截图上」
     let overlays = UserDefaults.standard.bool(forKey: Prefs.translateScreenshotOverlay)
+    // Swift 6.3 无法推断三元表达式里的可选异步闭包，分支赋值并显式标注类型。
+    let translate: ((CGImage, CGFloat) async -> ScreenshotOverlay.Outcome)?
+    if overlays {
+      translate = {
+        [weak self] (image: CGImage, pixelsPerPoint: CGFloat) async
+          -> ScreenshotOverlay.Outcome in
+        guard let self else { return .init(message: "翻译不可用") }
+        return await self.overlayTranslate(image, pixelsPerPoint: pixelsPerPoint)
+      }
+    } else {
+      translate = nil
+    }
     beginCapture(hidingPanels: hidingPanels) { [self] in
       let lastRegion = UserDefaults.standard.string(forKey: Prefs.screenshotLastRegion).map(
         NSRectFromString)
@@ -2207,11 +2219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               $0, lastRegion: lastRegion, preselect: repeatingLastRegion,
               hint: hint, autoTranslate: autoTranslate,
               recordingBlocker: { [weak self] in self?.recordingBlocker(.screen) },
-              translate: overlays
-                ? { [weak self] image, pixelsPerPoint in
-                  guard let self else { return .init(message: "翻译不可用") }
-                  return await self.overlayTranslate(image, pixelsPerPoint: pixelsPerPoint)
-                } : nil)
+              translate: translate)
           })
       else { return }
       await handleCapture(outcome)

@@ -141,6 +141,9 @@ enum ScreenCapture {
 
   /// within 里先到的那一个（结果或超时）：先到的叫醒等着的、停掉计时，后到的不算
   private final class Race<T> {
+    /// 引用只由 MainActor 上的任务持有，空析构显式非隔离，避开 Swift 6.3 在 macOS 15 部署目标下的优化器崩溃。
+    nonisolated deinit {}
+
     var wake: CheckedContinuation<Void, Never>?
     var result: Result<T, any Error>?
     var timer: Task<Void, Never>?

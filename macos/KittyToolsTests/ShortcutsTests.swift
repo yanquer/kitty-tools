@@ -92,7 +92,7 @@ struct ShortcutsTests {
     let defaults = HotKeyAction.allCases.compactMap(\.defaultHotKey)
     #expect(defaults.count == expected.count)
     #expect(Set(defaults).count == defaults.count)
-    #expect(defaults.allSatisfy(\.isUsable))
+    #expect(defaults.allSatisfy { $0.isUsable })
   }
 
   /// 新默认键让给用户自己设的组合，已保存的旧键和清除状态照常保留；只用内存里的偏好数据。
