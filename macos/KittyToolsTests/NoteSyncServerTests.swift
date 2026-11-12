@@ -81,6 +81,126 @@ struct NoteSyncServerTests {
     Set(mac.clipboard.items.filter(\.isSnippet).compactMap(\.text))
   }
 
+  /// WebDAV 先同步加密配置，再同步密文；两台模拟电脑复用同一份内存 iCloud 钥匙串。
+  @Test func credentialsTravelEncryptedThroughServer() async throws {
+    let host = try makeServer()
+    defer { cleanUp(host) }
+    let session = FakeDAV.session()
+    let a = try Mac(host: "a", root: root, session: session)
+    let b = try Mac(host: "b", root: root, session: session)
+    var cloud: [String: Data] = [:]
+    var keysA = ["zhipu.apiKey": "webdav-private-key"]
+    var keysB: [String: String] = [:]
+    let servicesA = TranslateServiceStore(services: [.zhipu])
+    let servicesB = TranslateServiceStore(services: [.zhipu])
+    let secretA = SecretSync(
+      services: servicesA, defaults: a.defaults,
+      read: { keysA[$0] }, write: { keysA[$1] = $0 },
+      readCloudKey: { cloud[$0] }, addCloudKey: { if cloud[$1] == nil { cloud[$1] = $0 } })
+    let secretB = SecretSync(
+      services: servicesB, defaults: b.defaults,
+      read: { keysB[$0] }, write: { keysB[$1] = $0 },
+      readCloudKey: { cloud[$0] }, addCloudKey: { if cloud[$1] == nil { cloud[$1] = $0 } })
+    a.syncer.secretSync = secretA
+    b.syncer.secretSync = secretB
+    a.syncer.sources = [TranslateServiceSync(store: servicesA, defaults: a.defaults), secretA]
+    b.syncer.sources = [TranslateServiceSync(store: servicesB, defaults: b.defaults), secretB]
+    #expect(await a.syncer.enable(server: account(host)) == nil)
+    await settle([a])
+    #expect(await b.syncer.enable(server: account(host)) == nil)
+    await settle([b, a])
+    #expect(keysB["zhipu.apiKey"] == "webdav-private-key")
+    #expect(secretA.access?.configuration == secretB.access?.configuration)
+    #expect(cloud.count == 1)
+    let configuration = try Data(
+      contentsOf: shared.appending(path: SecretSyncCipher.configurationName))
+    #expect(configuration.range(of: Data("webdav-private-key".utf8)) == nil)
+    let encrypted = try Data(
+      contentsOf: shared.appending(path: "devices/\(a.store.deviceID)/secrets.json"))
+    #expect(encrypted.range(of: Data("webdav-private-key".utf8)) == nil)
+    keysA["zhipu.apiKey"] = "webdav-updated-key"
+    await settle([a, b])
+    #expect(keysB["zhipu.apiKey"] == "webdav-updated-key")
+  }
+
+  /// 两台镜像同时创建不同配置时，条件写入选出唯一版本，失败的一台采用服务器配置。
+  @Test func concurrentSecretConfigurationsUseServerWinner() async throws {
+    let host = try makeServer()
+    defer { cleanUp(host) }
+    try FileManager.default.createDirectory(at: shared, withIntermediateDirectories: true)
+    let first = root.appending(path: "candidate-a")
+    let second = root.appending(path: "candidate-b")
+    for mirror in [first, second] {
+      try FileManager.default.createDirectory(at: mirror, withIntermediateDirectories: true)
+      try SyncRecords.encoder.encode(SecretSyncCipher.Configuration(keyID: UUID())).write(
+        to: mirror.appending(path: SecretSyncCipher.configurationName))
+    }
+    let connection = account(host)
+    let session = FakeDAV.session()
+    async let a = NoteSyncServer.publishSecretConfiguration(
+      connection, session: session, mirror: first)
+    async let b = NoteSyncServer.publishSecretConfiguration(
+      connection, session: session, mirror: second)
+    let replaced = try await [a, b]
+    #expect(replaced.filter { $0 }.count == 1)
+    let expected = try Data(contentsOf: shared.appending(path: SecretSyncCipher.configurationName))
+    for mirror in [first, second] {
+      #expect(
+        try Data(contentsOf: mirror.appending(path: SecretSyncCipher.configurationName)) == expected
+      )
+    }
+  }
+
+  /// 服务器拒绝加密配置时保留失败状态，任何加密记录都不能先传上去。
+  @Test func rejectedSecretConfigurationStopsPublication() async throws {
+    let host = try makeServer()
+    defer { cleanUp(host) }
+    FakeDAV.set(host) { $0.rejectSecretConfiguration = true }
+    let a = try Mac(host: "a", root: root, session: FakeDAV.session())
+    var cloud: [String: Data] = [:]
+    let services = TranslateServiceStore(services: [.zhipu])
+    let secrets = SecretSync(
+      services: services, defaults: a.defaults,
+      read: { _ in "must-stay-local" }, write: { _, _ in },
+      readCloudKey: { cloud[$0] }, addCloudKey: { cloud[$1] = $0 })
+    a.syncer.secretSync = secrets
+    a.syncer.sources = [TranslateServiceSync(store: services, defaults: a.defaults), secrets]
+    #expect(await a.syncer.enable(server: account(host)) == nil)
+    await settle([a])
+    #expect(a.syncer.status == .stopped(.failed(WebDAV.Failure.forbidden.message)))
+    #expect(secrets.status == .failed(WebDAV.Failure.forbidden.message))
+    #expect(
+      FileManager.default.fileExists(
+        atPath: shared.appending(path: "devices/\(a.store.deviceID)/services.json").path))
+    #expect(
+      !FileManager.default.fileExists(
+        atPath: shared.appending(path: "devices/\(a.store.deviceID)/secrets.json").path))
+    #expect(!FakeDAV.log(host).contains { $0.hasPrefix("PUT ") && $0.hasSuffix("/secrets.json") })
+  }
+
+  /// 从 iCloud 切到 WebDAV 或自选目录时清除旧连接意愿，切回 iCloud 时清除服务器状态。
+  @Test func syncTransportsRemainMutuallyExclusive() async throws {
+    let host = try makeServer()
+    defer { cleanUp(host) }
+    let a = try Mac(host: "a", root: root, session: FakeDAV.session())
+    let cloud = root.appending(path: "模拟云盘")
+    let folder = root.appending(path: "自选目录")
+    for path in [cloud, folder] {
+      try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
+    }
+    a.syncer.iCloudLocation = { .init(folder: cloud, account: "account-a") }
+    a.syncer.enableICloud()
+    a.syncer.stop()
+    #expect(await a.syncer.enable(server: account(host)) == nil)
+    #expect(!a.syncer.iCloudEnabled && a.syncer.server == account(host).folder)
+    #expect(a.defaults.object(forKey: Prefs.syncICloudEnabled) == nil)
+    a.syncer.enableICloud()
+    a.syncer.stop()
+    #expect(a.syncer.iCloudEnabled && a.syncer.server == nil && a.password == nil)
+    #expect(await a.syncer.enable(folder: folder) == nil)
+    #expect(!a.syncer.iCloudEnabled && a.syncer.server == nil && a.syncer.folder == folder)
+  }
+
   // MARK: 连上、来回传
 
   /// 服务器上没有那个文件夹：建好、写标记；另一台接着同一个库；便签、片段、改动来回传；镜像在各自的目录里，密码只进「钥匙串」
@@ -443,6 +563,7 @@ nonisolated final class FakeDAV: URLProtocol {
     var log: [String] = []
     var busy = false
     var down = false
+    var rejectSecretConfiguration = false
   }
 
   private static let hosts = Mutex<[String: Host]>([:])
@@ -542,11 +663,24 @@ nonisolated final class FakeDAV: URLProtocol {
       }
       return (200, ["ETag": Self.etag(target)], data)
     case "PUT":
+      if target.lastPathComponent == SecretSyncCipher.configurationName,
+        Self.hosts.withLock({ $0[url.host() ?? ""]?.rejectSecretConfiguration }) == true
+      {
+        return (403, [:], Data())
+      }
       guard parentExists else { return (409, [:], Data()) }
       if exists, request.value(forHTTPHeaderField: "If-None-Match") == "*" {
         return (412, [:], Data())
       }
-      do { try body.write(to: target, options: .atomic) } catch { return (500, [:], Data()) }
+      // 条件写入使用文件系统的原子排他创建，避免并发测试同时通过存在性检查。
+      do {
+        try body.write(
+          to: target,
+          options: request.value(forHTTPHeaderField: "If-None-Match") == "*"
+            ? .withoutOverwriting : .atomic)
+      } catch let error as CocoaError where error.code == .fileWriteFileExists {
+        return (412, [:], Data())
+      } catch { return (500, [:], Data()) }
       return (201, ["ETag": Self.etag(target)], Data())
     case "DELETE":
       guard exists else { return (404, [:], Data()) }
