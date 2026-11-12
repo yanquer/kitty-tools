@@ -376,6 +376,51 @@ enum Prefs {
   /// 程序坞预览：按 ⌘Tab 切换时也在切换器上方弹窗口预览（2026-11-06 拍板 C2，默认开；程序坞预览关着时不生效）
   nonisolated static let dockPreviewCmdTab = "dockPreviewCmdTab"
 
+  /// 窗口管理，拖到屏幕边缘吸附。
+  nonisolated static let layoutSnapping = "layoutSnapping"
+  /// 窗口管理，拖离吸附区域时还原尺寸。
+  nonisolated static let layoutUnsnap = "layoutUnsnap"
+  /// 窗口管理，窗口之间的间距（点）。
+  nonisolated static let layoutGap = "layoutGap"
+  /// 窗口管理，屏幕边缘间距（点）。
+  nonisolated static let layoutEdgeGap = "layoutEdgeGap"
+  /// 窗口管理，放大缩小的尺寸步长（点）。
+  nonisolated static let layoutStep = "layoutStep"
+  /// 窗口管理，自定义宽度，0–1 为屏幕比例，其他为点。
+  nonisolated static let layoutWidth = "layoutWidth"
+  /// 窗口管理，自定义高度，0–1 为屏幕比例，其他为点。
+  nonisolated static let layoutHeight = "layoutHeight"
+  /// 窗口管理，接近最大化的比例。
+  nonisolated static let layoutAlmost = "layoutAlmost"
+  /// 窗口管理，层叠窗口的错位距离（点）。
+  nonisolated static let layoutCascade = "layoutCascade"
+  /// 窗口管理，待办窗口预留宽度（点）。
+  nonisolated static let layoutSidebar = "layoutSidebar"
+  /// 窗口管理，分区与条带按屏幕方向适配横竖排布。
+  nonisolated static let layoutPortrait = "layoutPortrait"
+  /// 窗口管理，跨屏时按可用区域比例映射位置和尺寸。
+  nonisolated static let layoutProportions = "layoutProportions"
+  /// 窗口管理，重复动作的七种策略，使用 WindowLayoutRepeat 的稳定存储名。
+  nonisolated static let layoutRepeat = "layoutRepeat"
+  /// 窗口管理，窗口管理停用的 App（bundle id 数组）。
+  nonisolated static let layoutIgnoredApps = "layoutIgnoredApps"
+  /// 窗口管理，八个边缘和角落的动作，按位置顺序用逗号分隔。
+  nonisolated static let layoutSnapAreas = "layoutSnapAreas"
+  /// 窗口管理，拖拽吸附所需修饰键，none / option / control / shift / command。
+  nonisolated static let layoutSnapModifier = "layoutSnapModifier"
+  /// 窗口管理，鼠标侧键的动作映射，JSON 数组。
+  nonisolated static let layoutMouseBindings = "layoutMouseBindings"
+  /// 窗口管理，新建窗口自动执行的动作，空字符串表示关闭。
+  nonisolated static let layoutNewWindowAction = "layoutNewWindowAction"
+  /// 窗口管理，双击标题栏执行的动作，空字符串表示关闭。
+  nonisolated static let layoutDoubleClick = "layoutDoubleClick"
+  /// 窗口管理，放大缩小时围绕窗口中心调整。
+  nonisolated static let layoutKeepCentered = "layoutKeepCentered"
+  /// 窗口管理，缩小和折半动作的最小宽度占屏幕比例。
+  nonisolated static let layoutMinimumWidth = "layoutMinimumWidth"
+  /// 窗口管理，缩小和折半动作的最小高度占屏幕比例。
+  nonisolated static let layoutMinimumHeight = "layoutMinimumHeight"
+
   /// 访达右键（第十一族，2026-11-08，FinderLink）：扩展把动作交过来时带的凭证（App 第一次启动时生成，FinderLink.ensureKey；
   /// 扩展从 App 的偏好里读）。这台电脑自己的、**不注册默认值**：不跟着导出 / 导入、同步走
   nonisolated static let finderMenuKey = "finderMenuKey"
@@ -473,6 +518,29 @@ enum Prefs {
       launchpadPinchSense: PinchRecognizer.Sensitivity.standard.rawValue,
       launchpadCorner: LaunchpadCornerOption.off.rawValue,
       dockPreviewDelay: 400,
+      layoutSnapping: true,
+      layoutUnsnap: true,
+      layoutGap: 0.0,
+      layoutEdgeGap: 0.0,
+      layoutStep: 30.0,
+      layoutWidth: 1680.0,
+      layoutHeight: 1050.0,
+      layoutAlmost: 0.9,
+      layoutCascade: 30.0,
+      layoutSidebar: 400.0,
+      layoutPortrait: true,
+      layoutProportions: true,
+      layoutRepeat: WindowLayoutRepeat.across.rawValue,
+      layoutIgnoredApps: [String](),
+      layoutSnapAreas:
+        "topLeft,maximize,topRight,leftHalf,rightHalf,bottomLeft,bottomHalf,bottomRight",
+      layoutSnapModifier: "none",
+      layoutMouseBindings: "[]",
+      layoutNewWindowAction: "",
+      layoutDoubleClick: "",
+      layoutKeepCentered: true,
+      layoutMinimumWidth: 0.25,
+      layoutMinimumHeight: 0.25,
       dockPreviewCmdTab: true,
       finderOpenWithApps: finderOpenWithDefault,
       panelSqueezeEntrance: false,

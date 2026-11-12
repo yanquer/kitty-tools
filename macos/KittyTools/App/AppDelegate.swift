@@ -234,6 +234,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }()
   private weak var builtWindowSwitcher: WindowSwitcher?
 
+  /// 独立窗口管理，关闭功能时停止鼠标监听并释放布局面板。
+  private lazy var windowLayout: WindowLayout = {
+    let layout = WindowLayout()
+    layout.isSuppressed = { [unowned self] in
+      isCapturing || statusScreen.isActive || recorder?.isCountingDown == true
+        || OverlayPanel.isSelectingRegion(in: NSApp.windows)
+        || (Feature.launchpad.isOn && launchpad.isOpen)
+    }
+    layout.onProblem = { [unowned self] detail in
+      island.show("窗口操作未完成", detail: detail, tone: .warning)
+    }
+    layout.onInfo = { [unowned self] detail in island.show("窗口管理", detail: detail) }
+    builtWindowLayout = layout
+    return layout
+  }()
+  private weak var builtWindowLayout: WindowLayout?
+
   /// 程序坞预览建过没有（空闲回收看它，别为了回收把关着的功能建出来，同 builtLauncherPanel）
   private weak var builtDockPreview: DockPreview?
 
@@ -814,6 +831,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       case .reminders: AnyView(RemindersTab())
       case .dockPreview: AnyView(DockPreviewTab())
       case .windowSwitcher: AnyView(WindowSwitcherTab())
+      case .windowLayout: AnyView(WindowLayoutTab(center: hotKeys))
       case .finderMenu: AnyView(FinderMenuTab())
       case .translate:
         AnyView(
@@ -1075,6 +1093,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 命令的快捷键跟着「命令和别名」的开关和别名、脚本命令总开关、⌘K「关掉这条命令」走（第 4 批评审：只在那一页的
         // onChange 里跟，别处改的不注销）；没变不动
         self.hotKeys.reloadCommandsIfChanged()
+        self.hotKeys.blocksChanged()
         // 提醒列表在偏好里：设置页改了、导入了、它自己删掉响过的一次性提醒，都从这里跟上（只比列表那一个键）
         if Feature.reminders.isOn { self.reminders.defaultsChanged() }
       }
@@ -1155,6 +1174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     if turnedOn.contains(.windowSwitcher) { windowSwitcher.start() }
+    if turnedOn.contains(.windowLayout) { windowLayout.start() }
 
     if turnedOn.contains(.dockPreview) {
       dockPreview.start()
@@ -1222,6 +1242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     if turnedOff.contains(.statusScreen) { statusPicker.panel?.hide() }
     if turnedOff.contains(.dockPreview) { dockPreview.stop() }
     if turnedOff.contains(.windowSwitcher) { builtWindowSwitcher?.stop() }
+    if turnedOff.contains(.windowLayout) { builtWindowLayout?.stop() }
     if turnedOff.contains(.reminders) { reminders.stop() }
     idleReclaim.schedule()  // 关掉的功能占着的缓存跟着还
   }
@@ -1373,6 +1394,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   func applicationWillTerminate(_ notification: Notification) {
     builtWindowSwitcher?.stop()
+    builtWindowLayout?.stop()
     guard isRunning else { return }
     FileMoves.forgetCut()  // 访达右键剪切的清单只在内存里：退出后扩展别再列「粘贴」
     statusScreen.exit(.quit)  // 在状态屏里被要求退出（远程、脚本）：拦截当场撤掉
@@ -1473,6 +1495,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   /// 快捷键「打开主界面」、启动器里那一项：开着、是 key 时再按一次 = 收起
   func toggleHome() {
     builtWindowSwitcher?.hide()
+    builtWindowLayout?.hide()
     if homePanel.isVisible && homePanel.isKeyWindow { return homePanel.dismiss() }
     showHome()
   }
@@ -1700,7 +1723,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ]
     .contains(action)
     if !switching { builtWindowSwitcher?.hide() }
+    if action != .windowLayoutPicker { builtWindowLayout?.hide() }
     switch action {
+    case .windowLayout(let layout):
+      windowLayout.run(layout, cycle: byKey ? hotKeys.layoutCycle(for: layout) : [])
+    case .windowLayoutPicker: windowLayout.showPicker()
     case .windowSwitch, .windowSwitchPrevious, .appWindowSwitch, .appWindowSwitchPrevious:
       if builtWindowSwitcher?.isOpen != true {
         builtClipboardPanel?.hide()
@@ -1760,6 +1787,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       "提醒建好了", detail: reminder.summary() + " · " + reminder.title, tone: .success,
       symbol: "checkmark.circle.fill",
       actions: [Island.Action("编辑", opens: true) { [unowned self] in openReminder(reminder.id) }])
+  }
+
+  /// 窗口布局按类型分组，动作仍经全局分发共享权限和功能开关。
+  private func addWindowLayoutMenu(to menu: NSMenu) {
+    let parent = menu.addAction(
+      "窗口管理", symbol: "rectangle.split.2x2", color: NSColor(Style.Family.dockPreview)
+    ) {}
+    let submenu = NSMenu()
+    submenu.addAction(
+      "选择布局…", symbol: "rectangle.split.2x2", color: NSColor(Style.Family.dockPreview)
+    ) { [unowned self] in run(.windowLayoutPicker) }
+    for group in ["分屏布局", "尺寸与位置", "显示器", "多个窗口", "细分网格"] {
+      let heading = submenu.addAction(
+        group, symbol: "square.grid.2x2", color: NSColor(Style.Family.dockPreview)
+      ) {}
+      let actions = NSMenu()
+      for action in WindowLayoutAction.allCases where action.group == group {
+        let global = HotKeyAction.windowLayout(action)
+        let key = hotKeys.bindings[global]
+        actions.addAction(
+          action.displayTitle, symbol: "rectangle", color: NSColor(Style.Family.dockPreview),
+          key: key?.menuKeyEquivalent ?? "", modifiers: key?.modifierFlags ?? []
+        ) {
+          [unowned self] in run(global)
+        }
+      }
+      heading.submenu = actions
+    }
+    submenu.addItem(.separator())
+    submenu.addAction("窗口管理设置…", symbol: "gearshape", color: NSColor(Style.Family.dockPreview)) {
+      [unowned self] in showSettings(page: .windowLayout)
+    }
+    parent.submenu = submenu
   }
 
   /// 菜单栏「提醒」一项带子菜单（提醒 D6）：新建提醒…（带全局快捷键）、下一个是什么、几分钟后提醒我、
@@ -2865,6 +2925,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     guard !isCapturing, !isReadingSelection else { return }
     isCapturing = true
     builtWindowSwitcher?.hide()
+    builtWindowLayout?.hide()
     // 启动台是全屏面板，截图 / 录屏的冻结帧里不能有它：先收掉（不留动画，别让它出现在冻结帧里）
     launchpad.close(animated: false)
     // 便签屏幕边缘扇着的那一列当场收起（先落盘），冻结帧里不留半截；打开着的便签是内容，照样截进去
@@ -3384,6 +3445,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   /// 三块浮层、选状态的面板、快速记一条、主界面都收起，固定着的也收（打开设置、打开全部便签、进入状态屏）
   private func hidePanels() {
     builtWindowSwitcher?.hide()
+    builtWindowLayout?.hide()
     launchpad.close(animated: false)
     builtHomePanel?.hide()
     builtClipboardPanel?.hide()
@@ -3426,6 +3488,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // 「打开主界面」不进菜单：菜单和主界面是同一个图标的两半（右键 / 左键）
     for (index, section) in HotKeyAction.sections.filter({ $0.actions != [.home] }).enumerated() {
       if index > 0 { menu.addItem(.separator()) }
+      if section.actions.first == .windowLayoutPicker {
+        addWindowLayoutMenu(to: menu)
+        continue
+      }
       if section.actions == [.reminderNew] {
         addReminderMenu(to: menu, isNew: freshActions.contains(.reminderNew))
         continue

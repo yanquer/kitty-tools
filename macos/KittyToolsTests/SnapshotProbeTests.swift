@@ -14,6 +14,73 @@ import UniformTypeIdentifiers
 //   TEST_RUNNER_KITTY_SNAPSHOT_ONLY=clip-,launcher-
 // 只出文件名以这些前缀开头的图（逗号分隔；别的图跳过渲染，各种摆设照做）。
 struct SnapshotProbeTests {
+  /// 窗口管理的设置和动作选择器只在屏外渲染，使用临时偏好，禁止操作真实窗口。
+  @Test(.enabled(if: directory != nil)) func windowLayout() throws {
+    guard let out = Self.directory else { return }
+    try FileManager.default.createDirectory(atPath: out, withIntermediateDirectories: true)
+    let name = "kitty-window-layout-snapshot-\(UUID())"
+    let defaults = try #require(UserDefaults(suiteName: name))
+    defer { defaults.removePersistentDomain(forName: name) }
+    defaults.register(defaults: Prefs.defaults)
+    defaults.set(true, forKey: Feature.windowLayout.prefsKey)
+    for dark in [false, true] {
+      let suffix = dark ? "-dark" : ""
+      try snapshot(
+        WindowLayoutTab(center: HotKeyCenter()).defaultAppStorage(defaults),
+        size: NSSize(width: 620, height: 760), dark: dark,
+        to: "\(out)/window-layout-settings\(suffix).png")
+      for (name, fraction) in [("middle", 0.5), ("bottom", 1.0)] {
+        try snapshot(
+          WindowLayoutTab(center: HotKeyCenter()).defaultAppStorage(defaults),
+          size: NSSize(width: 620, height: 760), dark: dark,
+          to: "\(out)/window-layout-settings-\(name)\(suffix).png"
+        ) { root in
+          /// 只滚动屏外表单，确认底部自动操作、快捷键和停用名单的排版。
+          @MainActor func scrollView(in view: NSView) -> NSScrollView? {
+            if let scroll = view as? NSScrollView { return scroll }
+            for child in view.subviews {
+              if let found = scrollView(in: child) { return found }
+            }
+            return nil
+          }
+          guard let scroll = scrollView(in: root), let document = scroll.documentView else {
+            Issue.record("窗口管理设置截图没有取得表单滚动区")
+            return
+          }
+          document.scroll(
+            NSPoint(x: 0, y: max(0, document.bounds.height - scroll.contentSize.height) * fraction))
+        }
+      }
+      defaults.set(false, forKey: Feature.windowLayout.prefsKey)
+      try snapshot(
+        WindowLayoutTab(center: HotKeyCenter()).defaultAppStorage(defaults),
+        size: NSSize(width: 620, height: 760), dark: dark,
+        to: "\(out)/window-layout-settings-disabled\(suffix).png")
+      defaults.set(true, forKey: Feature.windowLayout.prefsKey)
+      let model = WindowLayoutPickerModel()
+      model.targetName = "浏览器 · 示例文档"
+      try snapshot(
+        WindowLayoutPickerView(model: model), size: NSSize(width: 540, height: 460),
+        dark: dark, to: "\(out)/window-layout-picker\(suffix).png")
+      model.query = "十六分之一"
+      model.selected = model.results.first
+      try snapshot(
+        WindowLayoutPickerView(model: model), size: NSSize(width: 540, height: 460),
+        dark: dark, to: "\(out)/window-layout-grid\(suffix).png")
+      model.query = "没有这种布局"
+      try snapshot(
+        WindowLayoutPickerView(model: model), size: NSSize(width: 540, height: 460),
+        dark: dark, to: "\(out)/window-layout-empty\(suffix).png")
+      model.portrait = true
+      model.targetName = "浏览器 · 示例文档（竖屏）"
+      model.query = "六分之一"
+      model.selected = model.results.first
+      try snapshot(
+        WindowLayoutPickerView(model: model), size: NSSize(width: 540, height: 460),
+        dark: dark, to: "\(out)/window-layout-portrait\(suffix).png")
+    }
+  }
+
   /// 系统翻译三种模式的设置页，使用独立偏好域，屏外检查分段、安装入口和说明的布局。
   @Test(.enabled(if: directory != nil)) func appleTranslationSettings() throws {
     guard let out = Self.directory else { return }
@@ -556,6 +623,7 @@ struct SnapshotProbeTests {
       // 私有接口在不在按固定的「都在」画（图不跟着机器变）
       case .dockPreview: AnyView(DockPreviewTab(missing: []))
       case .windowSwitcher: AnyView(WindowSwitcherTab())
+      case .windowLayout: AnyView(WindowLayoutTab(center: HotKeyCenter()))
       case .finderMenu: AnyView(FinderMenuTab(extensionEnabled: false))
       case .translate:
         AnyView(TranslateTab(services: services, history: history, speaker: speaker))

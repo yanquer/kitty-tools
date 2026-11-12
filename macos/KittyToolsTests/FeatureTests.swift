@@ -205,7 +205,10 @@ struct FeatureTests {
 
   /// 开关注册了默认值（跟着导出的「设置」一类走），默认开；程序坞预览默认关（拍板 A3），访达右键默认关（2026-11-08 拍板 D2）
   @Test func switchesAreExportedSettings() {
-    #expect(Feature.allCases.filter { !$0.defaultOn } == [.dockPreview, .windowSwitcher, .finderMenu])
+    #expect(
+      Feature.allCases.filter { !$0.defaultOn } == [
+        .dockPreview, .windowSwitcher, .windowLayout, .finderMenu,
+      ])
     for feature in Feature.allCases {
       #expect(Prefs.defaults[feature.prefsKey] as? Bool == feature.defaultOn)
       #expect(SettingsArchive.kinds[feature.prefsKey] != nil)

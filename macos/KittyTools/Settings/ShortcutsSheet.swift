@@ -697,6 +697,15 @@ struct ShortcutsSheet: View {
           Entry("⌘M", text: "最小化或还原选中的窗口"),
           Entry("Esc", text: "取消切换"),
         ]),
+      Group(
+        title: "窗口管理", symbol: "rectangle.split.2x2", color: Style.Family.dockPreview,
+        globals: [.windowLayoutPicker] + WindowLayoutAction.allCases.map(HotKeyAction.windowLayout),
+        entries: [
+          Entry("↑↓", text: "布局选择器里选择动作"),
+          Entry("↩", text: "执行选中的窗口布局"),
+          Entry("Esc", text: "关闭布局选择器"),
+          Entry(text: "拖到屏幕边缘预览区域，松手吸附；在窗口管理设置中调整边缘动作和间距"),
+        ]),
       // 刘海岛（mac-whisker S2，2026-10-26）：不属于哪个功能，一直列
       Group(
         title: "刘海岛", symbol: HotKeyAction.island.symbol, color: Style.Family.general,

@@ -294,7 +294,7 @@ struct HistoryStoreTests {
     // 打开刘海岛（2026-10-26，不设默认键）再接在后面，晾衣绳（第十族，2026-10-26，不设默认键）接在后面，
     // 打开主界面（2026-10-29，不设默认键）接在后面，新建提醒（2026-11-04，不设默认键）接在最后
     #expect(
-      Array(HotKeyAction.allCases.suffix(14)) == [
+      Array(HotKeyAction.allCases.prefix(22).suffix(14)) == [
         .translateReplace, .screenRecord, .audioRecord, .pinClipboard, .statusScreen, .noteCapture,
         .noteNew, .noteAll, .launchpad, .shotHistory, .island, .clothesline, .home, .reminderNew,
       ])

@@ -23,7 +23,8 @@ struct SettingsListTests {
     #expect(
       pages == [
         .general, .clipboard, .launcher, .translate, .screenshot, .record, .notes, .reminders,
-        .statusScreen, .launchpad, .dockPreview, .windowSwitcher, .finderMenu, .hotkeys, .about,
+        .statusScreen, .launchpad, .dockPreview, .windowSwitcher, .windowLayout, .finderMenu,
+        .hotkeys, .about,
       ])
     // 分组盖住每一页、和 allCases 同序
     #expect(SettingsPage.groups.flatMap { $0 } == pages)
@@ -32,7 +33,8 @@ struct SettingsListTests {
       SettingsPage.sidebar(SettingsPage.visible(launchpad: false), off: []).map(\.pages)
         == [
           [.general], [.clipboard, .launcher, .translate], [.screenshot, .record],
-          [.notes, .reminders, .statusScreen], [.dockPreview, .windowSwitcher, .finderMenu],
+          [.notes, .reminders, .statusScreen],
+          [.dockPreview, .windowSwitcher, .windowLayout, .finderMenu],
           [.hotkeys, .about],
         ])
     #expect(
@@ -43,7 +45,7 @@ struct SettingsListTests {
     #expect(
       closed.map(\.pages) == [
         [.general], [.clipboard, .launcher, .translate], [.screenshot],
-        [.reminders, .statusScreen], [.windowSwitcher, .finderMenu],
+        [.reminders, .statusScreen], [.windowSwitcher, .windowLayout, .finderMenu],
         [.hotkeys, .about], [.record, .notes, .launchpad, .dockPreview],
       ])
     #expect(

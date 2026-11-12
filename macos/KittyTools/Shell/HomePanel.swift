@@ -74,7 +74,7 @@ enum Home {
     let extras = MenuExtra.allCases.filter { $0.section != nil && $0.isAvailable(state) }
     var result: [Section] = []
     for section in HotKeyAction.visibleSections(enabled: state.features) {
-      var tiles = section.actions.filter { $0 != .home }.map { action in
+      var tiles = section.actions.filter { $0 != .home && $0.layoutAction == nil }.map { action in
         Tile(
           target: .action(action), title: action.title(recording: state.recording == action),
           symbol: action.symbol, color: action.color, key: keys[action], isOn: nil,

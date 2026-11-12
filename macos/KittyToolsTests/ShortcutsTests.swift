@@ -95,7 +95,9 @@ struct ShortcutsTests {
       #expect(action.resolve { _ in nil } == hotKey)
     }
     let defaults = HotKeyAction.allCases.compactMap(\.defaultHotKey)
-    #expect(defaults.count == expected.count)
+    #expect(
+      defaults.count == expected.count
+        + WindowLayoutAction.allCases.filter { $0.defaultHotKey != nil }.count)
     #expect(Set(defaults).count == defaults.count)
     #expect(defaults.allSatisfy { $0.isUsable })
   }
@@ -133,7 +135,7 @@ struct ShortcutsTests {
     #expect(
       ShortcutsSheet.sections(groups) == [
         .clipboard, .launcher, .translate, .screenshot, .record, .notes, .reminders, .statusScreen,
-        .launchpad, .windowSwitcher, .general,
+        .launchpad, .windowSwitcher, .windowLayout, .general,
       ])
     #expect(groups.first { $0.title == "提醒" }?.page == .reminders)
     func page(_ title: String) -> SettingsPage? { groups.first { $0.title == title }?.page }

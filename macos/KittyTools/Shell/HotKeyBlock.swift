@@ -75,11 +75,16 @@ struct HotKeyBlock: Equatable {
   }
 
   /// 前台是这个 App 时停哪些；nil = 不停
-  static func rule(for bundleID: String?, in entries: [String]) -> Rule? {
-    guard let bundleID, let block = list(entries).first(where: { $0.bundleID == bundleID })
-    else { return nil }
-    guard block.actions != nil else { return .all }
-    let known = block.knownActions
+  static func rule(for bundleID: String?, in entries: [String], layoutIgnored: [String] = [])
+    -> Rule?
+  {
+    guard let bundleID else { return nil }
+    let block = list(entries).first(where: { $0.bundleID == bundleID })
+    if let block, block.actions == nil { return .all }
+    var known = block?.knownActions ?? []
+    if layoutIgnored.contains(bundleID) {
+      known.formUnion(HotKeyAction.allCases.filter { $0.feature == .windowLayout })
+    }
     return known.isEmpty ? nil : .only(known)
   }
 

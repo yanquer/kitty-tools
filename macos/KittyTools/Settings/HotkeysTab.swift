@@ -15,7 +15,18 @@ struct HotkeysTab: View {
     Form {
       ForEach(HotKeyAction.sections, id: \.title) { section in
         Section(section.title) {
-          ForEach(section.actions, id: \.self) { HotKeyRow(target: .global($0), center: center) }
+          if section.actions.first == .windowLayoutPicker {
+            HotKeyRow(target: .global(.windowLayoutPicker), center: center)
+            ForEach(["分屏布局", "细分网格", "尺寸与位置", "显示器", "多个窗口"], id: \.self) { group in
+              DisclosureGroup(group) {
+                ForEach(WindowLayoutAction.allCases.filter { $0.group == group }) { action in
+                  HotKeyRow(target: .global(.windowLayout(action)), center: center)
+                }
+              }
+            }
+          } else {
+            ForEach(section.actions, id: \.self) { HotKeyRow(target: .global($0), center: center) }
+          }
         }
       }
       if Feature.screenshot.isOn {
@@ -65,7 +76,7 @@ struct HotkeysTab: View {
 }
 
 /// 一行快捷键：色块 + 名字（出问题时下面一行橙字）+ 录制器
-private struct HotKeyRow: View {
+struct HotKeyRow: View {
   let target: KeyTarget
   let center: HotKeyCenter
   @State private var message: String?

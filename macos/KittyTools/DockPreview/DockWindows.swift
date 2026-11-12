@@ -33,6 +33,250 @@ struct DockWindow: Identifiable, Equatable {
 }
 
 @MainActor final class DockWindows {
+  /// 一次窗口布局操作的目标，辅助功能对象只在主线程的短会话里持有。
+  struct LayoutWindow {
+    let id: CGWindowID
+    let pid: pid_t
+    let element: AXUIElement
+    let frame: CGRect
+  }
+
+  /// 当前前台 App 的新窗口观察者，停用时同步移除主运行循环源。
+  final class LayoutObservation {
+    private var observer: AXObserver?
+    private let application: AXUIElement
+    private let pid: pid_t
+    private let onWindow: (LayoutWindow) -> Void
+    private var active = true
+    private var pending: [UUID: Task<Void, Never>] = [:]
+
+    /// 观察新建窗口，不接收标题、正文等内容属性。
+    init(app: NSRunningApplication, onWindow: @escaping (LayoutWindow) -> Void) throws {
+      pid = app.processIdentifier
+      application = AXUIElementCreateApplication(pid)
+      self.onWindow = onWindow
+      var created: AXObserver?
+      let status = AXObserverCreate(
+        pid,
+        { _, element, _, context in
+          guard let context else { return }
+          MainActor.assumeIsolated {
+            let owner = Unmanaged<LayoutObservation>.fromOpaque(context).takeUnretainedValue()
+            guard owner.active else { return }
+            owner.created(element)
+          }
+        }, &created)
+      guard status == .success, let created else {
+        throw DockWindows.problem(status, stage: "创建新窗口观察者")
+      }
+      AXUIElementSetMessagingTimeout(application, DockWatcher.messagingTimeout)
+      let added = AXObserverAddNotification(
+        created, application, kAXWindowCreatedNotification as CFString,
+        Unmanaged.passUnretained(self).toOpaque())
+      guard added == .success else { throw DockWindows.problem(added, stage: "观察新建窗口") }
+      observer = created
+      CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(created), .commonModes)
+    }
+
+    isolated deinit { stop() }
+
+    /// 移除观察通知和运行循环源，后续回调不会再触发窗口动作。
+    func stop() {
+      active = false
+      for task in pending.values { task.cancel() }
+      pending.removeAll()
+      guard let observer else { return }
+      AXObserverRemoveNotification(observer, application, kAXWindowCreatedNotification as CFString)
+      CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
+      self.observer = nil
+    }
+
+    /// 给目标应用一次初始布局的时间，随后只读取普通窗口，退出时取消待处理回调。
+    private func created(_ element: AXUIElement) {
+      guard pending.count < 32 else {
+        Log.windows.error("layout created window queue full pid=\(self.pid)")
+        return
+      }
+      let token = UUID()
+      pending[token] = Task { [weak self] in
+        do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
+        guard let self, active else { return }
+        defer { pending.removeValue(forKey: token) }
+        do {
+          guard
+            try DockWindows.checkedValue(element, kAXSubroleAttribute) as? String
+              == kAXStandardWindowSubrole,
+            try DockWindows.checkedValue(element, kAXMinimizedAttribute) as? Bool != true
+          else { return }
+          onWindow(try DockWindows.layoutWindow(element, pid: pid))
+        } catch {
+          Log.windows.error(
+            "layout created window read failed pid=\(self.pid) error=\(String(describing: error), privacy: .public)"
+          )
+        }
+      }
+    }
+  }
+
+  /// 读取指定 App 的焦点窗口，完整保留系统返回的失败原因。
+  static func layoutFocused(_ app: NSRunningApplication) throws -> LayoutWindow {
+    let application = AXUIElementCreateApplication(app.processIdentifier)
+    guard let raw = try checkedValue(application, kAXFocusedWindowAttribute),
+      CFGetTypeID(raw) == AXUIElementGetTypeID()
+    else { throw problem(.noValue, stage: "取得当前窗口") }
+    return try layoutWindow(raw as! AXUIElement, pid: app.processIdentifier)
+  }
+
+  /// 读取 App 的普通可见窗口，批量排布不处理最小化、全屏和无效窗口。
+  static func layoutWindows(_ app: NSRunningApplication) throws -> [LayoutWindow] {
+    let application = AXUIElementCreateApplication(app.processIdentifier)
+    let windows = try checkedValue(application, kAXWindowsAttribute) as? [AXUIElement] ?? []
+    var targets: [LayoutWindow] = []
+    for element in windows.prefix(128) {
+      guard try checkedValue(element, kAXSubroleAttribute) as? String == kAXStandardWindowSubrole,
+        try checkedValue(element, kAXMinimizedAttribute) as? Bool != true,
+        try checkedValue(element, "AXFullScreen") as? Bool != true
+      else { continue }
+      targets.append(try layoutWindow(element, pid: app.processIdentifier))
+    }
+    return targets
+  }
+
+  /// 命中指定 App 的窗口，供拖拽和鼠标侧键使用，不激活或抬起窗口。
+  static func layoutAt(_ point: CGPoint, app: NSRunningApplication) throws -> LayoutWindow? {
+    let application = AXUIElementCreateApplication(app.processIdentifier)
+    AXUIElementSetMessagingTimeout(application, DockWatcher.messagingTimeout)
+    var found: AXUIElement?
+    let status = AXUIElementCopyElementAtPosition(
+      application, Float(point.x), Float(point.y), &found)
+    guard status == .success else { throw problem(status, stage: "取得鼠标下的窗口") }
+    guard let found else { return nil }
+    if try checkedValue(found, kAXRoleAttribute) as? String == kAXWindowRole {
+      return try layoutWindow(found, pid: app.processIdentifier)
+    }
+    guard let raw = try checkedValue(found, kAXWindowAttribute),
+      CFGetTypeID(raw) == AXUIElementGetTypeID()
+    else { return nil }
+    return try layoutWindow(raw as! AXUIElement, pid: app.processIdentifier)
+  }
+
+  /// 只认标题或工具栏空白处的双击，按钮、标签页和正文元素保持原有行为。
+  static func layoutTitleBar(at point: CGPoint, app: NSRunningApplication) throws -> LayoutWindow? {
+    let application = AXUIElementCreateApplication(app.processIdentifier)
+    AXUIElementSetMessagingTimeout(application, DockWatcher.messagingTimeout)
+    var found: AXUIElement?
+    let status = AXUIElementCopyElementAtPosition(
+      application, Float(point.x), Float(point.y), &found)
+    guard status == .success else { throw problem(status, stage: "读取标题栏") }
+    guard let found, let window = try layoutAt(point, app: app),
+      point.y - window.frame.minY >= 0, point.y - window.frame.minY <= 40
+    else { return nil }
+    let role = try checkedValue(found, kAXRoleAttribute) as? String
+    if role == kAXToolbarRole || role == kAXWindowRole { return window }
+    if let title = try checkedValue(window.element, kAXTitleUIElementAttribute),
+      CFEqual(title, found)
+    {
+      return window
+    }
+    return nil
+  }
+
+  /// 核对普通窗口身份、有限尺寸与全屏状态，系统未返回编号时拒绝缓存身份。
+  private static func layoutWindow(_ element: AXUIElement, pid: pid_t) throws -> LayoutWindow {
+    guard try checkedValue(element, kAXRoleAttribute) as? String == kAXWindowRole,
+      try checkedValue(element, "AXFullScreen") as? Bool != true,
+      try checkedValue(element, kAXMinimizedAttribute) as? Bool != true
+    else { throw problem(.actionUnsupported, stage: "取得可布局的普通窗口") }
+    let frame = try layoutFrame(element)
+    let id: CGWindowID
+    if let known = WindowServer.windowID(of: element) {
+      id = known
+    } else {
+      let title = try checkedValue(element, kAXTitleAttribute) as? String ?? ""
+      let matches = serverEntries(pid: pid).filter {
+        $0.layer == 0 && WindowLayout.matches($0.frame, frame)
+          && (title.isEmpty || $0.title == title)
+      }
+      guard matches.count == 1, let matched = matches.first else {
+        throw problem(.actionUnsupported, stage: "核对目标窗口身份")
+      }
+      id = matched.id
+    }
+    return LayoutWindow(id: id, pid: pid, element: element, frame: frame)
+  }
+
+  /// 重新读取窗口实际位置和尺寸，供操作后验收及拖拽识别使用。
+  static func layoutFrame(_ element: AXUIElement) throws -> CGRect {
+    let origin = try checkedGeometry(element, kAXPositionAttribute, point: true)
+    let size = try checkedGeometry(element, kAXSizeAttribute, point: false)
+    let frame = CGRect(x: origin.width, y: origin.height, width: size.width, height: size.height)
+    guard WindowLayoutGeometry.valid(frame) else {
+      throw problem(.illegalArgument, stage: "读取窗口位置和尺寸")
+    }
+    return frame
+  }
+
+  /// 明确查询窗口是否支持尺寸写入，通信失败与不支持调整大小分别传递。
+  static func layoutCanResize(_ window: LayoutWindow) throws -> Bool {
+    AXUIElementSetMessagingTimeout(window.element, DockWatcher.messagingTimeout)
+    var settable = DarwinBoolean(false)
+    let status = AXUIElementIsAttributeSettable(
+      window.element, kAXSizeAttribute as CFString, &settable)
+    if status == .attributeUnsupported { return false }
+    guard status == .success else { throw problem(status, stage: "检查窗口是否可调整大小") }
+    return settable.boolValue
+  }
+
+  /// 读取动作选择器显示的目标标题，内容只展示在本机界面中。
+  static func layoutTitle(_ window: LayoutWindow) throws -> String? {
+    try checkedValue(window.element, kAXTitleAttribute) as? String
+  }
+
+  /// 写入尺寸和位置后再写一次尺寸，兼容跨屏时 App 按旧屏限制大小的行为。
+  static func layoutApply(_ frame: CGRect, to window: LayoutWindow) throws {
+    guard WindowLayoutGeometry.valid(frame) else {
+      throw problem(.illegalArgument, stage: "校验目标区域")
+    }
+    AXUIElementSetMessagingTimeout(window.element, DockWatcher.messagingTimeout)
+    var sizeSettable = DarwinBoolean(false)
+    var positionSettable = DarwinBoolean(false)
+    let sizeStatus = AXUIElementIsAttributeSettable(
+      window.element, kAXSizeAttribute as CFString, &sizeSettable)
+    let positionStatus = AXUIElementIsAttributeSettable(
+      window.element, kAXPositionAttribute as CFString, &positionSettable)
+    guard positionStatus == .success, positionSettable.boolValue else {
+      throw problem(
+        positionStatus == .success ? .attributeUnsupported : positionStatus, stage: "检查窗口是否可移动")
+    }
+    var size = frame.size
+    var point = frame.origin
+    let changes =
+      abs(window.frame.width - frame.width) > 1 || abs(window.frame.height - frame.height) > 1
+    if changes, sizeStatus != .success || !sizeSettable.boolValue {
+      throw problem(
+        sizeStatus == .success ? .attributeUnsupported : sizeStatus, stage: "检查窗口是否可调整大小")
+    }
+    if changes {
+      try layoutSet(AXValueCreate(.cgSize, &size), attribute: kAXSizeAttribute, on: window.element)
+    }
+    try layoutSet(
+      AXValueCreate(.cgPoint, &point), attribute: kAXPositionAttribute, on: window.element)
+    if changes {
+      try layoutSet(AXValueCreate(.cgSize, &size), attribute: kAXSizeAttribute, on: window.element)
+    }
+    try layoutSet(
+      AXValueCreate(.cgPoint, &point), attribute: kAXPositionAttribute, on: window.element)
+  }
+
+  /// 单个属性写入失败时向上保留原始 AX 错误，调用方记录阶段和回退结果。
+  private static func layoutSet(_ value: AXValue?, attribute: String, on element: AXUIElement)
+    throws
+  {
+    guard let value else { throw problem(.illegalArgument, stage: attribute) }
+    let status = AXUIElementSetAttributeValue(element, attribute as CFString, value)
+    guard status == .success else { throw problem(status, stage: attribute) }
+  }
+
   /// 最近一次列出来的窗口的辅助功能对象（切过去、关掉要用；别的桌面上的没有）
   private var elements: [CGWindowID: AXUIElement] = [:]
 
@@ -141,9 +385,19 @@ struct DockWindow: Identifiable, Equatable {
 
   /// 将系统错误转换为可跨界面传递的原始阶段和错误码。
   private static func problem(_ status: AXError, stage: String) -> NSError {
-    NSError(
+    let names = [
+      kAXPositionAttribute: "窗口位置", kAXSizeAttribute: "窗口大小",
+      kAXWindowsAttribute: "应用窗口列表", kAXFocusedWindowAttribute: "当前窗口",
+      kAXRoleAttribute: "窗口类型", kAXSubroleAttribute: "窗口子类型",
+      kAXMinimizedAttribute: "窗口最小化状态", kAXTitleAttribute: "窗口标题",
+      kAXTitleUIElementAttribute: "标题栏", "AXFullScreen": "窗口全屏状态",
+    ]
+    return NSError(
       domain: "KittyTools.WindowAccessibility", code: Int(status.rawValue),
-      userInfo: [NSLocalizedDescriptionKey: "\(stage)失败（系统代码 \(status.rawValue)）"])
+      userInfo: [
+        NSLocalizedDescriptionKey: "\(names[stage] ?? stage)失败（系统代码 \(status.rawValue)）",
+        "KittyTools.AXStage": stage,
+      ])
   }
 
   /// 提交目标窗口的激活操作；只能激活应用时明确返回失败，供调用方说明结果。

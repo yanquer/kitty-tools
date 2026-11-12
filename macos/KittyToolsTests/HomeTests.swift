@@ -101,8 +101,8 @@ struct HomeTests {
     state.features = all
     let sections = Home.sections(state: state, keys: [:])
     // 截图与录制折成两行；窗口切换四格成一节，前后的单格各自并行。
-    #expect(Home.rows(sections).map(\.count) == [3, 5, 5, 3, 3, 3, 4, 1])
-    #expect(Home.rows(sections).flatMap { $0 } == Array(0..<27))
+    #expect(Home.rows(sections).map(\.count) == [3, 5, 5, 3, 3, 3, 4, 2])
+    #expect(Home.rows(sections).flatMap { $0 } == Array(0..<28))
     let rows: CGFloat = 8
     let expected =
       Home.top + Home.bottom + 5 * Home.titleHeight + 2 * Home.untitledGap + rows * Home.tile.height

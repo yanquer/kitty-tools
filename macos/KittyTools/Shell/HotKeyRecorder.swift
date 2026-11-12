@@ -231,6 +231,7 @@ struct HotKeyRecorder: View {
     if let hotKey,
       let other = HotKeyAction.allCases.first(where: {
         $0 != action && $0.isAvailable && $0.hotKey == hotKey
+          && !action.sharesLayoutKey(with: $0, hotKey: hotKey)
       })
     {
       message =
@@ -249,6 +250,13 @@ struct HotKeyRecorder: View {
     // 别的行正在录（点了这一行的 ⓧ 或右键菜单）：热键先别恢复，等那一行录完 stop 时一起重新注册
     if isRecording { stop() } else if center.recording == nil { center.reload() }
     if let key = hotKey?.doubleTap { message = key.hint }
+    if let hotKey, action.layoutAction != nil,
+      HotKeyAction.allCases.contains(where: {
+        $0 != action && $0.layoutAction != nil && $0.hotKey == hotKey
+      })
+    {
+      message = "同一快捷键按动作顺序循环切换窗口布局"
+    }
   }
 
   /// 命令的快捷键：同全局动作的规矩，和全局动作、别的命令查重；存进「命令和别名」的那段 JSON

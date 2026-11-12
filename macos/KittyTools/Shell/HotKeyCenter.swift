@@ -165,11 +165,76 @@ struct HotKey: Codable, Hashable {
 }
 
 /// 追加动作只能加在末尾：注册时用 allCases 的下标当热键 id
-enum HotKeyAction: String, CaseIterable {
+enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
   case clipboard, selectionTranslate, inputTranslate, screenshotTranslate, launcher, screenshot,
     screenshotLastRegion, recognizeText, translateReplace, screenRecord, audioRecord, pinClipboard,
     statusScreen, noteCapture, noteNew, noteAll, launchpad, shotHistory, island, clothesline, home,
     reminderNew, windowSwitch, windowSwitchPrevious, appWindowSwitch, appWindowSwitchPrevious
+  case windowLayoutPicker
+  case windowLayout(WindowLayoutAction)
+
+  /// 保留旧动作的 Carbon 编号，新窗口动作只追加在末尾。
+  static let allCases: [Self] =
+    [
+      .clipboard, .selectionTranslate, .inputTranslate, .screenshotTranslate, .launcher,
+      .screenshot, .screenshotLastRegion, .recognizeText, .translateReplace, .screenRecord,
+      .audioRecord, .pinClipboard, .statusScreen, .noteCapture, .noteNew,
+      .noteAll, .launchpad, .shotHistory, .island, .clothesline,
+      .home, .reminderNew, .windowSwitch, .windowSwitchPrevious, .appWindowSwitch,
+      .appWindowSwitchPrevious,
+      .windowLayoutPicker,
+    ] + WindowLayoutAction.allCases.map(Self.windowLayout)
+
+  /// 稳定存储名兼容已有快捷键、命令别名和设置文件。
+  var rawValue: String {
+    switch self {
+    case .clipboard: "clipboard"
+    case .selectionTranslate: "selectionTranslate"
+    case .inputTranslate: "inputTranslate"
+    case .screenshotTranslate: "screenshotTranslate"
+    case .launcher: "launcher"
+    case .screenshot: "screenshot"
+    case .screenshotLastRegion: "screenshotLastRegion"
+    case .recognizeText: "recognizeText"
+    case .translateReplace: "translateReplace"
+    case .screenRecord: "screenRecord"
+    case .audioRecord: "audioRecord"
+    case .pinClipboard: "pinClipboard"
+    case .statusScreen: "statusScreen"
+    case .noteCapture: "noteCapture"
+    case .noteNew: "noteNew"
+    case .noteAll: "noteAll"
+    case .launchpad: "launchpad"
+    case .shotHistory: "shotHistory"
+    case .island: "island"
+    case .clothesline: "clothesline"
+    case .home: "home"
+    case .reminderNew: "reminderNew"
+    case .windowSwitch: "windowSwitch"
+    case .windowSwitchPrevious: "windowSwitchPrevious"
+    case .appWindowSwitch: "appWindowSwitch"
+    case .appWindowSwitchPrevious: "appWindowSwitchPrevious"
+    case .windowLayoutPicker: "windowLayoutPicker"
+    case .windowLayout(let action): "windowLayout." + action.rawValue
+    }
+  }
+
+  /// 从旧动作名或窗口布局动作名恢复，未知版本的动作仍返回空值。
+  init?(rawValue: String) {
+    guard let action = Self.allCases.first(where: { $0.rawValue == rawValue }) else { return nil }
+    self = action
+  }
+
+  /// 直接布局动作供主界面折叠为一个入口，启动器和快捷键页仍完整列出。
+  var layoutAction: WindowLayoutAction? {
+    if case .windowLayout(let action) = self { return action }
+    return nil
+  }
+
+  /// 窗口布局可共用一个普通组合并循环执行，其他功能和连按修饰键仍按冲突处理。
+  func sharesLayoutKey(with other: Self, hotKey: HotKey) -> Bool {
+    layoutAction != nil && other.layoutAction != nil && hotKey.doubleTap == nil
+  }
 
   var title: String {
     switch self {
@@ -199,6 +264,8 @@ enum HotKeyAction: String, CaseIterable {
     case .windowSwitchPrevious: "反向切换窗口"
     case .appWindowSwitch: "切换当前 App 的窗口"
     case .appWindowSwitchPrevious: "反向切换当前 App 的窗口"
+    case .windowLayoutPicker: "窗口管理"
+    case .windowLayout(let action): action.displayTitle
     }
   }
 
@@ -275,6 +342,8 @@ enum HotKeyAction: String, CaseIterable {
     case .appWindowSwitch: HotKey(keyCode: kVK_ANSI_Grave, modifiers: optionKey)
     case .appWindowSwitchPrevious:
       HotKey(keyCode: kVK_ANSI_Grave, modifiers: optionKey | shiftKey)
+    case .windowLayoutPicker: nil
+    case .windowLayout(let action): action.defaultHotKey
     }
   }
 
@@ -299,7 +368,10 @@ enum HotKeyAction: String, CaseIterable {
     let decode = { (data: Data) in try? JSONDecoder().decode(HotKey.self, from: data) }
     if let data = stored(self) { return decode(data) }
     guard let fallback = defaultHotKey,
-      !Self.allCases.contains(where: { $0 != self && stored($0).flatMap(decode) == fallback })
+      !Self.allCases.contains(where: {
+        $0 != self && stored($0).flatMap(decode) == fallback
+          && !sharesLayoutKey(with: $0, hotKey: fallback)
+      })
     else { return nil }
     return fallback
   }
@@ -339,6 +411,7 @@ enum HotKeyAction: String, CaseIterable {
     case .reminderNew: .reminders
     case .windowSwitch, .windowSwitchPrevious, .appWindowSwitch, .appWindowSwitchPrevious:
       .windowSwitcher
+    case .windowLayoutPicker, .windowLayout: .windowLayout
     case .island, .home: nil
     }
   }
@@ -372,6 +445,7 @@ enum HotKeyAction: String, CaseIterable {
     // 2026-11-04 起排在状态屏后面（和程序坞预览一组）
     ("启动台", [.launchpad]),
     ("窗口切换", [.windowSwitch, .windowSwitchPrevious, .appWindowSwitch, .appWindowSwitchPrevious]),
+    ("窗口管理", [.windowLayoutPicker] + WindowLayoutAction.allCases.map(Self.windowLayout)),
     // 刘海岛（2026-10-26）：不属于哪个功能、一直在
     ("刘海岛", [.island]),
     // 主界面（2026-10-29）：同刘海岛，一直在；菜单栏菜单里不列（菜单就是图标的另一半），主界面里也不列它自己
@@ -414,6 +488,7 @@ enum HotKeyAction: String, CaseIterable {
     case .home: "kitty.home"
     case .windowSwitch, .windowSwitchPrevious, .appWindowSwitch, .appWindowSwitchPrevious:
       "rectangle.on.rectangle"
+    case .windowLayoutPicker, .windowLayout: "rectangle.split.2x2"
     case .reminderNew: SettingsPage.reminders.symbol
     }
   }
@@ -434,6 +509,7 @@ enum HotKeyAction: String, CaseIterable {
     case .windowSwitch, .windowSwitchPrevious, .appWindowSwitch, .appWindowSwitchPrevious:
       Style.Family.dockPreview
     case .reminderNew: Style.Family.reminders
+    case .windowLayoutPicker, .windowLayout: Style.Family.dockPreview
     case .island, .home: Style.Family.general
     }
   }
@@ -504,6 +580,12 @@ enum HotKeyAction: String, CaseIterable {
     handlers[action] = handler
   }
 
+  /// 从当前已注册的绑定中读取共享布局组合，按键路径不逐项重读偏好。
+  func layoutCycle(for action: WindowLayoutAction) -> [WindowLayoutAction] {
+    guard let key = bindings[.windowLayout(action)] else { return [] }
+    return WindowLayoutAction.allCases.filter { bindings[.windowLayout($0)] == key }
+  }
+
   /// 按偏好重新注册全部热键
   func reload() {
     suspend()
@@ -513,8 +595,11 @@ enum HotKeyAction: String, CaseIterable {
     let trusted = Permissions.isAccessibilityTrusted
     trustedWhenLoaded = trusted
     watchFront()
-    let block = HotKeyBlock.rule(for: frontID, in: HotKeyBlock.stored)
+    let block = HotKeyBlock.rule(
+      for: frontID, in: HotKeyBlock.stored,
+      layoutIgnored: UserDefaults.standard.stringArray(forKey: Prefs.layoutIgnoredApps) ?? [])
     appliedBlock = block
+    var layoutAttempts: [HotKey: OSStatus] = [:]
     for (index, action) in HotKeyAction.allCases.enumerated() {
       guard action.isActive, let hotKey = action.hotKey else { continue }
       if block?.blocks(action) == true {
@@ -530,11 +615,16 @@ enum HotKeyAction: String, CaseIterable {
         }
         continue
       }
+      if action.layoutAction != nil, let status = layoutAttempts[hotKey] {
+        if status == noErr { bindings[action] = hotKey } else { failures[action] = status }
+        continue
+      }
       var ref: EventHotKeyRef?
       let status = RegisterEventHotKey(
         hotKey.keyCode, hotKey.modifiers,
         EventHotKeyID(signature: Self.signature, id: UInt32(index)), GetApplicationEventTarget(), 0,
         &ref)
+      if action.layoutAction != nil { layoutAttempts[hotKey] = status }
       if status == noErr, let ref {
         refs.append(ref)
         bindings[action] = hotKey
@@ -630,7 +720,10 @@ enum HotKeyAction: String, CaseIterable {
   private func frontChanged(_ bundleID: String?) {
     frontID = bundleID
     guard !suspended, handlerRef != nil,
-      HotKeyBlock.rule(for: bundleID, in: HotKeyBlock.stored) != appliedBlock
+      HotKeyBlock.rule(
+        for: bundleID, in: HotKeyBlock.stored,
+        layoutIgnored: UserDefaults.standard.stringArray(forKey: Prefs.layoutIgnoredApps) ?? [])
+        != appliedBlock
     else { return }
     reload()
   }

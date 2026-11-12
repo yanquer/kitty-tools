@@ -30,6 +30,7 @@ struct OnboardingView: View {
   static func permissions(for features: Set<Feature>) -> [Permissions.Kind] {
     let accessibility: Set<Feature> = [
       .clipboard, .launcher, .translate, .screenshot, .record, .statusScreen, .dockPreview,
+      .windowSwitcher, .windowLayout,
     ]
     let screenRecording: Set<Feature> = [.translate, .screenshot, .record, .dockPreview]
     return [
