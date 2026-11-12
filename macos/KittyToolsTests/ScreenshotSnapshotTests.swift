@@ -42,10 +42,16 @@ struct ScreenshotSnapshotTests {
     var h = capture()
     h.move(CGPoint(x: 330, y: 520))
     try shoot(h.window, "idle-window", crop: CGRect(x: 100, y: 340, width: 620, height: 460))
-    // 取色 RGB：长色值完整显示，信息卡变宽后放大镜居中，靠屏幕边缘仍能翻边。
+    // 取色格式切换只换文字，提示始终可见，HEX / RGB 的信息卡和放大镜保持同一尺寸和位置。
     h.modifiers(.shift)
     h.modifiers([])
     try shoot(h.window, "idle-window-rgb", crop: CGRect(x: 100, y: 300, width: 620, height: 500))
+    h.modifiers(.shift)
+    h.modifiers([])
+    try shoot(
+      h.window, "idle-window-hex-restored", crop: CGRect(x: 100, y: 300, width: 620, height: 500))
+    h.modifiers(.shift)
+    h.modifiers([])
     h.move(CGPoint(x: 1190, y: 10))
     try shoot(h.window, "idle-edge-rgb", crop: CGRect(x: 900, y: 0, width: 300, height: 260))
     h = Harness(mode: .record, image: desktop)

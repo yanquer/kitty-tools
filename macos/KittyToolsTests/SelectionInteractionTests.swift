@@ -1153,6 +1153,27 @@ struct SelectionInteractionTests {
     #expect(copied == (copiesRGB ? rgb : hex))
   }
 
+  /// 静止指针在屏幕中央、原来的翻边临界点及屏幕四角切换格式，整体尺寸和位置保持固定。
+  @Test(arguments: [SelectionView.Mode.capture, .record])
+  func colorFormatKeepsMagnifierFrameFixed(mode: SelectionView.Mode) {
+    let h = Harness(mode: mode)
+    #expect(h.view.accessibilityHelp()?.contains("Shift 切换 HEX / RGB") == true)
+    for point in [
+      CGPoint(x: 300.4, y: 300.6), CGPoint(x: 1000, y: 300),
+      CGPoint(x: 10, y: 10), CGPoint(x: 1190, y: 10),
+      CGPoint(x: 10, y: 790), CGPoint(x: 1190, y: 790),
+    ] {
+      h.move(point)
+      let frame = h.view.magnifierFrame
+      #expect(h.view.bounds.contains(frame))
+      for _ in 0..<4 {
+        h.modifiers(.shift)
+        h.modifiers([])
+        #expect(h.view.magnifierFrame == frame)
+      }
+    }
+  }
+
   /// 启动热键的松键、⇧ 组合键、滚轮和 ⇧ 拖选都不改变取色格式。
   @Test func colorFormatIgnoresModifierCombinationsAndDragging() throws {
     let h = Harness()

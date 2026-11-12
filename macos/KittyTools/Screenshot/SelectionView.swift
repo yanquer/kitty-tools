@@ -185,6 +185,7 @@ final class SelectionView: NSView, NSTextViewDelegate {
   private let infoSwatch = CALayer()
   private let infoText = CATextLayer()
   private let infoKey = CATextLayer()
+  private let infoFormatHint = CATextLayer()
   private var toolbar: EditorToolbar?
   private var styleBar: StyleBar?
   /// 录屏的录制条（截图工具栏的位置）
@@ -259,7 +260,7 @@ final class SelectionView: NSView, NSTextViewDelegate {
   /// 放大镜取样边长（像素，奇数才有中心）、每个像素放大后的边长（点）、下方信息卡高度
   private static let loupePixels = 15
   private static let loupeCell: CGFloat = 9
-  private static let infoHeight: CGFloat = 40
+  private static let infoHeight: CGFloat = 60
 
   init(
     image: CGImage, windows: [CGRect] = [], owners: [[pid_t]] = [], session: SelectionSession,
@@ -396,17 +397,21 @@ final class SelectionView: NSView, NSTextViewDelegate {
   static var loupeSide: CGFloat { CGFloat(loupePixels) * loupeCell }
   /// 整块放大镜多高：截图、录屏时是格子 + 6 + 信息卡，翻译 / 识字只有格子
   var magnifierHeight: CGFloat { magnifier.bounds.height }
+  /// 放大镜与信息卡的整体位置，屏外回归核对切换格式时尺寸和位置保持固定
+  var magnifierFrame: CGRect { magnifier.frame }
 
-  /// 中心格按亮度描黑或白；截图、录屏时下贴一张 40 pt 的 HUD 信息卡（色块 + 色值 + 坐标 +「C」键帽）。
+  /// 中心格按亮度描黑或白；截图、录屏时下贴一张 60 pt 的 HUD 信息卡（色块、色值、坐标、复制键和格式切换提示）。
   /// 截图翻译 / 识字只有放大镜本身、没有那张卡（2026-10-26 用户问「翻译识字时有必要出现吗」）：
   /// 这两种模式下用户要的是把文字框准，色值是噪音；而且那张卡上的「C」在这两种模式里本来就按不动
   /// （取色那一句在 keyDown 里被 `guard adjusts` 挡着）
   private func setUpMagnifier() {
     let side = CGFloat(Self.loupePixels) * Self.loupeCell
+    // 两种取色格式从一开始共用能容纳最长 RGB 的宽度，切换时只换文字，避免重新居中或触发翻边。
+    let width = adjusts ? max(side, 212) : side
     let cell = Self.loupeCell
     let middle = CGFloat(Self.loupePixels / 2) * cell
     let loupeFrame = CGRect(
-      x: 0, y: adjusts ? Self.infoHeight + 6 : 0, width: side, height: side)
+      x: (width - side) / 2, y: adjusts ? Self.infoHeight + 6 : 0, width: side, height: side)
     loupe.frame = loupeFrame
     loupe.magnificationFilter = .nearest
     loupe.cornerRadius = Style.Radius.card
@@ -455,20 +460,20 @@ final class SelectionView: NSView, NSTextViewDelegate {
     loupeCenter.strokeColor = NSColor.white.cgColor
     loupeCenter.lineWidth = 1
     for layer in [loupeBands, loupeGrid, loupeCenter] { loupe.addSublayer(layer) }
-    infoCard.frame = CGRect(x: 0, y: 0, width: side, height: Self.infoHeight)
+    infoCard.frame = CGRect(x: 0, y: 0, width: width, height: Self.infoHeight)
     Style.HUD.applySkin(to: infoCard, radius: Style.Radius.card)
     Style.HUD.applyShadow(
       to: infoCard,
       path: CGPath(
         roundedRect: infoCard.bounds, cornerWidth: Style.Radius.card,
         cornerHeight: Style.Radius.card, transform: nil))
-    infoSwatch.frame = CGRect(x: 10, y: 12, width: 16, height: 16)
+    infoSwatch.frame = CGRect(x: 10, y: Self.infoHeight - 28, width: 16, height: 16)
     infoSwatch.cornerRadius = 4
     infoSwatch.borderWidth = 0.5
     infoSwatch.borderColor = Style.HUD.swatchStroke.cgColor
-    infoText.frame = CGRect(x: 34, y: 5, width: side - 34 - 34, height: 30)
+    infoText.frame = CGRect(x: 34, y: Self.infoHeight - 35, width: width - 34 - 34, height: 30)
     infoText.isWrapped = false
-    infoKey.frame = CGRect(x: side - 30, y: 11, width: 20, height: 18)
+    infoKey.frame = CGRect(x: width - 30, y: Self.infoHeight - 29, width: 20, height: 18)
     infoKey.backgroundColor = Style.HUD.chipFill.cgColor
     infoKey.cornerRadius = 4
     infoKey.alignmentMode = .center
@@ -477,8 +482,14 @@ final class SelectionView: NSView, NSTextViewDelegate {
       attributes: [
         .font: Style.HUD.keyFont, .foregroundColor: Style.HUD.text, .baselineOffset: -2,
       ])
-    for layer in [infoSwatch, infoText, infoKey] { infoCard.addSublayer(layer) }
-    magnifier.bounds = CGRect(x: 0, y: 0, width: side, height: loupeFrame.maxY)
+    infoFormatHint.frame = CGRect(x: 10, y: 6, width: width - 20, height: 14)
+    infoFormatHint.string = NSAttributedString(
+      string: "⇧ 切换 HEX / RGB",
+      attributes: [
+        .font: NSFont.systemFont(ofSize: 11), .foregroundColor: Style.HUD.secondaryText,
+      ])
+    for layer in [infoSwatch, infoText, infoKey, infoFormatHint] { infoCard.addSublayer(layer) }
+    magnifier.bounds = CGRect(x: 0, y: 0, width: width, height: loupeFrame.maxY)
     magnifier.anchorPoint = CGPoint(x: 0.5, y: 0.5)
     for layer in adjusts ? [loupeShadow, loupe, infoCard] : [loupeShadow, loupe] {
       magnifier.addSublayer(layer)
@@ -565,7 +576,11 @@ final class SelectionView: NSView, NSTextViewDelegate {
   override func isAccessibilityElement() -> Bool { true }
   override func accessibilityRole() -> NSAccessibility.Role? { .group }
   override func accessibilityLabel() -> String? { accessibilityState }
-  override func accessibilityHelp() -> String? { hintParts.joined(separator: "，") }
+  /// 框选的读屏帮助同时提供取色格式的键位，截图翻译与识字沿用各自的框选提示。
+  override func accessibilityHelp() -> String? {
+    let colorHint = adjusts ? ["放大镜可见时，单按 Shift 切换 HEX / RGB"] : []
+    return (hintParts + colorHint).joined(separator: "，")
+  }
 
   /// 旁白读的状态：待选（悬停着窗口时带窗口尺寸）/ 选区像素尺寸，调整时加当前工具、锁着的比例
   private var accessibilityState: String {
@@ -623,6 +638,7 @@ final class SelectionView: NSView, NSTextViewDelegate {
       shade, spotlightDim, outline, outlineOuter, edgeHighlight, crossLight, crossDark, highlight,
       guideLayer,
       annotationOutline, annotationHandles, loupeGrid, loupeBands, loupeCenter, infoText, infoKey,
+      infoFormatHint,
     ] + Array(handleLayers.values) as [CALayer] {
       layer.contentsScale = scale
     }
@@ -1106,17 +1122,6 @@ final class SelectionView: NSView, NSTextViewDelegate {
         0.299 * color.redComponent + 0.587 * color.greenComponent + 0.114 * color.blueComponent
       loupeCenter.strokeColor = (luminance > 0.6 ? NSColor.black : NSColor.white).cgColor
       guard adjusts, let sampledColor else { return placeMagnifier() }  // 翻译 / 识字没有那张信息卡
-      // RGB 的最长文本按同一字号留足宽度，HEX 保持原来的尺寸；放大镜居中对齐信息卡。
-      let width = session.colorUsesRGB ? max(Self.loupeSide, 212) : Self.loupeSide
-      infoCard.frame.size.width = width
-      infoCard.shadowPath = CGPath(
-        roundedRect: infoCard.bounds, cornerWidth: Style.Radius.card,
-        cornerHeight: Style.Radius.card, transform: nil)
-      infoText.frame.size.width = width - 68
-      infoKey.frame.origin.x = width - 30
-      loupe.frame.origin.x = (width - Self.loupeSide) / 2
-      loupeShadow.frame.origin.x = loupe.frame.origin.x
-      magnifier.bounds.size.width = width
       let info = NSMutableAttributedString(
         string: sampledColor,
         attributes: [
