@@ -1839,17 +1839,18 @@ struct SnapshotProbeTests {
       let home = model(state, selection: 6, hovered: 1)
       try shot("home\(dark ? "-dark" : "")", HomeView(model: home), home, dark: dark)
     }
-    let small = model(state)
-    try snapshot(
-      HomeView(model: small),
-      size: NSSize(width: Home.width, height: Home.fittedHeight(small.size.height, available: 600)),
-      dark: false, to: "\(out)/home-small-screen.png")
     for (name, plugins) in [("home-default", Set<Feature>()), ("home-plugin-one", [.reminders])] {
       var fresh = state
       fresh.features = Feature.core.union(plugins)
       let home = model(fresh, off: Home.offCount(enabled: fresh.features, available: all))
       try shot(name, HomeView(model: home), home)
     }
+
+    let small = model(state)
+    try snapshot(
+      HomeView(model: small),
+      size: NSSize(width: Home.width, height: Home.fittedHeight(small.size.height, available: 600)),
+      dark: false, to: "\(out)/home-small-screen.png")
     var busy = LauncherItem.ActionState(
       recordingPaused: true, copyToTranslate: true, pinsHidden: false, recording: .screenRecord)
     busy.features = all
@@ -4976,33 +4977,8 @@ struct SnapshotProbeTests {
           to: "\(out)/sync-\(state)\(dark ? "-dark" : "").png")
       }
     }
-    // 自动加密密钥同步的状态，全部使用模拟钥匙串，避免系统提示或真实账户写入。
-    let secretStates: [(String, SecretSync.Status)] = [
-      ("preparing", .preparing), ("waiting", .waiting), ("ready", .ready),
-      ("failed", .failed("钥匙串访问失败（系统错误码 -34018）")), ("paused", .paused),
-    ]
-    for (state, status) in secretStates {
-      for dark in [false, true] {
-        try snapshot(
-          section { syncer in
-            let secrets = SecretSync(
-              services: TranslateServiceStore(services: [.zhipu]), defaults: prefs,
-              read: { _ in nil }, write: { _, _ in }, readCloudKey: { _ in nil },
-              addCloudKey: { _, _ in })
-            secrets.status = status
-            syncer.secretSync = secrets
-            syncer.status = .idle
-            syncer.lastSync = now
-          }, size: NSSize(width: 640, height: 1200), dark: dark,
-          to: "\(out)/sync-secrets-\(state)\(dark ? "-dark" : "").png")
-      }
-    }
-    prefs.set(false, forKey: Prefs.syncICloudEnabled)
-    try snapshot(
-      section { $0.status = .idle }, size: size, dark: false, to: "\(out)/sync-legacy-folder.png")
-    prefs.set(true, forKey: Prefs.syncICloudEnabled)
-
     // 连 WebDAV 服务器（issue #18）：服务器那一行、还有几个没拿下来 / 没传上去、请求太多、密码不对；连接的表单
+    prefs.set(false, forKey: Prefs.syncICloudEnabled)
     prefs.set(
       "https://dav.example.com/dav/Kitty%20Tools%20%E5%90%8C%E6%AD%A5/", forKey: Prefs.syncServer)
     prefs.set("kitty@example.com", forKey: Prefs.syncServerUser)
@@ -5050,6 +5026,32 @@ struct SnapshotProbeTests {
         size: NSSize(width: 460, height: 400), dark: dark,
         to: "\(out)/sync-server-form\(dark ? "-dark" : "").png")
     }
+
+    // 自动加密密钥同步的状态，全部使用模拟钥匙串，避免系统提示或真实账户写入。
+    let secretStates: [(String, SecretSync.Status)] = [
+      ("preparing", .preparing), ("waiting", .waiting), ("ready", .ready),
+      ("failed", .failed("钥匙串访问失败（系统错误码 -34018）")), ("paused", .paused),
+    ]
+    for (state, status) in secretStates {
+      for dark in [false, true] {
+        try snapshot(
+          section { syncer in
+            let secrets = SecretSync(
+              services: TranslateServiceStore(services: [.zhipu]), defaults: prefs,
+              read: { _ in nil }, write: { _, _ in }, readCloudKey: { _ in nil },
+              addCloudKey: { _, _ in })
+            secrets.status = status
+            syncer.secretSync = secrets
+            syncer.status = .idle
+            syncer.lastSync = now
+          }, size: NSSize(width: 640, height: 1200), dark: dark,
+          to: "\(out)/sync-secrets-\(state)\(dark ? "-dark" : "").png")
+      }
+    }
+    prefs.set(false, forKey: Prefs.syncICloudEnabled)
+    try snapshot(
+      section { $0.status = .idle }, size: size, dark: false, to: "\(out)/sync-legacy-folder.png")
+    prefs.set(true, forKey: Prefs.syncICloudEnabled)
     // 从只同步便签的版本升上来：新加的几类没勾、文件夹那一行多一句（第三轮体检 R1）
     prefs.removeObject(forKey: Prefs.syncSkipped)
     try snapshot(

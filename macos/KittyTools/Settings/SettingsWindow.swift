@@ -18,8 +18,9 @@ enum SettingsPage: String, CaseIterable, Identifiable {
   // 和菜单栏、快捷键页、引导、速查表同序（记住的上次页存的是 rawValue，调顺序不受影响）。2026-11-04 功能管理拍板 M3：
   // 便签、提醒、状态屏一组，启动台、程序坞预览一组（启动台原来在便签后面）
   // 2026-11-13 起便签之后都是插件（Feature.plugins），刘海岛（2026-11-12 PR #17 加的页）也成了插件、挪到最后
-  case general, clipboard, launcher, translate, screenshot, record, notes, reminders, statusScreen,
-    launchpad, dockPreview, windowSwitcher, windowLayout, finderMenu, island, hotkeys, about
+  case general, clipboard, launcher, translate, screenshot, record, notes, reminders,
+    statusScreen, launchpad, dockPreview, windowSwitcher, windowLayout, finderMenu, island, hotkeys,
+    about
 
   var id: String { rawValue }
 
@@ -31,8 +32,11 @@ enum SettingsPage: String, CaseIterable, Identifiable {
   /// 见 SettingsRoot），按这里的先后排、不按添加的先后
   static let groups: [[SettingsPage]] = [
     [.general], [.clipboard, .launcher, .translate], [.screenshot, .record],
-    [.notes, .reminders, .statusScreen,
-    .launchpad, .dockPreview, .windowSwitcher, .windowLayout, .finderMenu, .island],
+    [
+      .notes, .reminders, .statusScreen, .launchpad, .dockPreview, .windowSwitcher, .windowLayout,
+      .finderMenu,
+      .island,
+    ],
     [.hotkeys, .about],
   ]
 
@@ -62,7 +66,9 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     switch self {
     case .clipboard, .launcher, .translate: "文字与搜索"
     case .screenshot, .record: "截图与录制"
-    case .notes, .reminders, .statusScreen, .launchpad, .dockPreview, .windowSwitcher, .windowLayout, .finderMenu, .island:
+    case .notes, .reminders, .statusScreen, .launchpad, .dockPreview, .windowSwitcher,
+      .windowLayout, .finderMenu,
+      .island:
       "插件"
     case .general, .hotkeys, .about: nil
     }

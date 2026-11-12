@@ -16,6 +16,7 @@ nonisolated enum Log {
   static let island = Logger(subsystem: subsystem, category: "island")
   /// 刘海岛的正在播放（NowPlaying）：连不上服务、服务说 MediaRemote 不能用
   static let nowPlaying = Logger(subsystem: subsystem, category: "nowplaying")
+
   /// 窗口枚举、最近使用跟踪及窗口操作的原始系统错误。
   static let windows = Logger(subsystem: subsystem, category: "windows")
 }

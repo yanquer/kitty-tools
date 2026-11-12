@@ -55,7 +55,9 @@ nonisolated enum Feature: String, CaseIterable {
 
   /// 插件（2026-11-12 起新的大模块；2026-11-13 起除了核心五个都是）
   static let plugins: Set<Feature> = [
-    .notes, .reminders, .statusScreen, .launchpad, .dockPreview, .windowSwitcher, .windowLayout, .finderMenu, .island,
+    .notes, .reminders, .statusScreen, .launchpad, .dockPreview, .windowSwitcher, .windowLayout,
+    .finderMenu,
+    .island,
   ]
   var isPlugin: Bool { Self.plugins.contains(self) }
 
@@ -103,7 +105,9 @@ nonisolated enum Feature: String, CaseIterable {
   /// 新做的插件默认不添加（拍板 A1：新装、升级都不添加）。2026-11-13 从功能转过来的插件照旧用原来的默认值（P2：导出文件、
   /// 同步里「没有这一项 = 默认值」，改了的话 0.8.x 的文件、电脑会把没拨过的便签悄悄关掉）；刘海岛也算开着——0.7.0 起就有
   /// 点刘海，升级上来照旧能用。新装照样一个插件都没添加：seedNewInstall 把核心以外的都明写成关
-  var defaultOn: Bool { ![.dockPreview, .windowSwitcher, .windowLayout, .finderMenu].contains(self) }
+  var defaultOn: Bool {
+    ![.dockPreview, .windowSwitcher, .windowLayout, .finderMenu].contains(self)
+  }
 
   /// 新装默认开着的四个（功能管理拍板 M4）
   static let core: Set<Feature> = [.clipboard, .launcher, .translate, .screenshot]

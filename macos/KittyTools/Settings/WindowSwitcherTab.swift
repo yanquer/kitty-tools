@@ -10,7 +10,6 @@ struct WindowSwitcherTab: View {
   var body: some View {
     Form {
       Section {
-        FeatureToggle(feature: .windowSwitcher, inPage: true)
         ShortcutsButton()
       } header: {
         Text("窗口切换")
@@ -37,6 +36,7 @@ struct WindowSwitcherTab: View {
       } footer: {
         SectionFootnote("启用后开始记录窗口的使用顺序；启动时未观察到的历史使用顺序按系统窗口顺序显示。缩略图仅缓存在内存中，最多 20 张。")
       }
+      PluginRemoveSection(plugin: .windowSwitcher)
     }
     .formStyle(.grouped)
     .onSettingsBecameKey {
