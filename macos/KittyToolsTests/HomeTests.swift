@@ -11,12 +11,12 @@ struct HomeTests {
   private let all = Set(Feature.allCases)
 
   /// 全开：节名和菜单同名同序（「打开主界面」不列它自己）；每节末尾接那一节的开关；提醒、状态屏、启动台、刘海岛几个单格的节
-  /// 不画标题、并成最后一行；快捷键是传进来的那份，没设的空着
+  /// 不画标题，连续的单格并在一行，窗口切换单独成节；快捷键是传进来的那份，没设的空着
   @Test func sectionsFollowTheMenu() {
     var state = LauncherItem.ActionState(statusPresets: StatusPreset.builtIn)
     state.features = all
     let sections = Home.sections(state: state, keys: [.screenshot: "⌥A"])
-    #expect(sections.map(\.title) == ["剪贴板与启动器", "翻译", "截图与录制", "便签", nil])
+    #expect(sections.map(\.title) == ["剪贴板与启动器", "翻译", "截图与录制", "便签", nil, "窗口切换", nil])
     let tiles = sections.flatMap(\.tiles)
     #expect(!tiles.contains { $0.target == .action(.home) })
     #expect(
@@ -25,8 +25,8 @@ struct HomeTests {
       ])
     #expect(sections[1].tiles.last?.target == .extra(.copyToTranslate))
     #expect(
-      sections.last?.tiles.map(\.target) == [
-        .action(.reminderNew), .action(.statusScreen), .action(.launchpad), .action(.island),
+      sections[4].tiles.map(\.target) == [
+        .action(.reminderNew), .action(.statusScreen), .action(.launchpad),
       ])
     #expect(tiles.first { $0.target == .action(.screenshot) }?.key == "⌥A")
     #expect(tiles.first { $0.target == .action(.clipboard) }?.key == nil)
@@ -100,16 +100,22 @@ struct HomeTests {
     var state = LauncherItem.ActionState()
     state.features = all
     let sections = Home.sections(state: state, keys: [:])
-    // 3 / 5 / 8 / 3 / 4（截图与录制 8 格折成 5 + 3；最后一节是新建提醒、状态屏、启动台、刘海岛）
-    #expect(Home.rows(sections).map(\.count) == [3, 5, 5, 3, 3, 4])
-    #expect(Home.rows(sections).flatMap { $0 } == Array(0..<23))
-    let rows: CGFloat = 6
+    // 截图与录制折成两行；窗口切换四格成一节，前后的单格各自并行。
+    #expect(Home.rows(sections).map(\.count) == [3, 5, 5, 3, 3, 3, 4, 1])
+    #expect(Home.rows(sections).flatMap { $0 } == Array(0..<27))
+    let rows: CGFloat = 8
     let expected =
-      Home.top + Home.bottom + 4 * Home.titleHeight + Home.untitledGap + rows * Home.tile.height
-      + (rows - 5) * Home.gap + Home.barHeight
+      Home.top + Home.bottom + 5 * Home.titleHeight + 2 * Home.untitledGap + rows * Home.tile.height
+      + Home.gap + Home.barHeight
     #expect(Home.height(sections, offCount: 0) == expected)
     #expect(Home.height(sections, offCount: 2) == expected + Home.noteHeight)
     #expect(Home.width == 2 * Home.inset + 5 * Home.tile.width + 4 * Home.gap)
+  }
+
+  /// 所有功能启用后，较矮屏幕仍保留完整底栏和可滚动的网格。
+  @Test func heightFitsSmallScreen() {
+    #expect(Home.fittedHeight(788, available: 700) == 684)
+    #expect(Home.fittedHeight(606, available: 900) == 606)
   }
 
   /// 点菜单栏图标打开的挂在图标下面：右边对着图标的右边、顶边在菜单栏下面 6 pt；靠屏幕左边的图标往里挪

@@ -125,7 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // 还在出图、记历史，看标记的话绳子不先下来、挂上了也不出来）
     line.isSuppressed = { [unowned self] in
       statusScreen.isActive || Clothesline.isCovered(by: NSApp.windows)
-        || (Feature.launchpad.isOn && launchpad.isOpen)
+        || (Feature.launchpad.isOn && launchpad.isOpen) || builtWindowSwitcher?.isOpen == true
     }
     line.onHide = { [unowned self] in idleReclaim.schedule() }
     line.actions = shotActions
@@ -218,6 +218,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     builtDockPreview = preview
     return preview
   }()
+  /// 独立窗口切换器，后台只跟踪焦点，面板和缩略图按需建立。
+  private lazy var windowSwitcher: WindowSwitcher = {
+    let switcher = WindowSwitcher()
+    switcher.isSuppressed = { [unowned self] in
+      isCapturing || statusScreen.isActive || recorder?.isCountingDown == true
+        || OverlayPanel.isSelectingRegion(in: NSApp.windows)
+    }
+    switcher.onHide = { [unowned self] in idleReclaim.schedule() }
+    switcher.onProblem = { [unowned self] detail in
+      island.show("窗口操作未完成", detail: detail, tone: .warning)
+    }
+    builtWindowSwitcher = switcher
+    return switcher
+  }()
+  private weak var builtWindowSwitcher: WindowSwitcher?
+
   /// 程序坞预览建过没有（空闲回收看它，别为了回收把关着的功能建出来，同 builtLauncherPanel）
   private weak var builtDockPreview: DockPreview?
 
@@ -378,6 +394,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ThumbnailView.dropPreviews()
     // 程序坞预览关着也放（R10：原来只在开着时放，关掉之后弹过的面板一直留着）；没建过就不建
     builtDockPreview?.reclaim()
+    builtWindowSwitcher?.reclaim()
     // 截图关着也放（R10：原来只在开着时放，关掉截图之后那块面板一直留着）；历史的缩略图只留挂在绳子上的那几张
     clothesline.reclaim()
     ShotThumbnails.shared.keep(only: clothesline.model.pegged)
@@ -796,6 +813,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       case .statusScreen: AnyView(StatusScreenTab())
       case .reminders: AnyView(RemindersTab())
       case .dockPreview: AnyView(DockPreviewTab())
+      case .windowSwitcher: AnyView(WindowSwitcherTab())
       case .finderMenu: AnyView(FinderMenuTab())
       case .translate:
         AnyView(
@@ -1136,6 +1154,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       FinderMenuTab.openExtensionSettings()
     }
 
+    if turnedOn.contains(.windowSwitcher) { windowSwitcher.start() }
+
     if turnedOn.contains(.dockPreview) {
       dockPreview.start()
       // 运行中打开时缺授权就带去授权（拍板 A3）：先要辅助功能（没有它用不了），有了再要屏幕录制（没有只列标题）；
@@ -1201,6 +1221,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     if turnedOff.contains(.launchpad) { launchpad.turnOff() }
     if turnedOff.contains(.statusScreen) { statusPicker.panel?.hide() }
     if turnedOff.contains(.dockPreview) { dockPreview.stop() }
+    if turnedOff.contains(.windowSwitcher) { builtWindowSwitcher?.stop() }
     if turnedOff.contains(.reminders) { reminders.stop() }
     idleReclaim.schedule()  // 关掉的功能占着的缓存跟着还
   }
@@ -1348,6 +1369,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   func applicationWillTerminate(_ notification: Notification) {
+    builtWindowSwitcher?.stop()
     guard isRunning else { return }
     FileMoves.forgetCut()  // 访达右键剪切的清单只在内存里：退出后扩展别再列「粘贴」
     statusScreen.exit(.quit)  // 在状态屏里被要求退出（远程、脚本）：拦截当场撤掉
@@ -1447,6 +1469,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   /// 快捷键「打开主界面」、启动器里那一项：开着、是 key 时再按一次 = 收起
   func toggleHome() {
+    builtWindowSwitcher?.hide()
     if homePanel.isVisible && homePanel.isKeyWindow { return homePanel.dismiss() }
     showHome()
   }
@@ -1474,10 +1497,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       offCount: Home.offCount(
         enabled: Feature.enabled, available: Set(Feature.allCases.filter(\.isAvailable))),
       settingsIsNew: WhatsNew.inSettingsOnly(fresh), appearing: appearing)
+    let screen =
+      NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
+    let height = Home.fittedHeight(
+      homeModel.size.height, available: screen?.visibleFrame.height ?? 700)
     if appearing {
-      homePanel.setContentSize(homeModel.size)
+      homePanel.setContentSize(CGSize(width: homeModel.size.width, height: height))
     } else {
-      homePanel.setContentHeight(homeModel.size.height, animated: true)
+      homePanel.setContentHeight(height, animated: true)
     }
   }
 
@@ -1665,7 +1692,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     if action != .launchpad, launchpad.isOpen { launchpad.close(animated: false) }
     // 主界面开着时按了别的功能（快捷键）：先收起它（从主界面点的，它已经收了）
     if action != .home { builtHomePanel?.hide() }
+    let switching = [
+      .windowSwitch, .windowSwitchPrevious, .appWindowSwitch, .appWindowSwitchPrevious,
+    ]
+    .contains(action)
+    if !switching { builtWindowSwitcher?.hide() }
     switch action {
+    case .windowSwitch, .windowSwitchPrevious, .appWindowSwitch, .appWindowSwitchPrevious:
+      if builtWindowSwitcher?.isOpen != true {
+        builtClipboardPanel?.hide()
+        builtLauncherPanel?.hide()
+        statusPicker.panel?.hide()
+        noteCapture?.panel.hide()
+        builtTranslatePanel?.hideUnlessPinned()
+      }
+      windowSwitcher.show(action, byKey: byKey)
     case .clipboard: toggleClipboard()
     case .launcher: toggleLauncher()
     case .selectionTranslate: selectionTranslate()
@@ -2820,6 +2861,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private func beginCapture(hidingPanels: Bool, _ work: @escaping () async -> Void) {
     guard !isCapturing, !isReadingSelection else { return }
     isCapturing = true
+    builtWindowSwitcher?.hide()
     // 启动台是全屏面板，截图 / 录屏的冻结帧里不能有它：先收掉（不留动画，别让它出现在冻结帧里）
     launchpad.close(animated: false)
     // 便签屏幕边缘扇着的那一列当场收起（先落盘），冻结帧里不留半截；打开着的便签是内容，照样截进去
@@ -3338,6 +3380,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   /// 三块浮层、选状态的面板、快速记一条、主界面都收起，固定着的也收（打开设置、打开全部便签、进入状态屏）
   private func hidePanels() {
+    builtWindowSwitcher?.hide()
     launchpad.close(animated: false)
     builtHomePanel?.hide()
     builtClipboardPanel?.hide()

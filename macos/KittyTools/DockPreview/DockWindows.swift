@@ -11,6 +11,7 @@
 
 import AppKit
 import ApplicationServices
+import OSLog
 
 /// 预览里的一扇窗口
 struct DockWindow: Identifiable, Equatable {
@@ -59,73 +60,173 @@ struct DockWindow: Identifiable, Equatable {
   /// 小于这个（点）的不算普通窗口
   static let minimumSide: CGFloat = 100
 
-  /// 列出 App 的窗口（按打开先后，最小化的在后）。没有辅助功能授权时空
-  func list(_ app: NSRunningApplication) -> [DockWindow] {
+  /// 最近一次读取或操作的原始错误；调用方据此区分失败与有效空结果。
+  private(set) var lastError: NSError?
+
+  /// 列出窗口，可共用一次取得的窗口服务器全表；遇到无响应的进程立即结束本次读取。
+  func list(_ app: NSRunningApplication, serverInfo: [[String: Any]]? = nil) -> [DockWindow] {
     elements = [:]
-    guard Permissions.isAccessibilityTrusted else { return [] }
-    let pid = app.processIdentifier
-    let appElement = AXUIElementCreateApplication(pid)
-    let windows = DockWatcher.value(appElement, kAXWindowsAttribute) as? [AXUIElement] ?? []
-    var axEntries: [AXEntry] = []
-    for window in windows {
-      let origin = DockWatcher.point(window, kAXPositionAttribute) ?? .zero
-      let size = DockWatcher.size(window, kAXSizeAttribute) ?? .zero
-      axEntries.append(
-        AXEntry(
-          id: WindowServer.windowID(of: window),
-          title: DockWatcher.value(window, kAXTitleAttribute) as? String ?? "",
-          subrole: DockWatcher.value(window, kAXSubroleAttribute) as? String ?? "",
-          minimized: DockWatcher.value(window, kAXMinimizedAttribute) as? Bool ?? false,
-          frame: CGRect(origin: origin, size: size)))
+    lastError = nil
+    guard Permissions.isAccessibilityTrusted else {
+      lastError = Self.problem(.apiDisabled, stage: "辅助功能授权")
+      return []
     }
-    let server = Self.serverEntries(pid: pid)
-    let ids = Self.resolveIDs(axEntries, server: server)
-    for (index, window) in windows.enumerated() {
-      if let id = ids[index] { elements[id] = window }
+    let began = CACurrentMediaTime()
+    do {
+      let appElement = AXUIElementCreateApplication(app.processIdentifier)
+      let windows = try Self.checkedValue(appElement, kAXWindowsAttribute) as? [AXUIElement] ?? []
+      var axEntries: [AXEntry] = []
+      for window in windows {
+        let origin = try Self.checkedGeometry(window, kAXPositionAttribute, point: true)
+        let size = try Self.checkedGeometry(window, kAXSizeAttribute, point: false)
+        let id = WindowServer.windowID(of: window)
+        axEntries.append(
+          AXEntry(
+            id: id, title: try Self.checkedValue(window, kAXTitleAttribute) as? String ?? "",
+            subrole: try Self.checkedValue(window, kAXSubroleAttribute) as? String ?? "",
+            minimized: try Self.checkedValue(window, kAXMinimizedAttribute) as? Bool ?? false,
+            frame: CGRect(x: origin.width, y: origin.height, width: size.width, height: size.height)
+          ))
+      }
+      let server = Self.serverEntries(pid: app.processIdentifier, info: serverInfo)
+      let ids = Self.resolveIDs(axEntries, server: server)
+      for (index, window) in windows.enumerated() {
+        if let id = ids[index] { elements[id] = window }
+      }
+      for index in axEntries.indices { axEntries[index].id = ids[index] }
+      return Self.merge(ax: axEntries, server: server, appHidden: app.isHidden)
+    } catch {
+      lastError = error as NSError
+      Log.windows.error(
+        "list failed pid=\(app.processIdentifier) elapsed=\(CACurrentMediaTime() - began) error=\(String(describing: error), privacy: .public)"
+      )
+      return []
     }
-    for index in axEntries.indices { axEntries[index].id = ids[index] }
-    return Self.merge(ax: axEntries, server: server, appHidden: app.isHidden)
   }
 
-  /// 切到那扇窗口
-  func focus(_ window: DockWindow, of app: NSRunningApplication) {
-    let element = elements[window.id]
+  /// 读取辅助功能属性，保留原始错误码；可选属性没有值时返回 nil。
+  private static func checkedValue(_ element: AXUIElement, _ attribute: String) throws -> AnyObject?
+  {
+    AXUIElementSetMessagingTimeout(element, DockWatcher.messagingTimeout)
+    var value: CFTypeRef?
+    let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+    guard status == .success || status == .noValue || status == .attributeUnsupported else {
+      throw problem(status, stage: attribute)
+    }
+    return value
+  }
+
+  /// 读取窗口位置或大小，并核对系统返回值的类型。
+  private static func checkedGeometry(
+    _ element: AXUIElement, _ attribute: String, point: Bool
+  ) throws -> CGSize {
+    guard let value = try checkedValue(element, attribute) else { return .zero }
+    guard CFGetTypeID(value) == AXValueGetTypeID() else {
+      throw problem(.illegalArgument, stage: attribute)
+    }
+    let ax = value as! AXValue
+    if point {
+      var result = CGPoint.zero
+      guard AXValueGetValue(ax, .cgPoint, &result) else {
+        throw problem(.illegalArgument, stage: attribute)
+      }
+      return CGSize(width: result.x, height: result.y)
+    }
+    var result = CGSize.zero
+    guard AXValueGetValue(ax, .cgSize, &result) else {
+      throw problem(.illegalArgument, stage: attribute)
+    }
+    return result
+  }
+
+  /// 将系统错误转换为可跨界面传递的原始阶段和错误码。
+  private static func problem(_ status: AXError, stage: String) -> NSError {
+    NSError(
+      domain: "KittyTools.WindowAccessibility", code: Int(status.rawValue),
+      userInfo: [NSLocalizedDescriptionKey: "\(stage)失败（系统代码 \(status.rawValue)）"])
+  }
+
+  /// 提交目标窗口的激活操作；只能激活应用时明确返回失败，供调用方说明结果。
+  @discardableResult func focus(_ window: DockWindow, of app: NSRunningApplication) -> Bool {
+    lastError = nil
     if app.isHidden { app.unhide() }
-    if window.state == .minimized, let element {
-      AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
-    }
-    if !WindowServer.bringToFront(pid: app.processIdentifier, window: window.id) {
-      app.activate()
-    }
+    let element = elements[window.id]
+    if window.state == .minimized, !setMinimized(false, window: window) { return false }
+    let exact = WindowServer.bringToFront(pid: app.processIdentifier, window: window.id)
+    if !exact { app.activate() }
     if let element {
-      AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue)
-      AXUIElementPerformAction(element, kAXRaiseAction as CFString)
+      let main = AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue)
+      let raised = AXUIElementPerformAction(element, kAXRaiseAction as CFString)
+      if raised == .success { return true }
+      if !exact { return failed(raised, stage: "抬起窗口", id: window.id) }
+      Log.windows.notice(
+        "focus AX fallback id=\(window.id) main=\(main.rawValue) raise=\(raised.rawValue)")
     }
+    guard exact else { return failed(.cannotComplete, stage: "应用已激活，目标窗口未确认", id: window.id) }
+    return true
   }
 
-  /// 能不能关（拿得到它的关闭钮）
+  /// 能取得辅助功能对象时，才提供窗口管理操作。
+  func canManage(_ window: DockWindow) -> Bool { elements[window.id] != nil }
+
+  /// 能否取得关闭钮；其他桌面的窗口可能只支持切换。
   func canClose(_ window: DockWindow) -> Bool {
     guard let element = elements[window.id] else { return false }
     return DockWatcher.value(element, kAXCloseButtonAttribute) != nil
   }
 
-  /// 按那扇窗口的关闭钮；按不了时 false
+  /// 按窗口关闭钮，失败保留系统原始原因；关闭请求可能由目标应用转为保存确认。
   @discardableResult func close(_ window: DockWindow) -> Bool {
-    guard let element = elements[window.id],
-      let button = DockWatcher.value(element, kAXCloseButtonAttribute),
-      CFGetTypeID(button) == AXUIElementGetTypeID()
-    else { return false }
-    let press = button as! AXUIElement
-    AXUIElementSetMessagingTimeout(press, DockWatcher.messagingTimeout)
-    return AXUIElementPerformAction(press, kAXPressAction as CFString) == .success
+    lastError = nil
+    guard let element = elements[window.id] else {
+      return failed(.invalidUIElement, stage: "取得窗口", id: window.id)
+    }
+    do {
+      guard let button = try Self.checkedValue(element, kAXCloseButtonAttribute),
+        CFGetTypeID(button) == AXUIElementGetTypeID()
+      else { return failed(.actionUnsupported, stage: "取得关闭按钮", id: window.id) }
+      let press = button as! AXUIElement
+      AXUIElementSetMessagingTimeout(press, DockWatcher.messagingTimeout)
+      let status = AXUIElementPerformAction(press, kAXPressAction as CFString)
+      return status == .success || failed(status, stage: "关闭窗口", id: window.id)
+    } catch {
+      lastError = error as NSError
+      Log.windows.error(
+        "close failed id=\(window.id) error=\(String(describing: error), privacy: .public)")
+      return false
+    }
+  }
+
+  /// 设置最小化状态，目标不支持或系统拒绝时返回原始错误。
+  @discardableResult func setMinimized(_ minimized: Bool, window: DockWindow) -> Bool {
+    lastError = nil
+    guard let element = elements[window.id] else {
+      return failed(.invalidUIElement, stage: "取得窗口", id: window.id)
+    }
+    AXUIElementSetMessagingTimeout(element, DockWatcher.messagingTimeout)
+    let status = AXUIElementSetAttributeValue(
+      element, kAXMinimizedAttribute as CFString, minimized ? kCFBooleanTrue : kCFBooleanFalse)
+    return status == .success || failed(status, stage: "设置最小化", id: window.id)
+  }
+
+  /// 统一记录操作失败的阶段、窗口编号和原始系统错误。
+  private func failed(_ status: AXError, stage: String, id: CGWindowID) -> Bool {
+    lastError = Self.problem(status, stage: stage)
+    Log.windows.error(
+      "window operation failed id=\(id) stage=\(stage, privacy: .public) AXError=\(status.rawValue)"
+    )
+    return false
   }
 
   // MARK: 窗口服务器的全表
 
   /// 窗口服务器全表里这个 App 的窗口（含别的桌面上的、最小化的、关掉却留着的）
-  private static func serverEntries(pid: pid_t) -> [ServerEntry] {
+  private static func serverEntries(pid: pid_t, info supplied: [[String: Any]]? = nil)
+    -> [ServerEntry]
+  {
     let info =
-      CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID)
+      supplied ?? CGWindowListCopyWindowInfo(
+        [.optionAll, .excludeDesktopElements], kCGNullWindowID)
       as? [[String: Any]] ?? []
     return info.compactMap { window in
       guard window[kCGWindowOwnerPID as String] as? Int32 == pid,

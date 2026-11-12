@@ -809,6 +809,7 @@ private final class Probe {
         case .statusScreen: AnyView(StatusScreenTab())
         case .reminders: AnyView(EmptyView())
         case .dockPreview: AnyView(DockPreviewTab())
+        case .windowSwitcher: AnyView(WindowSwitcherTab())
         case .finderMenu: AnyView(FinderMenuTab(extensionEnabled: false))
         case .translate:
           AnyView(TranslateTab(services: services, history: history, speaker: speaker))

@@ -534,6 +534,7 @@ struct SnapshotProbeTests {
       case .reminders: AnyView(RemindersTab(fixed: Reminder.examples))
       // 私有接口在不在按固定的「都在」画（图不跟着机器变）
       case .dockPreview: AnyView(DockPreviewTab(missing: []))
+      case .windowSwitcher: AnyView(WindowSwitcherTab())
       case .finderMenu: AnyView(FinderMenuTab(extensionEnabled: false))
       case .translate:
         AnyView(TranslateTab(services: services, history: history, speaker: speaker))
@@ -1508,6 +1509,11 @@ struct SnapshotProbeTests {
       let home = model(state, selection: 8, hovered: 1)
       try shot("home\(dark ? "-dark" : "")", HomeView(model: home), home, dark: dark)
     }
+    let small = model(state)
+    try snapshot(
+      HomeView(model: small),
+      size: NSSize(width: Home.width, height: Home.fittedHeight(small.size.height, available: 600)),
+      dark: false, to: "\(out)/home-small-screen.png")
     var busy = LauncherItem.ActionState(
       recordingPaused: true, copyToTranslate: true, pinsHidden: false, recording: .screenRecord)
     busy.features = all
@@ -4555,6 +4561,63 @@ struct SnapshotProbeTests {
   }
 
   /// 程序坞预览（第九族第 2 批）：面板（程序坞在下面 / 左边、窗口多到要滚、没有屏幕录制授权、长标题），浅深各一份；
+  /// 窗口切换器的浅深色、搜索、空结果、读取失败和小屏布局，屏外渲染且不读取真实窗口。
+  @Test(.enabled(if: directory != nil)) func windowSwitcher() throws {
+    let out = try #require(Self.directory)
+    try FileManager.default.createDirectory(atPath: out, withIntermediateDirectories: true)
+    let model = WindowSwitcherModel()
+    model.screenRecording = true
+    var windows: [SwitchWindow] = []
+    let states: [DockWindow.State] = [.shown, .shown, .minimized, .hidden, .elsewhere]
+    let names = ["浏览器", "文本编辑", "项目工作区"]
+    for index in 1...18 {
+      let title = index == 2 ? "很长的项目文档标题，检查窗口标题在窄卡片中的截断方式与归属展示" : "项目文档 \(index)"
+      let state: DockWindow.State = index <= states.count ? states[index - 1] : .shown
+      let window = DockWindow(
+        id: CGWindowID(index), title: title, state: state,
+        size: CGSize(width: 1200, height: 800))
+      windows.append(SwitchWindow(window: window, pid: pid_t(index % 3), appName: names[index % 3]))
+    }
+    model.windows = windows
+    model.icons[0] = NSImage(systemSymbolName: "globe", accessibilityDescription: nil)
+    model.icons[1] = NSImage(systemSymbolName: "doc.text", accessibilityDescription: nil)
+    model.icons[2] = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
+    model.selectedID = 2
+    model.manageable = [1, 2, 3, 4]
+    model.closable = [1, 2, 3, 4]
+    for dark in [false, true] {
+      try snapshot(
+        WindowSwitcherView(model: model), size: NSSize(width: 940, height: 570),
+        dark: dark, to: "\(out)/window-switcher-grid\(dark ? "-dark" : "").png")
+    }
+    model.selectedID = 18
+    try snapshot(
+      WindowSwitcherView(model: model), size: NSSize(width: 680, height: 440),
+      dark: false, to: "\(out)/window-switcher-selected-last.png")
+    model.searching = true
+    model.query = "文本编辑"
+    try snapshot(
+      WindowSwitcherView(model: model), size: NSSize(width: 570, height: 440),
+      dark: false, to: "\(out)/window-switcher-search-small.png")
+    model.query = "不存在的窗口"
+    try snapshot(
+      WindowSwitcherView(model: model), size: NSSize(width: 680, height: 400),
+      dark: false, to: "\(out)/window-switcher-empty.png")
+    model.query = ""
+    model.screenRecording = false
+    model.issue = "2 个 App 的窗口读取失败，列表可能不完整"
+    try snapshot(
+      WindowSwitcherView(model: model), size: NSSize(width: 680, height: 440),
+      dark: true, to: "\(out)/window-switcher-partial.png")
+    model.loading = true
+    try snapshot(
+      WindowSwitcherView(model: model), size: NSSize(width: 680, height: 440),
+      dark: false, to: "\(out)/window-switcher-loading.png")
+    try snapshot(
+      WindowSwitcherTab(), size: NSSize(width: 620, height: 480),
+      dark: false, to: "\(out)/window-switcher-settings.png")
+  }
+
   /// 设置 › 程序坞预览（私有接口都在 / 缺几个）。图以 dock-preview- 开头（设置页是 settings-dock-preview-）。悬停的样子
   /// （浅灰底、抬起、✕）是视图自己的状态，屏外摆不出来，看真机
   @Test(.enabled(if: directory != nil)) func dockPreview() throws {

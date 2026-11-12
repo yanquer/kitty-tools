@@ -169,7 +169,7 @@ enum HotKeyAction: String, CaseIterable {
   case clipboard, selectionTranslate, inputTranslate, screenshotTranslate, launcher, screenshot,
     screenshotLastRegion, recognizeText, translateReplace, screenRecord, audioRecord, pinClipboard,
     statusScreen, noteCapture, noteNew, noteAll, launchpad, shotHistory, island, clothesline, home,
-    reminderNew
+    reminderNew, windowSwitch, windowSwitchPrevious, appWindowSwitch, appWindowSwitchPrevious
 
   var title: String {
     switch self {
@@ -195,6 +195,10 @@ enum HotKeyAction: String, CaseIterable {
     case .island: "打开刘海岛"
     case .home: "打开主界面"
     case .reminderNew: "新建提醒"
+    case .windowSwitch: "切换窗口"
+    case .windowSwitchPrevious: "反向切换窗口"
+    case .appWindowSwitch: "切换当前 App 的窗口"
+    case .appWindowSwitchPrevious: "反向切换当前 App 的窗口"
     }
   }
 
@@ -266,6 +270,11 @@ enum HotKeyAction: String, CaseIterable {
     case .island: nil
     // 主界面（2026-10-29）：主入口是点菜单栏图标，键给把图标藏起来的人自己设
     case .home: nil
+    case .windowSwitch: HotKey(keyCode: kVK_Tab, modifiers: optionKey)
+    case .windowSwitchPrevious: HotKey(keyCode: kVK_Tab, modifiers: optionKey | shiftKey)
+    case .appWindowSwitch: HotKey(keyCode: kVK_ANSI_Grave, modifiers: optionKey)
+    case .appWindowSwitchPrevious:
+      HotKey(keyCode: kVK_ANSI_Grave, modifiers: optionKey | shiftKey)
     }
   }
 
@@ -328,6 +337,8 @@ enum HotKeyAction: String, CaseIterable {
     case .launchpad: .launchpad
     case .statusScreen: .statusScreen
     case .reminderNew: .reminders
+    case .windowSwitch, .windowSwitchPrevious, .appWindowSwitch, .appWindowSwitchPrevious:
+      .windowSwitcher
     case .island, .home: nil
     }
   }
@@ -360,6 +371,7 @@ enum HotKeyAction: String, CaseIterable {
     // 启动台（第八族，2026-10-18）：和便签分开一节，菜单栏、启动器、快捷键页、速查表里的名字和设置页同名；
     // 2026-11-04 起排在状态屏后面（和程序坞预览一组）
     ("启动台", [.launchpad]),
+    ("窗口切换", [.windowSwitch, .windowSwitchPrevious, .appWindowSwitch, .appWindowSwitchPrevious]),
     // 刘海岛（2026-10-26）：不属于哪个功能、一直在
     ("刘海岛", [.island]),
     // 主界面（2026-10-29）：同刘海岛，一直在；菜单栏菜单里不列（菜单就是图标的另一半），主界面里也不列它自己
@@ -400,6 +412,8 @@ enum HotKeyAction: String, CaseIterable {
     case .island: "kitty.island"
     // 从菜单栏垂下来的那一块
     case .home: "kitty.home"
+    case .windowSwitch, .windowSwitchPrevious, .appWindowSwitch, .appWindowSwitchPrevious:
+      "rectangle.on.rectangle"
     case .reminderNew: SettingsPage.reminders.symbol
     }
   }
@@ -417,6 +431,8 @@ enum HotKeyAction: String, CaseIterable {
     case .statusScreen: Style.Family.statusScreen
     case .noteCapture, .noteNew, .noteAll: Style.Family.notes
     case .launchpad: Style.Family.launchpad
+    case .windowSwitch, .windowSwitchPrevious, .appWindowSwitch, .appWindowSwitchPrevious:
+      Style.Family.dockPreview
     case .reminderNew: Style.Family.reminders
     case .island, .home: Style.Family.general
     }

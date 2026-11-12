@@ -137,6 +137,11 @@ enum Home {
     return height + (offCount > 0 ? noteHeight : 0) + barHeight
   }
 
+  /// 主界面内容随功能增长时限制在当前屏幕内，网格区域可滚动，底栏始终可见。
+  static func fittedHeight(_ content: CGFloat, available: CGFloat) -> CGFloat {
+    min(content, max(1, available - 16))
+  }
+
   enum Move { case left, right, up, down }
 
   /// 选中怎么移动（纯函数）：←→ 按顺序挨个走、到头回绕（Tab / ⇧Tab 同）；↑↓ 换行，列不变，那一行短就落在它最后一格，
@@ -277,7 +282,15 @@ struct HomeView: View {
 
   var body: some View {
     VStack(spacing: 0) {
-      grid
+      ScrollViewReader { proxy in
+        ScrollView { grid }
+          .scrollIndicators(.hidden)
+          .onChange(of: model.selection) { _, selected in
+            if let selected, model.tiles.indices.contains(selected) {
+              proxy.scrollTo(model.tiles[selected].id, anchor: .center)
+            }
+          }
+      }
       if model.offCount > 0 { offNote }
       bar
     }
@@ -311,7 +324,9 @@ struct HomeView: View {
                 offset in
                 HomeTile(
                   model: model, tile: section.tiles[offset], index: starts[index] + offset,
-                  namespace: selection)
+                  namespace: selection
+                )
+                .id(section.tiles[offset].id)
               }
             }
           }

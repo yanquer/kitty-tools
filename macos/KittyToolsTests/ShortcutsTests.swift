@@ -84,6 +84,10 @@ struct ShortcutsTests {
       (.pinClipboard, kVK_ANSI_W, optionKey),
       (.shotHistory, kVK_ANSI_E, optionKey),
       (.noteCapture, kVK_ANSI_N, optionKey),
+      (.windowSwitch, kVK_Tab, optionKey),
+      (.windowSwitchPrevious, kVK_Tab, optionKey | shiftKey),
+      (.appWindowSwitch, kVK_ANSI_Grave, optionKey),
+      (.appWindowSwitchPrevious, kVK_ANSI_Grave, optionKey | shiftKey),
     ]
     for (action, code, modifiers) in expected {
       let hotKey = HotKey(keyCode: code, modifiers: modifiers)
@@ -129,7 +133,7 @@ struct ShortcutsTests {
     #expect(
       ShortcutsSheet.sections(groups) == [
         .clipboard, .launcher, .translate, .screenshot, .record, .notes, .reminders, .statusScreen,
-        .launchpad, .general,
+        .launchpad, .windowSwitcher, .general,
       ])
     #expect(groups.first { $0.title == "提醒" }?.page == .reminders)
     func page(_ title: String) -> SettingsPage? { groups.first { $0.title == title }?.page }

@@ -683,6 +683,20 @@ struct ShortcutsSheet: View {
           Entry("Esc", text: "先清空搜索，再按一次收起；点空白处也收起"),
           Entry("⌘W", text: "收起"),
         ]),
+      Group(
+        title: "窗口切换", symbol: "rectangle.on.rectangle", color: Style.Family.dockPreview,
+        globals: [
+          .windowSwitch, .windowSwitchPrevious, .appWindowSwitch, .appWindowSwitchPrevious,
+        ],
+        entries: [
+          Entry("松开修饰键", text: "切换到选中的窗口"),
+          Entry("←→", "↑↓", "Tab", "⇧Tab", text: "移动选中项"),
+          Entry("↩", text: "切换到选中的窗口"),
+          Entry("⌘F", text: "进入搜索，随后可以松开修饰键输入应用名或窗口标题"),
+          Entry("⌘W", text: "关闭选中的窗口，未保存内容由所属 App 确认"),
+          Entry("⌘M", text: "最小化或还原选中的窗口"),
+          Entry("Esc", text: "取消切换"),
+        ]),
       // 刘海岛（mac-whisker S2，2026-10-26）：不属于哪个功能，一直列
       Group(
         title: "刘海岛", symbol: HotKeyAction.island.symbol, color: Style.Family.general,

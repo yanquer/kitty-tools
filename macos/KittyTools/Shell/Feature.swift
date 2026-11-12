@@ -14,7 +14,7 @@ nonisolated enum Feature: String, CaseIterable {
   // 顺序 = 设置侧栏、通用页「功能」、菜单栏、快捷键页、速查表的顺序（2026-11-04 功能管理拍板 M3：便签、提醒、状态屏一组，
   // 启动台、程序坞预览一组）。rawValue 是偏好键，不能改
   case clipboard, launcher, translate, screenshot, record, notes, reminders, statusScreen
-  case launchpad, dockPreview, finderMenu
+  case launchpad, dockPreview, windowSwitcher, finderMenu
 
   /// 同名的设置页（名字、符号、家族色从它取）
   @MainActor var page: SettingsPage { SettingsPage(rawValue: rawValue) ?? .general }
@@ -36,15 +36,17 @@ nonisolated enum Feature: String, CaseIterable {
     case .statusScreen: "盖住屏幕、拦住键盘鼠标的告示"
     case .reminders: "到点提醒你：一次、每天、每周或每隔一阵"
     case .dockPreview: "鼠标停在程序坞的 App 图标上，看它所有窗口的缩略图"
+    case .windowSwitcher: "用键盘切换所有 App 的窗口，搜索、关闭或最小化窗口"
     case .finderMenu: "在访达里右键：新建文件、拷贝路径、移动复制、压缩解压"
     }
   }
 
   /// 没存过时开不开。程序坞预览默认关（拍板 A3：改的是系统程序坞的行为、还要屏幕录制授权，由用户自己打开）；
+  /// 窗口切换默认关，按需启用后才注册快捷键和观察焦点。
   /// 访达右键也默认关（2026-11-08 拍板 D2：改的是访达的菜单，还要去系统设置里打开扩展，默认开着也不生效）。
   /// 全 App 只有这一套：新装只开四个不是靠改它，是第一次启动时把开关明写进偏好（seedNewInstall）——导出、同步里「没有这一项
   /// = 默认值」，各台默认值不一样的话，导入老电脑的文件、加入同步时没动过的开关会被悄悄换成这台的默认
-  var defaultOn: Bool { self != .dockPreview && self != .finderMenu }
+  var defaultOn: Bool { self != .dockPreview && self != .windowSwitcher && self != .finderMenu }
 
   /// 新装默认开着的四个（功能管理拍板 M4）
   static let core: Set<Feature> = [.clipboard, .launcher, .translate, .screenshot]
