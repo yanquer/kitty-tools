@@ -240,6 +240,31 @@ struct RecordingToolsTests {
     #expect(bar.frame.width < 500 && bar.frame.height < 200)
   }
 
+  /// 工具箱共用一块表面，参数按需展开，鼠标效果再次点击即关闭，返回操作后收起无关参数。
+  @Test func toolsShareOneSurfaceAndRevealOptionsAsNeeded() throws {
+    let bar = RecordingToolsBar()
+    defer { bar.close() }
+    #expect(bar.subviews.count == 1 && bar.subviews.first is HUDBar)
+    #expect(bar.frame.height == 72)
+    #expect(bar.focusButton(for: .off) == nil)
+    var state = RecordingTools()
+    bar.onAction = { action in
+      state.apply(action)
+      bar.update(state, escapes: true)
+    }
+    try #require(bar.focusButton(for: .halo)).performClick(nil)
+    #expect(state.focus == .halo && bar.frame.height == 112)
+    try #require(bar.focusButton(for: .halo)).performClick(nil)
+    #expect(state.focus == .off && bar.frame.height == 72)
+    try #require(bar.button(for: .pen)).performClick(nil)
+    #expect(state.mode == .pen && bar.frame.height == 112)
+    #expect(bar.accessibilityHelp()?.contains("Esc 返回操作窗口") == true)
+    try #require(bar.button(for: .pointer)).performClick(nil)
+    #expect(bar.frame.height == 72)
+    try #require(bar.focusButton(for: .spotlight)).performClick(nil)
+    #expect(state.focus == .spotlight && bar.frame.height == 112)
+  }
+
   /// 小屏、负坐标副屏和控制条贴边时工具箱仍保持在可见区内。
   @Test(arguments: [
     CGRect(x: 0, y: 0, width: 800, height: 600),

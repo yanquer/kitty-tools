@@ -878,6 +878,7 @@ final class ScreenRecorder: NSObject {
       drawingEscapes = false
     }
     toolsBar?.update(state, escapes: drawingEscapes)
+    placeToolsBar()
   }
 
   /// 工具箱跟着控制条与当前屏幕可见区摆放，不激活应用，也不改变录制区域。

@@ -548,6 +548,7 @@ struct ScreenshotSnapshotTests {
     let bounds = CGRect(x: 0, y: 0, width: 1000, height: 700)
     let desktop = try Self.desktop()
     for (name, focus, mode) in [
+      ("idle", RecordingTools.Focus.off, RecordingTools.Mode.pointer),
       ("halo", RecordingTools.Focus.halo, RecordingTools.Mode.pointer),
       ("spotlight", .spotlight, .pointer),
       ("drawing", .off, .pen),
@@ -617,6 +618,7 @@ struct ScreenshotSnapshotTests {
           canvas.updatePointer(at: CGPoint(x: 370, y: 480), animated: false)
         }
         bar.update(canvas.state, escapes: true)
+        bar.frame.origin = CGPoint(x: bounds.maxX - bar.frame.width - 16, y: 80)
         Self.snapshotRecordingHUDs(in: root)
       }
     }
@@ -625,17 +627,26 @@ struct ScreenshotSnapshotTests {
   /// 屏外 render 不绘制系统玻璃及其内容，测试中将内容移到纯色 HUD 底上，仅验证布局、符号和选择状态。
   private static func snapshotRecordingHUDs(in view: NSView) {
     if #available(macOS 26, *), let bar = view as? HUDBar {
+      let rows = bar.effect.subviews.compactMap { $0 as? NSStackView }.filter { !$0.isHidden }
       for material in bar.subviews { material.isHidden = true }
-      let stack = bar.stack
-      stack.removeFromSuperview()
-      stack.translatesAutoresizingMaskIntoConstraints = true
-      stack.isHidden = false
-      let size = stack.fittingSize
-      stack.frame = CGRect(
-        x: HUDBar.materialInset, y: (bar.bounds.height - size.height) / 2,
-        width: size.width, height: size.height)
-      bar.addSubview(stack)
-      stack.layoutSubtreeIfNeeded()
+      for row in rows {
+        let center = bar.effect.constraints.first {
+          $0.firstItem === row && $0.firstAttribute == .centerY
+        }?.constant
+        let bottom = bar.effect.constraints.first {
+          $0.firstItem === row && $0.firstAttribute == .bottom
+        }?.constant
+        let size = row.fittingSize
+        row.removeFromSuperview()
+        row.translatesAutoresizingMaskIntoConstraints = true
+        row.isHidden = false
+        row.frame = CGRect(
+          x: row === bar.stack ? HUDBar.materialInset : (bar.bounds.width - size.width) / 2,
+          y: bottom ?? ((bar.bounds.height - size.height) / 2 + (center ?? 0)),
+          width: size.width, height: size.height)
+        bar.addSubview(row)
+        row.layoutSubtreeIfNeeded()
+      }
       bar.layer?.backgroundColor = Style.HUD.solidFill.cgColor
       bar.layer?.cornerRadius = bar is StyleBar ? Style.Radius.card : Style.Radius.panel
     }
