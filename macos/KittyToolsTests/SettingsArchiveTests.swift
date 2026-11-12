@@ -10,6 +10,25 @@ import Testing
 /// 读文件时的校验（别人给的、手改过的文件）、密钥的加解密；片段、文字收藏、生词本的导出和并进库（ClipboardStore.adopt、
 /// HistoryStore.adoptFavorites）。全用临时偏好域、内存库和假的钥匙串读取，不碰用户的偏好、数据和钥匙串
 struct SettingsArchiveTests {
+  /// 翻译模式随设置往返；非法模式收为仅离线，导入放开在线处理前提示隐私影响。
+  @Test func appleTranslationModeRoundTripAndPrivacy() throws {
+    let (defaults, name) = try suite()
+    defer { defaults.removePersistentDomain(forName: name) }
+    defaults.register(defaults: Prefs.defaults)
+    defaults.set(AppleTranslation.Mode.offline.rawValue, forKey: Prefs.translateAppleMode)
+    let archive = SettingsArchive.capture(from: defaults, domainName: name, services: [], notes: [])
+    #expect(
+      try SettingsArchive.read(archive.encoded()).preferences?[Prefs.translateAppleMode]
+        == .string("offline"))
+    var online = archive
+    online.preferences?[Prefs.translateAppleMode] = .string("online")
+    #expect(online.privacyLosses(comparedTo: defaults).contains { $0.contains("苹果服务器") })
+    online.preferences?[Prefs.translateAppleMode] = .string("invalid")
+    #expect(
+      try SettingsArchive.read(online.encoded()).preferences?[Prefs.translateAppleMode]
+        == .string("offline"))
+  }
+
   /// 整秒：文件里的时间是 ISO 8601，不带小数秒
   private static let moment = Date(timeIntervalSince1970: 1_760_000_000)
 

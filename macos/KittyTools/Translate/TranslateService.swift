@@ -1,7 +1,7 @@
 // 翻译服务配置：列表里只有加进来的服务（体检 B21）——10 个内置服务（智谱、百度、有道、Google、DeepL、微软、火山、腾讯，
-// 2026-11-05 加了不用 key 的系统翻译（macOS 26 起）和有道词典（只查单词））
+// 2026-11-05 加了不用 key 的系统翻译和有道词典（只查单词））
 // 可删、在设置「+」里加回来，外加用户自建的 AI 实例（OpenAI 兼容 / Azure / Anthropic，「+」里有厂商预设，D15）。
-// 从没存过列表时默认只有智谱（启用）。列表顺序即结果卡片顺序。
+// 从没存过列表时沿用用户的 Bob 服务顺序：智谱、系统翻译、腾讯、火山，全部启用。列表顺序即结果卡片顺序。
 // 非密钥配置以 JSON 存 UserDefaults，密钥存钥匙串（账户名 "<服务 id>.<字段>"，字段名已定，改名会读不到已存的密钥）。
 // 删内置服务保留它的密钥（加回来还在），删 AI 服务连同密钥一起删。
 
@@ -184,7 +184,7 @@ nonisolated struct TranslateService: Codable, Identifiable, Hashable, Sendable {
   }
 }
 
-/// 服务列表（设置页编辑，翻译时读）。从没存过时只有智谱（启用）；存过的原样用，删掉的内置服务不再补回来（体检 B21）
+/// 服务列表（设置页编辑，翻译时读）。从没存过时沿用 Bob 中已支持的服务；存过的原样用，删掉的内置服务不再补回来（体检 B21）
 @Observable final class TranslateServiceStore {
   nonisolated static let key = "translateServices"
 
@@ -212,8 +212,15 @@ nonisolated struct TranslateService: Codable, Identifiable, Hashable, Sendable {
     self.services = saved ?? Self.defaults
   }
 
-  /// 从没存过列表时的默认：只有内置智谱（启用），别的在设置「+」里加
-  static let defaults = [TranslateService.zhipu]
+  /// 默认沿用用户的 Bob 服务顺序并全部启用；系统翻译默认自动选路，密钥仍由本机钥匙串提供。
+  static var defaults: [TranslateService] {
+    let kinds: [TranslateService.Kind] = [.zhipu, .apple, .tencent, .volcengine]
+    return kinds.filter { $0 != .apple || AppleTranslation.isAvailable }.map { kind in
+      var service = TranslateService.builtin(kind)
+      service.isEnabled = true
+      return service
+    }
+  }
 
   /// 还没加进列表的内置服务（设置「+」菜单里列出来）
   var missingBuiltins: [TranslateService.Kind] {

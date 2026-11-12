@@ -63,15 +63,23 @@ struct ProviderSigningTests {
     #expect(body == "q=a%26b%3Dc%2Bd%20%E4%B8%AD")
   }
 
-  /// 服务列表只放加进来的（体检 B21）：从没存过时只有智谱（启用）；存过的原样用、删掉的内置服务不补回来，
+  /// 默认沿用 Bob 的已支持服务并全部启用；存过的原样用、删掉的内置服务不再加入（体检 B21），
   /// 「+」里列出没加的内置服务；删内置服务不碰钥匙串（加回来密钥还在）
   @Test func storeKeepsOnlyAddedServices() {
-    #expect(TranslateServiceStore.defaults.map(\.id) == ["zhipu"])
-    #expect(TranslateServiceStore.defaults.map(\.isEnabled) == [true])
+    let expected =
+      AppleTranslation.isAvailable
+      ? ["zhipu", "apple", "tencent", "volcengine"] : ["zhipu", "tencent", "volcengine"]
+    #expect(TranslateServiceStore.defaults.map(\.id) == expected)
+    #expect(
+      TranslateServiceStore.defaults.map(\.isEnabled)
+        == Array(repeating: true, count: expected.count))
+    #expect(TranslateServiceStore.defaults.first?.model == TranslateService.zhipuModels[0])
+    let empty = TranslateServiceStore(services: [])
+    #expect(empty.services.isEmpty)
     let ai = TranslateService.newAI()
     let store = TranslateServiceStore(services: [.builtin(.baidu), ai])
     #expect(store.services.map(\.id) == ["baidu", ai.id])  // 不再自动补齐 8 个内置
-    // 9 个没加的内置（系统翻译只在 macOS 26 起列出来，2026-11-05）
+    // 9 个没加的内置，系统翻译在支持的系统版本中均可添加
     #expect(
       store.missingBuiltins.count == (AppleTranslation.isAvailable ? 9 : 8)
         && !store.missingBuiltins.contains(.baidu))

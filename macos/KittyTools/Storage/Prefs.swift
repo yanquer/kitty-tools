@@ -132,6 +132,8 @@ enum Prefs {
   static let translateCopyToTranslate = "translateClipboardMonitor"
   /// 查单个词时在结果区最上面出系统词典的释义（D4）
   static let translateSystemDictionary = "translateSystemDictionary"
+  /// 系统翻译的模式：自动优先离线、仅离线、在线快捷指令；与设置一起导出和同步。
+  static let translateAppleMode = "translateAppleMode"
   /// 查单个词时大模型按词典格式回答：读音、词性释义、例句（D4）
   static let translateWordMode = "translateWordMode"
   /// 三块主面板拖出来的大小（2026-11-05 拍板 W1 W2）：宽度（pt）、启动器 / 剪贴板最多露几行（x.5）、翻译浮窗最高多高（pt）。
@@ -493,6 +495,7 @@ enum Prefs {
       translatePanelPosition: "top",
       translateCopyToTranslate: false,
       translateSystemDictionary: true,
+      translateAppleMode: AppleTranslation.Mode.automatic.rawValue,
       translateWordMode: true,
       translateWordRecording: true,
       translateWordAccent: "us",

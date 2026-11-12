@@ -18,7 +18,7 @@ struct SettingsListTests {
   /// 程序坞预览（第九族，2026-10-22）排在状态屏后面（它没有快捷键、菜单栏里没有它，拍板 D1）；
   /// 提醒（2026-11-04）排在状态屏后面、程序坞预览前面；访达右键（2026-11-08）排在程序坞预览后面、同一组。
   /// 2026-11-04 功能管理拍板 M2 M3：分六组（组之间留空），便签、提醒、状态屏一组，启动台、程序坞预览一组
-  @Test func sidebarOrderMatchesMenu() {
+  @Test func sidebarOrderMatchesMenu() throws {
     let pages = SettingsPage.allCases
     #expect(
       pages == [
@@ -63,8 +63,11 @@ struct SettingsListTests {
     // 功能页对得上功能，通用 / 快捷键 / 关于不是功能
     #expect(pages.compactMap(\.feature) == Feature.allCases)
     #expect(SettingsPage.general.feature == nil && SettingsPage.hotkeys.feature == nil)
-    let sections = HotKeyAction.sections.map(\.title)
-    #expect(sections.firstIndex(of: "翻译")! < sections.firstIndex(of: "截图与录制")!)
+    // 固定功能集合，不读取开发版实际开关；首次启动默认关闭录制时也能检查完整分组顺序。
+    let sections = HotKeyAction.visibleSections(enabled: Set(Feature.allCases)).map(\.title)
+    let translate = try #require(sections.firstIndex(of: "翻译"))
+    let capture = try #require(sections.firstIndex(of: "截图与录制"))
+    #expect(translate < capture)
   }
 
   /// 侧栏搜索按改名后的叫法也找得到：启动器的「常用」「收藏」，翻译的「浮窗位置」「清空」，截图的「PNG」「对拷线」

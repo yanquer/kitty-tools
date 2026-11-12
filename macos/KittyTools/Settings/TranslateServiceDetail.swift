@@ -21,6 +21,9 @@ struct TranslateServiceDetail: View {
   @State private var isBusy = false
   @State private var isFetching = false
   @State private var confirmsDelete = false
+  @AppStorage(Prefs.translateAppleMode) private var appleMode = AppleTranslation.Mode.automatic
+    .rawValue
+  @State private var installationHint: String?
   @FocusState private var focusedSecret: String?
 
   var body: some View {
@@ -34,7 +37,10 @@ struct TranslateServiceDetail: View {
 
   private func form(_ current: TranslateService) -> some View {
     let service = binding(current)
-    let status = current.settingsStatus
+    let status: (text: String, isProblem: Bool) =
+      current.kind == .apple
+      ? ((AppleTranslation.Mode(rawValue: appleMode) ?? .offline).statusText, false)
+      : current.settingsStatus
     return VStack(spacing: 0) {
       DetailHeader(title: current.name, status: status.text, isProblem: status.isProblem) {
         ServiceTile(service: current, size: 40)
@@ -70,6 +76,19 @@ struct TranslateServiceDetail: View {
         Toggle("启用", isOn: service.isEnabled)
         options(service)
         if current.kind == .ai { modelRow(service) }
+      }
+      if current.kind == .apple {
+        Section {
+          Button("安装在线翻译快捷指令…", action: installAppleShortcut).disabled(isBusy)
+          if let installationHint {
+            Text(installationHint).font(.caption).foregroundStyle(.secondary)
+          }
+        } footer: {
+          SectionFootnote(
+            "自动优先使用本机语言包，缺少时调用在线快捷指令；仅离线需要 macOS 26 和已下载的语言包。在线路径首次需添加「Kitty Tools 翻译」快捷指令，原文可能交由苹果服务器处理，实际处理位置遵循系统的设备端模式设置。"
+          )
+        }
+        .onChange(of: appleMode) { result = nil }
       }
       // 系统翻译、有道词典不用密钥
       if !current.secretFields.isEmpty {
@@ -125,6 +144,13 @@ struct TranslateServiceDetail: View {
 
   @ViewBuilder private func options(_ service: Binding<TranslateService>) -> some View {
     switch service.wrappedValue.kind {
+    case .apple:
+      Picker("翻译模式", selection: $appleMode) {
+        ForEach(AppleTranslation.Mode.allCases, id: \.self) { mode in
+          Text(mode.title).tag(mode.rawValue)
+        }
+      }
+      .pickerStyle(.segmented)
     case .zhipu:
       // 两档免费纯文本模型（体检 A17）；存着旧的识图模型等不认识的值时按第一档显示和使用
       Picker(
@@ -163,6 +189,26 @@ struct TranslateServiceDetail: View {
         "区域", text: Binding(service.region, default: ""), prompt: Text("填了 Key 才需要，如 eastasia"))
     default:
       EmptyView()
+    }
+  }
+
+  /// 准备并打开自有快捷指令安装文件；只有用户点击按钮才会打开系统安装界面。
+  private func installAppleShortcut() {
+    isBusy = true
+    result = nil
+    installationHint = "正在准备快捷指令…"
+    Task {
+      defer { isBusy = false }
+      do {
+        let file = try await AppleOnlineTranslation.prepareInstallation()
+        guard NSWorkspace.shared.open(file) else {
+          throw TranslateError.config("无法打开快捷指令安装文件，请检查「快捷指令」App 是否可用")
+        }
+        installationHint = "在「快捷指令」中完成添加后，点「测试连接」验证。"
+      } catch {
+        installationHint = nil
+        result = (false, error.localizedDescription)
+      }
     }
   }
 
@@ -306,7 +352,7 @@ extension TranslateService {
           secret("authKey") == nil ? ("未填密钥", true) : ("官方 API", false)
         }
       case .microsoft: (secret("subscriptionKey") == nil ? "免费 Edge 接口" : "Azure 翻译", false)
-      case .apple: AppleTranslation.isAvailable ? ("离线 · 本机翻译", false) : ("要 macOS 26", true)
+      case .apple: (AppleTranslation.mode().statusText, false)
       case .youdaoDict: ("免费 · 只查单词", false)
       default:
         secretFields.allSatisfy { secret($0.name) != nil } ? ("已填密钥", false) : ("未填密钥", true)

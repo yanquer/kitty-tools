@@ -590,6 +590,11 @@ struct SettingsArchive: Codable, Equatable {
         kept[Prefs.translateFontScale] = .double(
           min(max(scale, range.lowerBound), range.upperBound))
       }
+      if case .string(let raw)? = kept[Prefs.translateAppleMode],
+        AppleTranslation.Mode(rawValue: raw) == nil
+      {
+        kept[Prefs.translateAppleMode] = .string(AppleTranslation.Mode.offline.rawValue)
+      }
       if case .statuses(let list)? = kept[Prefs.statusScreenPresets] {
         kept[Prefs.statusScreenPresets] = .statuses(StatusPreset.sanitized(list))
       }
@@ -891,6 +896,11 @@ struct SettingsArchive: Codable, Equatable {
       && incoming(Prefs.translateCopyToTranslate) as? Bool == true
     if copiesAfter, !copiesNow {
       losses.append("会打开复制即译（复制的外语文字自动发给翻译服务）")
+    }
+    if AppleTranslation.mode(in: defaults) == .offline,
+      incoming(Prefs.translateAppleMode) as? String != AppleTranslation.Mode.offline.rawValue
+    {
+      losses.append("系统翻译会允许在线处理，原文可能交由苹果服务器处理")
     }
     // 动画表情包（EmojiPack）：从关变开 = 挑到有动画版的表情时会联网下载
     let emoji = Prefs.emojiPackDownloads

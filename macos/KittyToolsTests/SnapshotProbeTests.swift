@@ -14,6 +14,27 @@ import UniformTypeIdentifiers
 //   TEST_RUNNER_KITTY_SNAPSHOT_ONLY=clip-,launcher-
 // 只出文件名以这些前缀开头的图（逗号分隔；别的图跳过渲染，各种摆设照做）。
 struct SnapshotProbeTests {
+  /// 系统翻译三种模式的设置页，使用独立偏好域，屏外检查分段、安装入口和说明的布局。
+  @Test(.enabled(if: directory != nil)) func appleTranslationSettings() throws {
+    guard let out = Self.directory else { return }
+    try FileManager.default.createDirectory(atPath: out, withIntermediateDirectories: true)
+    let name = "kitty-apple-snapshot-\(UUID())"
+    let defaults = try #require(UserDefaults(suiteName: name))
+    defer { defaults.removePersistentDomain(forName: name) }
+    var apple = TranslateService.builtin(.apple)
+    apple.isEnabled = true
+    let store = TranslateServiceStore(services: [apple])
+    for mode in AppleTranslation.Mode.allCases {
+      defaults.set(mode.rawValue, forKey: Prefs.translateAppleMode)
+      for dark in [false, true] {
+        try snapshot(
+          TranslateServiceDetail(store: store, id: apple.id).defaultAppStorage(defaults),
+          size: NSSize(width: 590, height: 620), dark: dark,
+          to: "\(out)/settings-translate-apple-\(mode.rawValue)\(dark ? "-dark" : "").png")
+      }
+    }
+  }
+
   nonisolated private static let directory =
     ProcessInfo.processInfo.environment["KITTY_SNAPSHOT_DIR"]
   /// 只出这些前缀的图；nil = 全出
