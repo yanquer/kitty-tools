@@ -37,7 +37,6 @@ struct WindowLayoutTab: View {
   var body: some View {
     Form {
       Section {
-        FeatureToggle(feature: .windowLayout, inPage: true)
         ShortcutsButton()
       } header: {
         Text("窗口管理")
@@ -174,6 +173,7 @@ struct WindowLayoutTab: View {
       } footer: {
         SectionFootnote("名单中的 App 停用窗口管理的快捷键、拖拽吸附和自动操作。其他功能的快捷键可在快捷键页单独设置。")
       }.gated(by: .windowLayout)
+      PluginRemoveSection(plugin: .windowLayout)
     }
     .formStyle(.grouped)
     .onSettingsBecameKey { trusted = Permissions.isAccessibilityTrusted }

@@ -84,7 +84,8 @@ enum Home {
     var result: [Section] = []
     var plugins: [Tile] = []
     for section in HotKeyAction.visibleSections(enabled: state.features) {
-      var tiles = section.actions.filter { !unlisted.contains($0) && $0.layoutAction == nil }.map { action in
+      var tiles = section.actions.filter { !unlisted.contains($0) && $0.layoutAction == nil }.map {
+        action in
         Tile(
           target: .action(action), title: action.title(recording: state.isRunning(action)),
           symbol: action.symbol, color: action.color, key: keys[action],
