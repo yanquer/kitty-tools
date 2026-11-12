@@ -26,6 +26,22 @@ struct UpdaterTests {
     Data("[\(entry(tag: tag, assets: assets))]".utf8)
   }
 
+  /// 自动检查默认关闭，已保存的开关选择优先于注册默认值，测试只使用临时偏好域。
+  @MainActor @Test func automaticChecksAreOptIn() throws {
+    let suite = "kitty-updater-test-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    #expect(Prefs.defaults[Prefs.updateAutoCheck] as? Bool == false)
+    defaults.register(defaults: Prefs.defaults)
+    #expect(!defaults.bool(forKey: Prefs.updateAutoCheck))
+    #expect(defaults.persistentDomain(forName: suite)?[Prefs.updateAutoCheck] == nil)
+    defaults.set(true, forKey: Prefs.updateAutoCheck)
+    defaults.register(defaults: Prefs.defaults)
+    #expect(defaults.bool(forKey: Prefs.updateAutoCheck))
+    defaults.set(false, forKey: Prefs.updateAutoCheck)
+    #expect(!defaults.bool(forKey: Prefs.updateAutoCheck))
+  }
+
   @Test func parsesLatestRelease() throws {
     let data = Self.payload(
       tag: "macos-v0.2.0",

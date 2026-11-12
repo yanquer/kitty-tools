@@ -36,7 +36,7 @@ struct AboutTab: View {
   var updater: Updater?
   /// 重看欢迎引导
   var showOnboarding: () -> Void = {}
-  @AppStorage(Prefs.updateAutoCheck) private var autoCheck = true
+  @AppStorage(Prefs.updateAutoCheck) private var autoCheck = false
 
   static let version =
     Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""

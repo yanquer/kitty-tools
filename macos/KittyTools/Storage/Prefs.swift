@@ -406,7 +406,7 @@ enum Prefs {
   /// 不再两个窗一起出来）。这台电脑自己的状态，不注册默认值
   static let accessibilityRequested = "accessibilityRequested"
   static let screenRecordingRequested = "screenRecordingRequested"
-  /// 自动检查更新（启动后一次、之后每天一次）
+  /// 自动检查更新默认关闭，启用后启动检查一次、之后每天一次
   static let updateAutoCheck = "updateAutoCheck"
   /// 已经用刘海岛提示过的新版本号（后台检查每个版本只提示一次）
   static let updateNotifiedVersion = "updateNotifiedVersion"
@@ -468,7 +468,7 @@ enum Prefs {
       finderOpenWithApps: finderOpenWithDefault,
       panelSqueezeEntrance: false,
       floatingPinned: false,
-      updateAutoCheck: true,
+      updateAutoCheck: false,
       clipboardRetentionDays: 7,
       clipboardImageBudgetMB: 512,
       clipboardExcludedBundleIDs: ClipboardFilter.defaultExcluded,
