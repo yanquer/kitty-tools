@@ -295,7 +295,7 @@ import Observation
     downloading = 0
   }
 
-  /// 一键使用应用专用 iCloud 容器，系统未就绪时由现有定时轮询继续尝试。
+  /// 一键使用自动管理的 iCloud 云盘目录，系统未就绪时由现有定时轮询继续尝试。
   func enableICloud() {
     disable()
     iCloudEnabled = true
@@ -303,7 +303,7 @@ import Observation
     start()
   }
 
-  /// 每轮先核对系统账户和容器，避免退出或切换 Apple 账户后继续使用上次缓存的路径。
+  /// 每轮先核对系统账户和云盘目录，避免退出或切换 Apple 账户后继续使用上次缓存的路径。
   private func prepareICloud() async -> Bool {
     let generation = cloudGeneration
     do {
@@ -323,7 +323,7 @@ import Observation
             domain: "ICloudSync", code: 1, userInfo: [NSLocalizedDescriptionKey: reason])
         }
         guard iCloudEnabled, generation == cloudGeneration else { return false }
-        Log.storage.info("icloud-sync container connected")
+        Log.storage.info("icloud-sync drive folder connected")
       }
       defaults.set(location.account, forKey: Prefs.syncICloudAccount)
       cloudFailure = nil

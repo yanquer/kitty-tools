@@ -1,10 +1,10 @@
 // 设置 › 通用「同步」（2026-10-23 全局同步拍板 A1：从 设置 › 便签 挪过来，整个 App 的同步都在这一节。执行在 NoteSyncer）。
-// 一键开启 iCloud 同步，由系统定位应用容器；已有自选文件夹继续兼容，打开 iCloud 开关后切换到应用容器。
+// 一键开启 iCloud 同步，由应用自动管理普通云盘中的固定目录；已有自选文件夹继续兼容，打开 iCloud 开关后切换到固定云盘目录。
 
 import AppKit
 import SwiftUI
 
-/// iCloud 开关、同步状态和内容分类；系统容器解析与文件读写均在执行层的主线程外进行。
+/// iCloud 开关、同步状态和内容分类；云盘定位与文件读写均在执行层的主线程外进行。
 struct SyncSection: View {
   let syncer: NoteSyncer
   /// 几部分跟着的功能开着没有（关着的那部分不同步：勾下面说一声）
@@ -118,7 +118,7 @@ struct SyncSection: View {
       Text("iCloud 同步")
       Text(
         syncer.folder != nil && !syncer.iCloudEnabled
-          ? "原文件夹同步正在运行，开启后自动切换到应用的 iCloud 空间"
+          ? "原文件夹同步正在运行，开启后自动切换到 iCloud 云盘的固定同步目录"
           : "在使用同一 Apple 账户的 Mac 上开启，即可自动同步")
       if syncer.iCloudEnabled, syncer.folder == nil {
         Text(statusLine)
@@ -143,7 +143,7 @@ struct SyncSection: View {
         .lineLimit(1)
         .truncationMode(.middle)
         .foregroundStyle(.secondary)
-        .help(syncer.iCloudEnabled ? "由系统自动管理同步空间" : Self.shown(folder))
+        .help(syncer.iCloudEnabled ? "由应用自动管理 iCloud 云盘中的固定目录" : Self.shown(folder))
         if !syncer.iCloudEnabled {
           Button("停止同步") { syncer.disable() }
             .buttonStyle(.plain)
@@ -255,8 +255,7 @@ struct SyncSection: View {
   }
 
   /// iCloud 云盘在本机的位置（选文件夹的面板先指到这里）
-  static let iCloudDrive = FileManager.default.homeDirectoryForCurrentUser.appending(
-    path: "Library/Mobile Documents/com~apple~CloudDocs", directoryHint: .isDirectory)
+  static let iCloudDrive = NoteSyncDisk.iCloudDrive
 
   /// 悬停时给人看的路径：iCloud 云盘里的写成「iCloud 云盘/…」，家目录写成 ~
   static func shown(_ folder: URL) -> String {

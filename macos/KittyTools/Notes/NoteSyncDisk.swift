@@ -27,13 +27,13 @@ import Foundation
 import os
 
 nonisolated enum NoteSyncDisk {
-  /// 系统定位的应用专用 iCloud 目录及本机用于识别账户变更的摘要。
+  /// 自动管理的 iCloud 云盘目录及本机用于识别账户变更的摘要。
   struct ICloudLocation: Sendable {
     var folder: URL
     var account: String
   }
 
-  /// 在主线程外请求系统 iCloud 容器，自动建立应用自己的同步目录。
+  /// 非沙盒主应用在普通 iCloud 云盘中管理固定目录，兼容个人开发团队签名。
   @concurrent static func iCloudLocation() async throws -> ICloudLocation {
     let manager = FileManager.default
     guard let identity = manager.ubiquityIdentityToken else { throw ICloudFailure.signedOut }
@@ -41,22 +41,43 @@ nonisolated enum NoteSyncDisk {
       withRootObject: identity, requiringSecureCoding: false)
     let account = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
     let bundle = Bundle.main.bundleIdentifier ?? "com.yy.kitty-tools.native"
-    guard let container = manager.url(forUbiquityContainerIdentifier: "iCloud." + bundle) else {
-      throw ICloudFailure.unavailable
-    }
-    let folder = container.appending(path: "Sync", directoryHint: .isDirectory)
-    try manager.createDirectory(at: folder, withIntermediateDirectories: true)
+    let folder = try prepareICloudFolder(in: iCloudDrive, bundle: bundle)
     return ICloudLocation(folder: folder, account: account)
   }
 
-  /// 系统账户或应用容器不可用时给出准确的操作入口，保留真实失败状态。
+  /// 普通云盘根目录的 macOS 位置，仅构造路径，不读取其中内容。
+  /// ponytail: 使用 macOS 现行云盘路径；系统调整位置时更新定位规则，根目录缺失时明确失败。
+  static var iCloudDrive: URL {
+    FileManager.default.homeDirectoryForCurrentUser.appending(
+      path: "Library/Mobile Documents/com~apple~CloudDocs", directoryHint: .isDirectory)
+  }
+
+  /// 只在已经存在的 iCloud 云盘中创建应用子目录，根目录缺失或无权限时明确失败。
+  static func prepareICloudFolder(in root: URL, bundle: String) throws -> URL {
+    let attributes = try root.resourceValues(forKeys: [.isDirectoryKey])
+    guard attributes.isDirectory == true else { throw ICloudFailure.unavailable }
+    let name = bundle.hasSuffix(".dev") ? "Kitty Tools Dev 同步" : "Kitty Tools 同步"
+    let folder = root.appending(path: name, directoryHint: .isDirectory)
+    do {
+      try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+    } catch {
+      let failure = error as NSError
+      guard failure.domain == NSCocoaErrorDomain,
+        failure.code == CocoaError.fileWriteFileExists.rawValue,
+        try folder.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true
+      else { throw error }
+    }
+    return folder
+  }
+
+  /// 系统账户或云盘目录不可用时给出准确的操作入口，保留真实失败状态。
   enum ICloudFailure: LocalizedError {
     case signedOut, unavailable, accountChanged
 
     var errorDescription: String? {
       switch self {
       case .signedOut: "iCloud 账户不可用，请在系统设置中登录 Apple 账户并开启 iCloud 云盘"
-      case .unavailable: "无法访问应用的 iCloud 容器，请确认系统已允许 Kitty Tools 使用 iCloud 云盘"
+      case .unavailable: "无法访问 iCloud 云盘目录，请检查系统中的云盘状态和访问权限"
       case .accountChanged: "Apple 账户已变更，iCloud 同步已暂停，请关闭后重新开启以使用当前账户"
       }
     }

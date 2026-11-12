@@ -42,16 +42,6 @@ printf '%s' "$ENT" | plutil -extract keychain-access-groups json -o - - \
   | jq -e --arg group "$SYNC_APP_ID" 'index($group) != null' >/dev/null \
   || { echo "自动加密同步缺少应用私有钥匙串访问组"; exit 1; }
 lipo -archs "$APP/Contents/MacOS/$NAME"
-# 自动定位应用 iCloud 空间所需的容器授权必须进入实际签名。
-SYNC_CONTAINER="iCloud.$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")"
-for SYNC_CONTAINER_KEY in com.apple.developer.icloud-container-identifiers com.apple.developer.ubiquity-container-identifiers; do
-  printf '%s' "$ENT" | plutil -extract "${SYNC_CONTAINER_KEY//./\\.}" json -o - - \
-    | jq -e --arg container "$SYNC_CONTAINER" 'index($container) != null' >/dev/null \
-    || { echo "iCloud 同步缺少应用容器授权"; exit 1; }
-done
-printf '%s' "$ENT" | plutil -extract 'com\.apple\.developer\.icloud-services' json -o - - \
-  | jq -e 'index("CloudDocuments") != null' >/dev/null \
-  || { echo "iCloud 同步缺少云盘服务授权"; exit 1; }
 # 访达扩展（第十一族「访达右键」，mac-native §6）：在包里、本团队签名、开着沙盒、没有 get-task-allow
 FX="$APP/Contents/PlugIns/KittyToolsFinder.appex"
 codesign --verify --strict \

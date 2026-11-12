@@ -223,6 +223,39 @@ struct NoteSyncerTests {
     try FileManager.default.createDirectory(at: shared, withIntermediateDirectories: true)
   }
 
+  /// 普通云盘自动建立固定目录，正式版和 Dev 版隔离，重复开启复用目录。
+  @Test func managedDriveFolderIsAutomaticAndIdempotent() throws {
+    try makeShared()
+    defer { cleanUp() }
+    let folder = try NoteSyncDisk.prepareICloudFolder(
+      in: shared, bundle: "com.yy.kitty-tools.native")
+    #expect(folder.lastPathComponent == "Kitty Tools 同步")
+    #expect(
+      try NoteSyncDisk.prepareICloudFolder(in: shared, bundle: "com.yy.kitty-tools.native")
+        == folder)
+    let dev = try NoteSyncDisk.prepareICloudFolder(
+      in: shared, bundle: "com.yy.kitty-tools.native.dev")
+    #expect(dev != folder && dev.lastPathComponent == "Kitty Tools Dev 同步")
+  }
+
+  /// 云盘根目录缺失或路径被文件占用时失败，禁止创建伪云盘或覆盖已有文件。
+  @Test func managedDriveFolderRejectsMissingRootAndExistingFile() throws {
+    try makeShared()
+    defer { cleanUp() }
+    let missing = root.appending(path: "missing-drive")
+    #expect(throws: (any Error).self) {
+      try NoteSyncDisk.prepareICloudFolder(in: missing, bundle: "com.yy.kitty-tools.native")
+    }
+    #expect(!FileManager.default.fileExists(atPath: missing.path))
+    let occupied = shared.appending(path: "Kitty Tools 同步")
+    let original = Data("已有文件".utf8)
+    try original.write(to: occupied)
+    #expect(throws: (any Error).self) {
+      try NoteSyncDisk.prepareICloudFolder(in: shared, bundle: "com.yy.kitty-tools.native")
+    }
+    #expect(try Data(contentsOf: occupied) == original)
+  }
+
   private func cleanUp() { try? FileManager.default.removeItem(at: root) }
 
   /// 几台轮流合几遍
