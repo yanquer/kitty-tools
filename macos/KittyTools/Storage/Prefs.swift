@@ -332,6 +332,9 @@ enum Prefs {
   /// 钥匙串 NoteSyncer.passwordKey）。这时 notesSyncFolder 是数据目录里的镜像。同样是这台电脑自己的状态、**不注册默认值**
   nonisolated static let syncServer = "syncServer"
   nonisolated static let syncServerUser = "syncServerUser"
+  /// 用户选择的 iCloud 同步开关及本机账户标识，只留本机，不注册默认值。
+  nonisolated static let syncICloudEnabled = "syncICloudEnabled"
+  nonisolated static let syncICloudAccount = "syncICloudAccount"
   /// 这台电脑上不同步的几部分（全局同步 A3：设置页每类一个勾；"notes" 和 SyncRecords.Kind 的名字），同样是这台电脑自己的
   /// 状态、不注册默认值（没有 = 都同步）
   nonisolated static let syncSkipped = "syncSkipped"
