@@ -806,7 +806,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
       UInt32(kVK_Escape), 0, EventHotKeyID(signature: Self.signature, id: Self.escapeID),
       GetApplicationEventTarget(), 0, &ref)
     guard status == noErr, let ref else {
-      Log.record.error("倒数的 Esc 热键没注册上：\(status)")
+      Log.record.error("临时 Esc 热键没注册上：\(status)")
       return false
     }
     escapeRef = ref

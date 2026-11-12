@@ -344,6 +344,11 @@ final class ScreenRecorder: NSObject {
   private var hud: RecordingHUD?
   /// 点按圈和按键提示（显示点按 / 显示按键任一开着的录屏才有；只录声音没有）：开流前建、停的那一刻收
   private(set) var inputOverlay: InputOverlay?
+  /// 画板开流前建立，工具箱按需建立；鼠标焦点、标注都随本次录制释放。
+  private(set) var drawingCanvas: RecordingCanvas?
+  private var toolsBar: RecordingToolsBar?
+  private var drawingEscapeAttempted = false
+  private var drawingEscapes = false
   private var stopItem: NSStatusItem?
   private var timer: Timer?
   private var ticks = 0
@@ -480,6 +485,9 @@ final class ScreenRecorder: NSObject {
           : nil, shortcutsOnly: shortcutsOnly)
       overlay.present()
       inputOverlay = overlay
+    }
+    if medium == .screen {
+      prepareDrawingTools()
     }
     let stream: SCStream
     do {
@@ -647,6 +655,7 @@ final class ScreenRecorder: NSObject {
     guard medium == .screen else { return [] }
     var ids = ScreenCapture.recordedOwnWindows(ScreenCapture.ownWindows())
     if let overlay = inputOverlay?.windowID { ids.insert(overlay) }
+    if let canvas = drawingCanvas?.windowID { ids.insert(canvas) }
     return ids
   }
 
@@ -743,6 +752,7 @@ final class ScreenRecorder: NSObject {
       stopKey: HotKeyAction.screenRecord.hotKey?.display, escapes: escapes,
       systemAudio: options.systemAudio, microphone: options.microphone)
     hud.onClick = { [weak self] in self?.clicked($0) }
+    hud.onMove = { [weak self] in self?.placeToolsBar() }
     if let screen = NSScreen.screens.first(where: { $0.displayID == displayID }) {
       hud.present(region: region, on: screen, isFullScreen: isFullScreen)
     }
@@ -755,6 +765,7 @@ final class ScreenRecorder: NSObject {
     case .cancel: stop(.cancelled)
     case .discard: stop(.discarded)
     case .stop: stop()
+    case .tools: toggleDrawingTools()
     // 录屏第一期不暂停；暂停钮、待录的开始钮和来源开关只有录音的 HUD 有
     case .pause, .start, .systemAudio, .microphone: break
     }
@@ -766,6 +777,7 @@ final class ScreenRecorder: NSObject {
   private func showChrome() {
     guard medium == .screen else { return onStarted() }
     if hud == nil { showFrame(counting: false) }
+    hud?.setToolsAvailable(drawingCanvas != nil)
     stopItem = Self.makeStopItem(label: "停止录屏", target: self, action: #selector(stopClicked))
     // 菜单开着（.eventTracking）时计时也要走
     let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
@@ -783,6 +795,13 @@ final class ScreenRecorder: NSObject {
   /// 边框、HUD、点按圈、停止项、计时立刻收掉（停的那一刻；文件还在写）；只录声音时让 AudioRecorder 收它的录音 HUD 和停止项
   private func hideChrome() {
     onHalted()
+    if drawingEscapeAttempted { hotKeys?.unregisterEscape() }
+    drawingEscapeAttempted = false
+    drawingEscapes = false
+    toolsBar?.close()
+    toolsBar = nil
+    drawingCanvas?.close()
+    drawingCanvas = nil
     border?.orderOut(nil)
     border = nil
     hud?.close()
@@ -793,6 +812,80 @@ final class ScreenRecorder: NSObject {
     stopItem = nil
     timer?.invalidate()
     timer = nil
+  }
+
+  /// 开流前建立画板并接好状态与过滤器例外；初始化失败时录屏继续，画板入口保持禁用。
+  private func prepareDrawingTools() {
+    guard let canvas = RecordingCanvas(region: region) else {
+      island?.show("录屏画板初始化失败", detail: "本次画板不可用，录屏继续", tone: .warning)
+      return
+    }
+    canvas.onChange = { [weak self] in self?.drawingToolsChanged($0) }
+    canvas.onNotice = { [weak self] in self?.island?.show($0, tone: .warning) }
+    canvas.excludedFrames = { [weak self] in
+      guard let self else { return [] }
+      return [self.hud?.panel, self.toolsBar?.panel].compactMap { panel in
+        guard let panel, panel.isVisible else { return nil }
+        return panel.frame
+      }
+    }
+    drawingCanvas = canvas
+    canvas.present(below: hud?.panel.windowNumber)
+  }
+
+  /// 控制条上的唯一入口负责展开和收起，收起时返回操作模式，保留标注与焦点。
+  private func toggleDrawingTools() {
+    guard let canvas = drawingCanvas, startedAt != nil, endedAt == nil else { return }
+    if toolsBar?.panel.isVisible == true {
+      applyDrawingTool(.close)
+      return
+    }
+    if toolsBar == nil {
+      let bar = RecordingToolsBar()
+      bar.onAction = { [weak self] in self?.applyDrawingTool($0) }
+      toolsBar = bar
+    }
+    toolsBar?.update(canvas.state, escapes: drawingEscapes)
+    placeToolsBar(show: true)
+    hud?.setToolsAvailable(true, selected: true)
+  }
+
+  /// 工具操作只改变画板的会话状态，关闭工具箱仍保留视频中的既有笔迹。
+  private func applyDrawingTool(_ action: RecordingTools.Action) {
+    drawingCanvas?.apply(action)
+    if case .close = action {
+      toolsBar?.hide()
+      hud?.setToolsAvailable(drawingCanvas != nil)
+    }
+  }
+
+  /// 画图期间复用临时 Esc；注册失败明确提示，并保持工具箱里的返回操作入口可用。
+  private func drawingToolsChanged(_ state: RecordingTools) {
+    if state.isDrawing, !drawingEscapeAttempted {
+      drawingEscapeAttempted = true
+      drawingEscapes =
+        hotKeys?.registerEscape { [weak self] in
+          self?.applyDrawingTool(.mode(.pointer))
+        } ?? false
+      if !drawingEscapes {
+        Log.record.error(
+          "录屏画板 Esc 不可用 display=\(self.displayID) hotKeyCenter=\(self.hotKeys != nil)")
+        island?.show("画板的 Esc 不可用", detail: "点工具箱左侧箭头返回操作窗口", tone: .warning)
+      }
+    } else if !state.isDrawing, drawingEscapeAttempted {
+      hotKeys?.unregisterEscape()
+      drawingEscapeAttempted = false
+      drawingEscapes = false
+    }
+    toolsBar?.update(state, escapes: drawingEscapes)
+  }
+
+  /// 工具箱跟着控制条与当前屏幕可见区摆放，不激活应用，也不改变录制区域。
+  private func placeToolsBar(show: Bool = false) {
+    guard let toolsBar, show || toolsBar.panel.isVisible, let hud,
+      let screen = hud.panel.screen ?? NSScreen.screens.first(where: { $0.displayID == displayID })
+    else { return }
+    toolsBar.present(anchor: hud.screenFrame, visible: screen.visibleFrame)
   }
 
   @objc private func stopClicked() { stop() }

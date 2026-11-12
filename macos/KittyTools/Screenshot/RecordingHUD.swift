@@ -42,7 +42,7 @@ final class RecordingHUD: HUDBar, NSWindowDelegate {
 
   /// start：待录时的 ●；cancel：倒数时的取消、待录时的关闭；systemAudio / microphone：待录时的来源开关（HUD 自己写偏好，
   /// 不经 onClick，这两项只给 button(for:) 取按钮用）
-  enum Item { case startNow, cancel, discard, stop, pause, start, systemAudio, microphone }
+  enum Item { case startNow, cancel, discard, stop, pause, start, systemAudio, microphone, tools }
 
   /// 放弃要点两下（纯状态，配单测）：第一下「上膛」，window 之内再点才算放弃；过了时间恢复，下一下重新上膛
   struct Discard {
@@ -70,6 +70,8 @@ final class RecordingHUD: HUDBar, NSWindowDelegate {
   }
 
   var onClick: (Item) -> Void = { _ in }
+  /// 控制条拖动或计时变宽时，工具箱跟随新的位置。
+  var onMove: () -> Void = {}
   let panel: NSPanel
   /// 录屏还是录音的 HUD（录音第 5 批：没有倒数，多电平和暂停）
   let medium: ScreenRecorder.Medium
@@ -116,6 +118,15 @@ final class RecordingHUD: HUDBar, NSWindowDelegate {
     label: "取消", action: #selector(closeClicked(_:)), size: CGSize(width: 32, height: 32))
   private lazy var stopButton = makeRoundButton(
     "stop.fill", tip: stopTip, label: "停止并保存", action: #selector(stopClicked(_:)))
+  private lazy var toolsButton: ToggleButton = {
+    let button = ToggleButton()
+    button.target = self
+    button.action = #selector(toolsClicked)
+    button.describe = { "鼠标焦点与画板" }
+    button.show("pencil.tip.crop.circle", on: false, animated: false)
+    button.isEnabled = false
+    return button
+  }()
   /// 录音待录：来源开关（读写 defaults 里的 Prefs.audioRecordSource）和开始钮
   private let defaults: UserDefaults
   private lazy var systemButton = makeSourceButton { [unowned self] in
@@ -309,7 +320,8 @@ final class RecordingHUD: HUDBar, NSWindowDelegate {
       case (.recording, .audio):
         [clock, meter, separator, pauseButton, pauseSeparator, closeButton, stopButton]
       case (.recording, .screen):
-        [clock] + (systemAudio || microphone ? [sound] : []) + [separator, closeButton, stopButton]
+        [clock] + (systemAudio || microphone ? [sound] : [])
+          + [toolsButton, separator, closeButton, stopButton]
       }
     views.forEach(stack.addArrangedSubview)
     // 右端是强调色圆钮（● / ■）：多留一点边、和 ✕ 隔开一点（同录制条）。倒数没有圆钮，把它的位置空出来——
@@ -474,8 +486,20 @@ final class RecordingHUD: HUDBar, NSWindowDelegate {
     case .start: medium == .audio ? startButton : nil
     case .systemAudio: medium == .audio ? systemButton : nil
     case .microphone: medium == .audio ? microphoneButton : nil
+    case .tools: medium == .screen ? toolsButton : nil
     }
   }
+
+  /// 真正开始录制且画板可用时才启用，避免开流期间接收无效操作。
+  func setToolsAvailable(_ available: Bool, selected: Bool = false) {
+    guard medium == .screen else { return }
+    toolsButton.isEnabled = available
+    toolsButton.show("pencil.tip.crop.circle", on: selected, animated: false)
+    toolsButton.setAccessibilityValue(selected ? "已展开" : "已收起")
+  }
+
+  /// 展开或收起录屏讲解工具。
+  @objc private func toolsClicked() { onClick(.tools) }
 
   @objc private func startClicked(_ sender: NSButton) { onClick(.startNow) }
   @objc private func stopClicked(_ sender: NSButton) {
@@ -530,6 +554,7 @@ final class RecordingHUD: HUDBar, NSWindowDelegate {
     isPlacing = true
     panel.setFrame(rect.insetBy(dx: -margin, dy: -margin), display: true)
     isPlacing = false
+    onMove()
   }
 
   /// 用户拖过：记下这块屏上的位置（HUD 的右下角），这次运行里下次录这块屏就放这里（录屏、录音各记各的）
@@ -537,6 +562,7 @@ final class RecordingHUD: HUDBar, NSWindowDelegate {
     guard !isPlacing, let display else { return }
     Self.dragged[Spot(display: display, medium: medium)] = CGPoint(
       x: screenFrame.maxX, y: screenFrame.minY)
+    onMove()
   }
 
   // MARK: 摆位（纯函数，配单测）

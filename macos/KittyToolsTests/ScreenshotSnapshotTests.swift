@@ -535,6 +535,107 @@ struct ScreenshotSnapshotTests {
     }
   }
 
+  /// 录屏讲解工具在屏外渲染：跟随光圈、聚光灯、画笔和激光轨迹，工具箱使用与录制相同的状态和尺寸。
+  @Test(.enabled(if: directory != nil)) func renderRecordingTools() throws {
+    let out = try #require(Self.directory)
+    try FileManager.default.createDirectory(atPath: out, withIntermediateDirectories: true)
+    let bounds = CGRect(x: 0, y: 0, width: 1000, height: 700)
+    let desktop = try Self.desktop()
+    for (name, focus, mode) in [
+      ("halo", RecordingTools.Focus.halo, RecordingTools.Mode.pointer),
+      ("spotlight", .spotlight, .pointer),
+      ("drawing", .off, .pen),
+      ("laser", .halo, .laser),
+    ] {
+      let root = NSView(frame: bounds)
+      root.wantsLayer = true
+      root.layer?.contents = desktop
+      let canvas = try #require(RecordingCanvas(region: bounds))
+      let bar = RecordingToolsBar()
+      let hud = RecordingHUD(state: .recording(75), stopKey: "⌥R")
+      defer {
+        canvas.close()
+        bar.close()
+        hud.close()
+      }
+      canvas.panel.contentView = nil
+      canvas.view.frame = bounds
+      root.addSubview(canvas.view)
+      bar.removeFromSuperview()
+      bar.frame.origin = CGPoint(x: 570, y: 60)
+      root.addSubview(bar)
+      hud.setToolsAvailable(true, selected: true)
+      hud.removeFromSuperview()
+      hud.frame.origin = CGPoint(x: 720, y: 18)
+      root.addSubview(hud)
+      let window = offscreen(root)
+      try shoot(window, "record-tools-\(name)") {
+        /// 合成事件直接交给屏外视图，不发送到系统或用户的前台窗口。
+        @MainActor func draw(
+          _ tool: RecordingTools.Mode, color: Annotation.Palette, from: CGPoint, to: CGPoint
+        ) {
+          canvas.apply(.mode(tool))
+          canvas.apply(.color(color))
+          for (type, point) in [
+            (NSEvent.EventType.leftMouseDown, from), (.leftMouseDragged, to), (.leftMouseUp, to),
+          ] {
+            guard
+              let event = NSEvent.mouseEvent(
+                with: type, location: point, modifierFlags: [], timestamp: 0,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
+                pressure: 1)
+            else { continue }
+            switch type {
+            case .leftMouseDown: canvas.view.mouseDown(with: event)
+            case .leftMouseDragged: canvas.view.mouseDragged(with: event)
+            default: canvas.view.mouseUp(with: event)
+            }
+          }
+        }
+        draw(.rectangle, color: .red, from: CGPoint(x: 160, y: 390), to: CGPoint(x: 450, y: 540))
+        draw(.arrow, color: .blue, from: CGPoint(x: 490, y: 560), to: CGPoint(x: 410, y: 510))
+        draw(
+          .highlighter, color: .yellow, from: CGPoint(x: 190, y: 430), to: CGPoint(x: 390, y: 430))
+        canvas.apply(.color(.red))
+        canvas.apply(.focus(focus))
+        canvas.apply(.mode(mode))
+        if mode == .laser {
+          let began = CACurrentMediaTime()
+          for index in 0..<35 {
+            canvas.addLaser(
+              to: CGPoint(x: 220 + index * 5, y: 280 + Int(sin(Double(index) * 0.15) * 25)),
+              at: began + Double(index) * 0.01, animated: false)
+          }
+          canvas.updatePointer(at: CGPoint(x: 390, y: 257), animated: false)
+        } else {
+          canvas.updatePointer(at: CGPoint(x: 370, y: 480), animated: false)
+        }
+        bar.update(canvas.state, escapes: true)
+        Self.snapshotRecordingHUDs(in: root)
+      }
+    }
+  }
+
+  /// 屏外 render 不绘制系统玻璃及其内容，测试中将内容移到纯色 HUD 底上，仅验证布局、符号和选择状态。
+  private static func snapshotRecordingHUDs(in view: NSView) {
+    if #available(macOS 26, *), let bar = view as? HUDBar {
+      for material in bar.subviews { material.isHidden = true }
+      let stack = bar.stack
+      stack.removeFromSuperview()
+      stack.translatesAutoresizingMaskIntoConstraints = true
+      stack.isHidden = false
+      let size = stack.fittingSize
+      stack.frame = CGRect(
+        x: HUDBar.materialInset, y: (bar.bounds.height - size.height) / 2,
+        width: size.width, height: size.height)
+      bar.addSubview(stack)
+      stack.layoutSubtreeIfNeeded()
+      bar.layer?.backgroundColor = Style.HUD.solidFill.cgColor
+      bar.layer?.cornerRadius = bar is StyleBar ? Style.Radius.card : Style.Radius.panel
+    }
+    for child in view.subviews { snapshotRecordingHUDs(in: child) }
+  }
+
   /// 录制 HUD（录屏第 2 批）：倒数（边框走蚂蚁线、HUD「3 秒后开始」）、录制中 0:12（边框静止、红点、计时、✕、■）、
   /// 放弃上膛（✕ 变红）、整屏（没有边框，可见区底部居中）。HUD 永远深色，不出深色版；-crop 是 HUD 的局部。
   /// 2026-10-12 视觉对齐：选区录制的 HUD 右边线对着录制条的右边线（各张 -crop 右边都留 24 pt：✕、主圆钮离右边一样远）；

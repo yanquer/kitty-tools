@@ -396,7 +396,7 @@ final class AudioRecorder: NSObject {
     // 待录：● 开始，✕ 关闭（开始了还没录起来时的 ✕ 也到这里：当取消）
     case .start: start()
     case .cancel: stop(.cancelled)
-    case .startNow, .systemAudio, .microphone: break
+    case .startNow, .systemAudio, .microphone, .tools: break
     }
   }
 

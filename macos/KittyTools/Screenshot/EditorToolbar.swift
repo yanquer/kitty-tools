@@ -768,8 +768,9 @@ final class StyleBar: HUDBar {
   /// 托盘高（工具栏放哪时要给它留地方）
   static let height: CGFloat = 34
 
-  init() {
-    super.init(radius: Style.Radius.card, height: Self.height)
+  /// 截图遮罩默认在窗口内取样，录屏工具箱的独立窗口改为从背后的桌面取样。
+  init(blending: NSVisualEffectView.BlendingMode = .withinWindow) {
+    super.init(radius: Style.Radius.card, height: Self.height, blending: blending)
     stack.edgeInsets = NSEdgeInsets(top: 0, left: 6, bottom: 0, right: 6)
     // 先给个尺寸：零宽的材质和 stack 的最小宽度约束冲突（第一次 move 前就会排一次版）
     frame.size = CGSize(width: 100, height: Self.height)

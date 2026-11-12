@@ -17,6 +17,25 @@ import Testing
 
 @MainActor
 struct RecordingHUDTests {
+  /// 录屏工具入口在实际开录前禁用，开启后交回动作，录音形态不提供画板按钮。
+  @Test func drawingToolsOnlyAppearForScreenRecording() throws {
+    let hud = RecordingHUD(state: .countdown(3), stopKey: nil)
+    let audio = RecordingHUD(state: .recording(1), stopKey: nil, medium: .audio)
+    defer {
+      hud.close()
+      audio.close()
+    }
+    let button = try #require(hud.button(for: .tools))
+    #expect(!button.isEnabled && audio.button(for: .tools) == nil)
+    hud.update(.recording(0))
+    hud.setToolsAvailable(true, selected: true)
+    #expect(button.isEnabled && button.accessibilityValue() as? String == "已展开")
+    var opened = false
+    hud.onClick = { if case .tools = $0 { opened = true } }
+    button.performClick(nil)
+    #expect(opened)
+  }
+
   /// 主屏 1440 × 900（菜单栏 24、程序坞 70），右边一块外接屏从 x = 1440 起
   static let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
   static let visible = CGRect(x: 0, y: 70, width: 1440, height: 806)
@@ -131,10 +150,10 @@ struct RecordingHUDTests {
     #expect(hud.screenFrame.maxX == barFrame.maxX && hud.screenFrame.minY == barFrame.minY)
     #expect(hud.screenFrame.width < barFrame.width)
     #expect(fromRight(try #require(hud.button(for: .cancel)), in: hud) == barClose)
-    // 录制态：右边线不动，✕ 还在原地，■ 落在 ● 上
+    // 录制态新增画板入口后比录制条宽，右边线不动，✕ 还在原地，■ 落在 ● 上
     hud.update(.recording(0))
     #expect(hud.screenFrame.maxX == barFrame.maxX && hud.screenFrame.minY == barFrame.minY)
-    #expect(hud.screenFrame.width < barFrame.width)
+    #expect(hud.screenFrame.width > barFrame.width)
     #expect(fromRight(try #require(hud.button(for: .discard)), in: hud) == barClose)
     #expect(fromRight(try #require(hud.button(for: .stop)), in: hud) == barStart)
     // 计时按位数留宽：9:59 以内不变，10:00、1:00:00 各变宽一次——往左长，右边线不动
