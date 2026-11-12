@@ -4495,6 +4495,13 @@ struct SnapshotProbeTests {
       return Form { SyncSection(syncer: syncer) }.formStyle(.grouped).defaultAppStorage(prefs)
     }
     try snapshot(section(), size: size, dark: false, to: "\(out)/sync-off.png")
+    prefs.set(true, forKey: Prefs.syncICloudEnabled)
+    try snapshot(
+      section { $0.status = .syncing }, size: size, dark: false,
+      to: "\(out)/sync-icloud-connecting.png")
+    try snapshot(
+      section { $0.status = .stopped(.failed("iCloud 账户不可用，请在系统设置中登录 Apple 账户并开启 iCloud 云盘")) },
+      size: size, dark: true, to: "\(out)/sync-icloud-unavailable-dark.png")
     prefs.set(
       SyncSection.iCloudDrive.appending(path: "Kitty Tools 同步").path,
       forKey: Prefs.notesSyncFolder)
@@ -4576,6 +4583,10 @@ struct SnapshotProbeTests {
           to: "\(out)/sync-secrets-\(state)\(dark ? "-dark" : "").png")
       }
     }
+    prefs.set(false, forKey: Prefs.syncICloudEnabled)
+    try snapshot(
+      section { $0.status = .idle }, size: size, dark: false, to: "\(out)/sync-legacy-folder.png")
+    prefs.set(true, forKey: Prefs.syncICloudEnabled)
     // 从只同步便签的版本升上来：新加的几类没勾、文件夹那一行多一句（第三轮体检 R1）
     prefs.removeObject(forKey: Prefs.syncSkipped)
     try snapshot(

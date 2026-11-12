@@ -100,6 +100,125 @@ struct NoteSyncerTests {
     deinit { UserDefaults().removePersistentDomain(forName: suite) }
   }
 
+  /// 等待开关触发的真实异步轮结束，测试始终使用临时目录和模拟 iCloud 定位。
+  private func waitForCloud(_ syncer: NoteSyncer) async throws {
+    for _ in 0..<200 {
+      if syncer.status == .idle { return }
+      if case .stopped = syncer.status { return }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    syncer.stop()
+    Issue.record("iCloud 测试未在两秒内完成")
+  }
+
+  /// 每台只开启一个开关，自动加入同一应用空间并同步便签。
+  @Test func iCloudSwitchAutomaticallyJoinsSharedContainer() async throws {
+    try makeShared()
+    defer { cleanUp() }
+    let a = try Mac(host: "a", root: root)
+    let b = try Mac(host: "b", root: root)
+    defer {
+      a.syncer.stop()
+      b.syncer.stop()
+    }
+    let shared = self.shared
+    for mac in [a, b] {
+      mac.syncer.iCloudLocation = { .init(folder: shared, account: "account-a") }
+    }
+    let note = a.store.create(body: "自动同步", now: .now)
+    a.syncer.enableICloud()
+    try await waitForCloud(a.syncer)
+    b.syncer.enableICloud()
+    try await waitForCloud(b.syncer)
+    #expect(a.syncer.iCloudEnabled && b.syncer.iCloudEnabled)
+    #expect(a.syncer.library == b.syncer.library && b.store.note(note.id)?.body == "自动同步")
+    #expect(b.defaults.string(forKey: Prefs.syncICloudAccount) == "account-a")
+    b.syncer.disable()
+    #expect(!b.syncer.iCloudEnabled && b.syncer.folder == nil)
+    #expect(b.store.note(note.id)?.body == "自动同步")
+  }
+
+  /// 系统账户暂不可用时保留开启意愿，恢复后下一轮自动接入。
+  @Test func iCloudUnavailableRetriesWithoutLosingEnabledIntent() async throws {
+    try makeShared()
+    defer { cleanUp() }
+    let mac = try Mac(host: "a", root: root)
+    defer { mac.syncer.stop() }
+    mac.syncer.iCloudLocation = { throw NoteSyncDisk.ICloudFailure.signedOut }
+    mac.syncer.enableICloud()
+    try await waitForCloud(mac.syncer)
+    #expect(mac.syncer.iCloudEnabled && mac.syncer.folder == nil)
+    if case .stopped(.failed(let reason)) = mac.syncer.status {
+      #expect(reason.contains("账户不可用"))
+    } else {
+      Issue.record("账户不可用必须显示失败")
+    }
+    let shared = self.shared
+    mac.syncer.iCloudLocation = { .init(folder: shared, account: "account-a") }
+    await mac.syncer.round()
+    #expect(mac.syncer.status == .idle && mac.syncer.folder == shared)
+  }
+
+  /// 换 Apple 账户后禁止向新账户写入本机内容，显式重新开启后才能切换。
+  @Test func iCloudAccountChangePausesBeforeReadingOrWritingNewContainer() async throws {
+    try makeShared()
+    defer { cleanUp() }
+    let mac = try Mac(host: "a", root: root)
+    defer { mac.syncer.stop() }
+    let shared = self.shared
+    mac.syncer.iCloudLocation = { .init(folder: shared, account: "account-a") }
+    mac.syncer.enableICloud()
+    try await waitForCloud(mac.syncer)
+    let other = root.appending(path: "other-account")
+    try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+    mac.syncer.iCloudLocation = { .init(folder: other, account: "account-b") }
+    await mac.syncer.round()
+    #expect(mac.defaults.string(forKey: Prefs.syncICloudAccount) == "account-a")
+    #expect(try FileManager.default.contentsOfDirectory(atPath: other.path).isEmpty)
+    if case .stopped(.failed(let reason)) = mac.syncer.status {
+      #expect(reason.contains("账户已变更"))
+    } else {
+      Issue.record("账户变更必须暂停")
+    }
+    mac.syncer.enableICloud()
+    try await waitForCloud(mac.syncer)
+    #expect(
+      mac.syncer.status == .idle
+        && mac.defaults.string(forKey: Prefs.syncICloudAccount) == "account-b")
+  }
+
+  /// 系统定位尚未返回时关闭开关，异步结果不得重新启用同步或写回路径。
+  @Test func disablingICloudDiscardsPendingContainerResolution() async throws {
+    try makeShared()
+    defer { cleanUp() }
+    let mac = try Mac(host: "a", root: root)
+    var pending: CheckedContinuation<NoteSyncDisk.ICloudLocation, any Error>?
+    mac.syncer.iCloudLocation = {
+      try await withCheckedThrowingContinuation { pending = $0 }
+    }
+    mac.syncer.enableICloud()
+    for _ in 0..<100 where pending == nil { await Task.yield() }
+    let resolve = try #require(pending)
+    mac.syncer.disable()
+    resolve.resume(returning: .init(folder: shared, account: "account-a"))
+    try await Task.sleep(for: .milliseconds(20))
+    #expect(!mac.syncer.iCloudEnabled && mac.syncer.folder == nil)
+    #expect(mac.defaults.string(forKey: Prefs.notesSyncFolder) == nil)
+  }
+
+  /// 同时首次建立应用容器的设备采用相同初始标记，创建竞争不会永久阻断第二台。
+  @Test func simultaneousCloudInitializationUsesOneLibrary() async throws {
+    try makeShared()
+    defer { cleanUp() }
+    let a = try Mac(host: "a", root: root)
+    let b = try Mac(host: "b", root: root)
+    async let first = a.syncer.enable(folder: shared, newLibrary: "CLOUD-LIBRARY")
+    async let second = b.syncer.enable(folder: shared, newLibrary: "CLOUD-LIBRARY")
+    let results = await (first, second)
+    #expect(results.0 == nil && results.1 == nil)
+    #expect(a.syncer.library == b.syncer.library)
+  }
+
   private func makeShared() throws {
     try FileManager.default.createDirectory(at: shared, withIntermediateDirectories: true)
   }

@@ -41,6 +41,7 @@
 // ponytail: 退出时不再赶一轮（落盘照常，下次打开那一轮写出去）
 
 import AppKit
+import OSLog
 import Observation
 
 @Observable final class NoteSyncer {
@@ -85,6 +86,13 @@ import Observation
   /// 同步的文件夹、它的库编号（没开 = nil）：偏好里那两项的样子（设置页要跟着变，放在这里）
   private(set) var folder: URL?
   private(set) var library: String?
+  /// 开关表示用户的同步意愿，系统暂不可用时仍保留开启状态并自动重试。
+  private(set) var iCloudEnabled: Bool
+  @ObservationIgnored var iCloudLocation: () async throws -> NoteSyncDisk.ICloudLocation = {
+    try await NoteSyncDisk.iCloudLocation()
+  }
+  @ObservationIgnored private var cloudGeneration = 0
+  @ObservationIgnored private var cloudFailure: String?
 
   @ObservationIgnored let store: NoteStore
   @ObservationIgnored private let defaults: UserDefaults
@@ -152,6 +160,7 @@ import Observation
   init(store: NoteStore, defaults: UserDefaults = .standard) {
     self.store = store
     self.defaults = defaults
+    iCloudEnabled = defaults.bool(forKey: Prefs.syncICloudEnabled)
     folder = defaults.string(forKey: Prefs.notesSyncFolder).map {
       URL(filePath: $0, directoryHint: .isDirectory)
     }
@@ -165,6 +174,17 @@ import Observation
     skipped = Set(defaults.stringArray(forKey: Prefs.syncSkipped) ?? [])
     newKindsHint = defaults.bool(forKey: Prefs.syncNewKindsHint)
     self.upgraded = upgraded
+    NotificationCenter.default.addObserver(
+      forName: NSNotification.Name.NSUbiquityIdentityDidChange, object: nil, queue: .main
+    ) { [weak self] _ in
+      MainActor.assumeIsolated {
+        guard let self, self.iCloudEnabled else { return }
+        self.cloudGeneration += 1
+        self.folder = nil
+        self.library = nil
+        self.syncNow()
+      }
+    }
   }
 
   /// 从只同步便签的版本（0.6.0）升上来、开着同步的这台：文件夹有、设置这一类没合过（没账本）、「同步的内容」的勾从没存过
@@ -210,13 +230,15 @@ import Observation
     defaults.removeObject(forKey: Prefs.syncNewKindsHint)
   }
 
-  var isEnabled: Bool { folder != nil && library != nil }
+  var isEnabled: Bool { iCloudEnabled || (folder != nil && library != nil) }
 
   // MARK: 开关
 
   /// 用这个文件夹同步：没有标记的写一个（新的库），有标记的接着用那个库。返回没开成的原因（nil = 开了，调用方接着
   /// start）。文件夹里已经有别的电脑在同步时合不合在一起，由调用方先问（NoteSyncDisk.inspect）
-  func enable(folder: URL) async -> String? {
+  func enable(folder: URL, newLibrary: String? = nil, cloudGeneration expected: Int? = nil) async
+    -> String?
+  {
     let inspection = await NoteSyncDisk.inspect(folder: folder, device: store.deviceID)
     guard inspection.exists else { return "这个文件夹不在了" }
     guard !inspection.markerUnreadable else {
@@ -234,12 +256,14 @@ import Observation
       return "这个文件夹里已经有别的东西了，新建一个空文件夹来同步"
     }
     if library == nil {
-      let fresh = UUID().uuidString
+      let fresh = newLibrary ?? UUID().uuidString
       if let problem = await NoteSyncDisk.createMarker(in: folder, library: fresh) {
-        return problem
+        let latest = await NoteSyncDisk.inspect(folder: folder, device: store.deviceID)
+        guard newLibrary != nil, latest.marker?.library == fresh else { return problem }
       }
       library = fresh
     }
+    if let expected, !iCloudEnabled || cloudGeneration != expected { return "iCloud 同步已关闭或账户已变更" }
     defaults.set(folder.path, forKey: Prefs.notesSyncFolder)
     defaults.set(library, forKey: Prefs.notesSyncLibrary)
     // 这一版里开的同步（合不合在一起已经问过）：勾存一份，下次启动不当成升级上来的（isUpgrade）
@@ -253,6 +277,10 @@ import Observation
 
   /// 不同步了：文件夹里的东西留着，本机的便签不动；为同步留着的几份缓存放掉
   func disable() {
+    cloudGeneration += 1
+    iCloudEnabled = false
+    defaults.removeObject(forKey: Prefs.syncICloudEnabled)
+    defaults.removeObject(forKey: Prefs.syncICloudAccount)
     stop()
     SyncLedger.forget()
     for source in sources { source.syncStopped() }
@@ -265,6 +293,53 @@ import Observation
     peers = []
     lastSync = nil
     downloading = 0
+  }
+
+  /// 一键使用应用专用 iCloud 容器，系统未就绪时由现有定时轮询继续尝试。
+  func enableICloud() {
+    disable()
+    iCloudEnabled = true
+    defaults.set(true, forKey: Prefs.syncICloudEnabled)
+    start()
+  }
+
+  /// 每轮先核对系统账户和容器，避免退出或切换 Apple 账户后继续使用上次缓存的路径。
+  private func prepareICloud() async -> Bool {
+    let generation = cloudGeneration
+    do {
+      let location = try await iCloudLocation()
+      guard iCloudEnabled, generation == cloudGeneration else { return false }
+      if let account = defaults.string(forKey: Prefs.syncICloudAccount), account != location.account
+      {
+        throw NoteSyncDisk.ICloudFailure.accountChanged
+      }
+      if folder != location.folder || library == nil {
+        // 同时首次开启的设备使用同一初始库编号，避免各自创建随机标记后互相阻挡。
+        let initialLibrary = "84BD9190-7E13-48BE-B6EC-00DD179B5745"
+        if let reason = await enable(
+          folder: location.folder, newLibrary: initialLibrary, cloudGeneration: generation)
+        {
+          throw NSError(
+            domain: "ICloudSync", code: 1, userInfo: [NSLocalizedDescriptionKey: reason])
+        }
+        guard iCloudEnabled, generation == cloudGeneration else { return false }
+        Log.storage.info("icloud-sync container connected")
+      }
+      defaults.set(location.account, forKey: Prefs.syncICloudAccount)
+      cloudFailure = nil
+      return true
+    } catch {
+      guard iCloudEnabled, generation == cloudGeneration else { return false }
+      let reason = error.localizedDescription
+      if cloudFailure != reason {
+        Log.storage.error(
+          "icloud-sync prepare failed type=\(String(reflecting: type(of: error)), privacy: .public) reason=\(reason, privacy: .public)"
+        )
+        cloudFailure = reason
+      }
+      halt(.failed(reason))
+      return false
+    }
   }
 
   /// 开始（开着同步时）：马上一轮，之后每 interval 秒一轮
@@ -330,6 +405,11 @@ import Observation
 
   /// 合一轮、写出去（单测直接 await 它）
   func round() async {
+    if iCloudEnabled {
+      status = .syncing
+      if !(await prepareICloud()) { return }
+    }
+    let cloudRound = cloudGeneration
     guard let folder, let library else { return }
     status = .syncing
     // 刹车的「继续」：每部分只用自己的额度，走到刹车那一步（这一轮定了停不停）才用掉
@@ -342,7 +422,9 @@ import Observation
         secretSync.syncStopped()
       }
     }
-    guard self.folder == folder, self.library == library else { return }
+    guard self.folder == folder, self.library == library, cloudRound == cloudGeneration else {
+      return
+    }
     let secretAccess = secretSync?.access
     let sources = self.sources.filter {
       ($0.syncKind == .secrets || syncs($0.syncKind.rawValue)) && featureOn($0.syncKind.rawValue)
@@ -359,7 +441,9 @@ import Observation
       folder: folder, cache: cache, kinds: sources.map(\.syncKind), device: store.deviceID,
       secretAccess: secretAccess)
     // 读的时候被关了、换了文件夹：这一轮作废
-    guard self.folder == folder, self.library == library else { return }
+    guard self.folder == folder, self.library == library, cloudRound == cloudGeneration else {
+      return
+    }
     cache = snapshot.cache
     downloading = snapshot.downloading
     if snapshot.missing { return halt(.missingFolder) }
@@ -497,6 +581,9 @@ import Observation
       self.name = name
     }
     // 读取或合并期间被停止密钥同步时丢弃这一轮密钥输出，其他类别照常写。
+    guard self.folder == folder, self.library == library, cloudRound == cloudGeneration else {
+      return
+    }
     if secretSync?.access?.id != secretAccess?.id {
       kindFiles[.secrets] = nil
     }

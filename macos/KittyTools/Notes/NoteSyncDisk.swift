@@ -22,10 +22,45 @@
 //   合在一起）；标记**不覆盖**着写（两台同时开、别处刚传来一个：先到的算）。
 // 测试在临时目录里真读真写（不是同步盘，没有下载状态）。
 
+import CryptoKit
 import Foundation
 import os
 
 nonisolated enum NoteSyncDisk {
+  /// 系统定位的应用专用 iCloud 目录及本机用于识别账户变更的摘要。
+  struct ICloudLocation: Sendable {
+    var folder: URL
+    var account: String
+  }
+
+  /// 在主线程外请求系统 iCloud 容器，自动建立应用自己的同步目录。
+  @concurrent static func iCloudLocation() async throws -> ICloudLocation {
+    let manager = FileManager.default
+    guard let identity = manager.ubiquityIdentityToken else { throw ICloudFailure.signedOut }
+    let bytes = try NSKeyedArchiver.archivedData(
+      withRootObject: identity, requiringSecureCoding: false)
+    let account = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    let bundle = Bundle.main.bundleIdentifier ?? "com.yy.kitty-tools.native"
+    guard let container = manager.url(forUbiquityContainerIdentifier: "iCloud." + bundle) else {
+      throw ICloudFailure.unavailable
+    }
+    let folder = container.appending(path: "Sync", directoryHint: .isDirectory)
+    try manager.createDirectory(at: folder, withIntermediateDirectories: true)
+    return ICloudLocation(folder: folder, account: account)
+  }
+
+  /// 系统账户或应用容器不可用时给出准确的操作入口，保留真实失败状态。
+  enum ICloudFailure: LocalizedError {
+    case signedOut, unavailable, accountChanged
+
+    var errorDescription: String? {
+      switch self {
+      case .signedOut: "iCloud 账户不可用，请在系统设置中登录 Apple 账户并开启 iCloud 云盘"
+      case .unavailable: "无法访问应用的 iCloud 容器，请确认系统已允许 Kitty Tools 使用 iCloud 云盘"
+      case .accountChanged: "Apple 账户已变更，iCloud 同步已暂停，请关闭后重新开启以使用当前账户"
+      }
+    }
+  }
   /// 墓碑文件、别的小文件最大多少
   static let maxErasedBytes = 32 << 20
   static let maxSmallBytes = 64 << 10

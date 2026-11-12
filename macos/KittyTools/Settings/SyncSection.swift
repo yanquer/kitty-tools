@@ -1,14 +1,10 @@
 // 设置 › 通用「同步」（2026-10-23 全局同步拍板 A1：从 设置 › 便签 挪过来，整个 App 的同步都在这一节。执行在 NoteSyncer）。
-// 没开时一行「选择文件夹…」；开着时文件夹、状态、停止 / 立即同步，「同步的内容」每类一个勾（A3，这台电脑自己的），其他 Mac。
+// 一键开启 iCloud 同步，由系统定位应用容器；已有自选文件夹继续兼容，打开 iCloud 开关后切换到应用容器。
 
 import AppKit
 import SwiftUI
 
-/// 没开时一行「选择文件夹…」（打开面板先指到 iCloud 云盘）；选的文件夹里已经有别的 Mac 在同步，先问一句合不合在一起。
-/// 开着时：文件夹（悬停看路径）+「停止同步」+「立即同步」（刹车时换成「继续同步」），说明是状态（上次同步、还在下载几个），
-/// 出了问题橙字说为什么、能怎么办；下面一行列出别的 Mac 和它们上次有改动的时刻。勾上一类会是它第一次合（升级上来的那台
-/// 新加的几类先没勾，NoteSyncer.isUpgrade）时先问合不合在一起，说明和选文件夹时那段一样。**这一节不去碰那个文件夹**（可能在卡住的
-/// 网络盘上）：名字取路径最后一段，读写都在 NoteSyncer / NoteSyncDisk 的主线程外
+/// iCloud 开关、同步状态和内容分类；系统容器解析与文件读写均在执行层的主线程外进行。
 struct SyncSection: View {
   let syncer: NoteSyncer
   /// 几部分跟着的功能开着没有（关着的那部分不同步：勾下面说一声）
@@ -18,27 +14,14 @@ struct SyncSection: View {
   @AppStorage(Feature.launcher.prefsKey) private var launcherOn = true
   @AppStorage(Feature.statusScreen.prefsKey) private var statusScreenOn = true
   @AppStorage(Feature.reminders.prefsKey) private var remindersOn = true
-  /// 开同步没成的原因（橙字）
-  @State private var problem: String?
-  /// 面板开着、正在看文件夹、正在开
-  @State private var isBusy = false
-  /// 正在看选的文件夹、正在开（卡住的网络盘上可能要等一会儿：副标题说一声）
-  @State private var looking = false
   /// 每分钟走一下：「上次同步：3 分钟前」自己往前走（便签关着时没有新的一轮来刷新）
   @State private var tick = Date.now
-  /// 要不要和文件夹里的合在一起（确认框开着时有值）
-  @State private var joining: Joining?
   /// 勾上会是第一次合的那一类（NoteSyncer.joins）：先问合不合在一起，确认框开着时有值
   @State private var confirming: String?
 
-  struct Joining {
-    var folder: URL
-    var devices: Int
-    var notes: Int
-  }
-
   var body: some View {
     Section {
+      offRow
       if let folder = syncer.folder {
         folderRow(folder)
           .confirmationDialog(
@@ -101,14 +84,12 @@ struct SyncSection: View {
           Text("其他 Mac")
           Text(peersLine)
         }
-      } else {
-        offRow
       }
     } header: {
       Text("同步")
     } footer: {
       SectionFootnote(
-        "勾上的几类在几台 Mac 之间保持一样，取消一类只是不再同步它。翻译密钥使用随机密钥加密，解密密钥由同一 Apple 账户的 iCloud 钥匙串传递；其他内容以文本文件和图片保存，能打开文件夹的人都看得到。每台 Mac 只往自己的那份里写、读所有 Mac 的，改动一般几十秒到几分钟传过去（看同步盘多快）。两台都改了同一条时，后改的留下（便签的另一版放进「最近删除」）；别处删掉的片段、收藏和生词，这台 Mac 上只是不再收藏；一轮要删的太多会先停下来问。停止同步后，文件夹里的东西留着，这台 Mac 上的也不动。"
+        "新加入的 Mac 会采用云端设置和快捷键，按同步后的保留规则清理历史，便签等内容合并保留。翻译密钥加密保存并由 iCloud 钥匙串自动解锁，其他内容以明文保存。关闭同步后，本机和云端的数据都会保留。"
       )
     }
   }
@@ -127,105 +108,49 @@ struct SyncSection: View {
   }
 
   private var offRow: some View {
-    LabeledContent {
-      Button("选择文件夹…", action: choose)
-        .disabled(isBusy)
-    } label: {
-      Text("在几台 Mac 之间同步")
-      Text(
-        looking ? "正在看这个文件夹…" : "选一个几台 Mac 都看得到的空文件夹，比如在 iCloud 云盘里新建一个；每台 Mac 选同一个")
-      if let problem {
-        Text(problem).foregroundStyle(Color(nsColor: .systemOrange))
+    Toggle(
+      isOn: Binding {
+        syncer.iCloudEnabled
+      } set: { enabled in
+        if enabled { syncer.enableICloud() } else { syncer.disable() }
       }
-    }
-    .confirmationDialog(
-      "和这个文件夹里已经在同步的 Mac 合在一起？",
-      isPresented: Binding {
-        joining != nil
-      } set: {
-        if !$0 { joining = nil }
-      },
-      presenting: joining
-    ) { joining in
-      Button("合在一起") { start(joining.folder) }
-    } message: { joining in
+    ) {
+      Text("iCloud 同步")
       Text(
-        (joining.notes > 0
-          ? "这个文件夹里已经有 \(joining.devices) 台 Mac 在同步，有 \(joining.notes) 条便签（含「最近删除」里的）。"
-          : "这个文件夹里已经有 \(joining.devices) 台 Mac 在同步。")
-          + Self.joinNote)
+        syncer.folder != nil && !syncer.iCloudEnabled
+          ? "原文件夹同步正在运行，开启后自动切换到应用的 iCloud 空间"
+          : "在使用同一 Apple 账户的 Mac 上开启，即可自动同步")
+      if syncer.iCloudEnabled, syncer.folder == nil {
+        Text(statusLine)
+        if let trouble { Text(trouble).foregroundStyle(.orange) }
+      }
     }
   }
 
-  /// 「合在一起？」的说明：第一次选文件夹时、开着同步时勾上还没合过的一类时（升级上来的那台）共用
+  /// 分类首次加入的说明，供开着同步时勾上还没合过的一类使用
   static let joinNote =
     "合在一起后，这台 Mac 上的便签、片段、收藏、生词和状态屏的状态和它们的会出现在每台 Mac 上（同样的不重复）；设置、快捷键、功能开关（连同内置的网页搜索、翻译服务）换成已经在同步的那几台的——剪贴板的保留天数、「不记录」的 App 也跟着换，超出新保留天数的历史会清掉。同一 Apple 账户开启 iCloud 钥匙串后，翻译密钥也会自动加密同步，首次加入采用已有的同名服务密钥。之后同一条两边都改过的，后改的留下。"
-
-  /// 选文件夹：先看一眼（主线程外），已经有别的 Mac 在用就先问，不然直接开。面板是设置窗上的表单（开着时点不到
-  /// 便签的开关、换不了页：不然关掉便签之后还会把同步起起来，换了页这一节的状态也丢了）
-  private func choose() {
-    let panel = NSOpenPanel()
-    panel.canChooseDirectories = true
-    panel.canChooseFiles = false
-    panel.canCreateDirectories = true
-    if FileManager.default.fileExists(atPath: Self.iCloudDrive.path) {
-      panel.directoryURL = Self.iCloudDrive
-    }
-    panel.message = "选一个几台 Mac 都看得到的空文件夹（比如在 iCloud 云盘里新建一个「Kitty Tools 同步」），每台 Mac 选同一个"
-    panel.prompt = "用这个文件夹同步"
-    problem = nil
-    isBusy = true
-    let chosen: (NSApplication.ModalResponse) -> Void = { response in
-      guard response == .OK, let folder = panel.url else {
-        isBusy = false
-        return
-      }
-      looking = true
-      Task {
-        let seen = await NoteSyncDisk.inspect(folder: folder, device: syncer.store.deviceID)
-        looking = false
-        isBusy = false
-        // 有别的 Mac 在同步才问（更新的格式不问：开的时候直接说先更新）
-        if let marker = seen.marker, marker.format <= NoteSyncFolder.format, seen.devices > 0 {
-          joining = Joining(folder: folder, devices: seen.devices, notes: seen.notes)
-        } else {
-          start(folder)
-        }
-      }
-    }
-    if let window = NSApp.keyWindow {
-      panel.beginSheetModal(for: window, completionHandler: chosen)
-    } else {
-      panel.begin(completionHandler: chosen)
-    }
-  }
-
-  private func start(_ folder: URL) {
-    isBusy = true
-    looking = true
-    Task {
-      problem = await syncer.enable(folder: folder).map(Self.clause)
-      looking = false
-      isBusy = false
-      if problem == nil { syncer.start() }
-    }
-  }
 
   // MARK: 开着
 
   private func folderRow(_ folder: URL) -> some View {
     LabeledContent {
       HStack(spacing: 8) {
-        Label(folder.lastPathComponent, systemImage: "folder")
-          .lineLimit(1)
-          .truncationMode(.middle)
-          .foregroundStyle(.secondary)
-          .help(Self.shown(folder))
-        Button("停止同步") { syncer.disable() }
-          .buttonStyle(.plain)
-          .foregroundStyle(Style.brandInk)
-          .pointerStyle(.link)
-          .help("文件夹里的东西留着，这台 Mac 上的数据也不动")
+        Label(
+          syncer.iCloudEnabled ? "iCloud" : folder.lastPathComponent,
+          systemImage: syncer.iCloudEnabled ? "icloud" : "folder"
+        )
+        .lineLimit(1)
+        .truncationMode(.middle)
+        .foregroundStyle(.secondary)
+        .help(syncer.iCloudEnabled ? "由系统自动管理同步空间" : Self.shown(folder))
+        if !syncer.iCloudEnabled {
+          Button("停止同步") { syncer.disable() }
+            .buttonStyle(.plain)
+            .foregroundStyle(Style.brandInk)
+            .pointerStyle(.link)
+            .help("文件夹里的东西留着，这台 Mac 上的数据也不动")
+        }
         if case .waiting = syncer.status {
           Button("继续同步") { syncer.confirmTrashing() }
         } else {
@@ -234,7 +159,7 @@ struct SyncSection: View {
         }
       }
     } label: {
-      Text("同步文件夹")
+      Text(syncer.iCloudEnabled ? "同步状态" : "原文件夹同步")
       Text(statusLine)
       if syncer.newKindsHint {
         Text("现在也能同步设置、片段和收藏这些了：在下面勾上要同步的几类，勾的时候先问合不合在一起")
@@ -292,7 +217,10 @@ struct SyncSection: View {
     case .stopped(let problem):
       switch problem {
       case .missingFolder: "找不到同步文件夹：没接上、被挪走或删了，找到了自己接着同步"
-      case .notTheFolder: "同步文件夹里的同步记录被换掉或删了：先停止同步，再选一个新的空文件夹（每台 Mac 都换过去）"
+      case .notTheFolder:
+        syncer.iCloudEnabled
+          ? "iCloud 同步记录缺失或已变更，请等待云盘下载完成，或从云盘历史版本恢复同步记录"
+          : "原文件夹的同步记录已变更，请停止原文件夹同步后开启 iCloud 同步"
       case .newerFormat: "文件夹里有更新版本的 Kitty Tools 写的东西，先更新这台 Mac 上的 Kitty Tools"
       case .unreadable(let name):
         "\(name.map { "「\($0)」" } ?? "另一台 Mac ")那份同步记录还读不出来（多半是还没下载完），读到了自己接着同步"
@@ -306,7 +234,7 @@ struct SyncSection: View {
     guard !syncer.peers.isEmpty else {
       // 第一轮还没合完（或者合之前就停了）时不知道有没有
       return syncer.lastSync == nil
-        ? "同步一轮之后列在这里" : "还没有——在另一台 Mac 的 设置 › 通用 里选同一个文件夹"
+        ? "同步一轮之后列在这里" : "还没有——在另一台 Mac 的 设置 › 通用 里开启 iCloud 同步"
     }
     return syncer.peers.map { peer in
       let name = peer.name ?? "没写名字的一台"

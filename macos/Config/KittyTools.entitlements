@@ -6,6 +6,13 @@
      隐私设置里也没有这一项） -->
 <plist version="1.0">
 <dict>
+	<!-- 系统管理应用专用 iCloud 文档容器，用户只需开启同步开关。 -->
+	<key>com.apple.developer.icloud-services</key>
+	<array><string>CloudDocuments</string></array>
+	<key>com.apple.developer.icloud-container-identifiers</key>
+	<array><string>iCloud.$(PRODUCT_BUNDLE_IDENTIFIER)</string></array>
+	<key>com.apple.developer.ubiquity-container-identifiers</key>
+	<array><string>iCloud.$(PRODUCT_BUNDLE_IDENTIFIER)</string></array>
 	<!-- 自动加密同步经 iCloud 钥匙串传递随机密钥；访问组按正式版与 Dev 版各自的应用身份隔离。 -->
 	<key>com.apple.application-identifier</key>
 	<string>$(DEVELOPMENT_TEAM).$(PRODUCT_BUNDLE_IDENTIFIER)</string>
