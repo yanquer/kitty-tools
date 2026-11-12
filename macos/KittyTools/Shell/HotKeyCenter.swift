@@ -248,8 +248,8 @@ enum HotKeyAction: String, CaseIterable {
     case .audioRecord: nil
     // 沿用用户的 Snipaste 贴图快捷键。
     case .pinClipboard: HotKey(keyCode: kVK_ANSI_W, modifiers: optionKey)
-    // 截图历史（2026-10-26 拍板 C2）：不占默认键，要的人自己设
-    case .shotHistory: nil
+    // 截图历史沿用用户指定的 ⌥E，入口仍由截图功能开关控制。
+    case .shotHistory: HotKey(keyCode: kVK_ANSI_E, modifiers: optionKey)
     // 晾衣绳（第十族，2026-10-26 拍板 C1）：主入口是鼠标停到菜单栏那一条上，键给要的人自己设
     case .clothesline: nil
     // 状态屏（Z10）不设默认键：不能让人误触。设了键是先出选状态的面板（Z13a；设置里可改成直接进入列表里的第一个状态）

@@ -82,6 +82,7 @@ struct ShortcutsTests {
       (.recognizeText, kVK_ANSI_D, optionKey),
       (.screenRecord, kVK_ANSI_R, optionKey),
       (.pinClipboard, kVK_ANSI_W, optionKey),
+      (.shotHistory, kVK_ANSI_E, optionKey),
       (.noteCapture, kVK_ANSI_N, optionKey),
     ]
     for (action, code, modifiers) in expected {
@@ -98,7 +99,7 @@ struct ShortcutsTests {
   /// 新默认键让给用户自己设的组合，已保存的旧键和清除状态照常保留；只用内存里的偏好数据。
   @Test(arguments: [
     HotKeyAction.clipboard, .selectionTranslate, .inputTranslate, .screenshotTranslate, .screenshot,
-    .recognizeText, .screenRecord, .pinClipboard,
+    .recognizeText, .screenRecord, .pinClipboard, .shotHistory,
   ])
   func defaultYieldsToUserBinding(action: HotKeyAction) throws {
     let hotKey = try #require(action.defaultHotKey)
