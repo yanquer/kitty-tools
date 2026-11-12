@@ -2333,7 +2333,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   /// 框选交回的结果 → 出图动作（复制 / 保存 / 钉图 / 识字 / 长截图 / 录屏 / 色值）
   private func handleCapture(_ outcome: RegionSelector.Outcome) async {
     switch outcome {
-    case .color(let hex): copyColor(hex)
+    case .color(let value): copyColor(value)
     // 截图调整时按 R / 点「录屏」切过去的（录屏第 2 批）：和 ⌥R 框完一样开录
     case .record(let region): beginRecording(region)
     case .scroll(let region):
@@ -2396,7 +2396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           "录屏", { await RegionSelector.record($0, lastRegion: lastRegion) })
       else { return }
       switch outcome {
-      case .color(let hex): copyColor(hex)
+      case .color(let value): copyColor(value)
       case .record(let region): beginRecording(region)
       case .capture, .scroll: break
       }
@@ -2596,10 +2596,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   /// 框选时按 C：复制放大镜中心的色值（截图、录屏的框选）
-  private func copyColor(_ hex: String) {
-    Paster.write(string: hex, record: true)
+  private func copyColor(_ value: String) {
+    Paster.write(string: value, record: true)
     island.show(
-      "已复制色值", detail: hex, leading: Self.color(hex).map(Island.Leading.color) ?? .tone)
+      "已复制色值", detail: value, leading: Self.color(value).map(Island.Leading.color) ?? .tone)
   }
 
   /// 长截图（截图框选后按 S）：遮罩已收起，在实时画面上边滚边拼，结束后按选的方式输出。整个过程都算在这次截图里
@@ -3395,12 +3395,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     return (.clothesline, slot, screen)
   }
 
-  /// "#RRGGBB" → 色块（取色的轻提示用）
-  private static func color(_ hex: String) -> NSColor? {
-    guard hex.count == 7, let value = Int(hex.dropFirst(), radix: 16) else { return nil }
+  /// HEX / RGB → 色块（取色的轻提示用），复用剪贴板颜色解析，保持两种格式的提示一致。
+  private static func color(_ text: String) -> NSColor? {
+    guard let color = ContentForm.color(in: text) else { return nil }
     return NSColor(
-      srgbRed: CGFloat(value >> 16 & 0xFF) / 255, green: CGFloat(value >> 8 & 0xFF) / 255,
-      blue: CGFloat(value & 0xFF) / 255, alpha: 1)
+      srgbRed: color.red, green: color.green, blue: color.blue, alpha: color.alpha)
   }
 
   /// 复制即译：只露出浮窗、不抢键盘（用户可能正在别的 App 里继续打字）。网址、路径、纯数字 / 符号、超长的和刚翻过的同一段

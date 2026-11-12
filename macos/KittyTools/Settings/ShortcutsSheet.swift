@@ -422,6 +422,7 @@ struct ShortcutsSheet: View {
           Entry("⌘方向键", text: "把那条边往外推（按住 ⇧ 10 点）"),
           Entry("⌥方向键", text: "把那条边往里收（按住 ⇧ 10 点）"),
           Entry(key(.pickColor), text: "复制放大镜里的色值"),
+          Entry("⇧", text: "放大镜可见时单按，切换 HEX / RGB 色值"),
           Entry("Esc", text: "逐级退出，最后取消截图"),
         ]),
       // mac-whisker §6 截图「工具」「标注编辑」

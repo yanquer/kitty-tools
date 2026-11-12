@@ -7,7 +7,7 @@
 // 认元素时是窗口里指针下最小的那一层，滚轮往上大一层、往下小一层，Tab 只认窗口，见 hoverStack）、单击选中悬停的那块，
 // 拖出或单击后进入调整：整条边和四角都能拖（悬停的边加粗、手柄放大）、拖动平移、方向键微调（⇧ 10 点）、
 // ⌘ / ⌥ + 方向键推 / 收那条边；尺寸胶囊点数字输入像素宽高、比例菜单锁比例；右键没有标注时回到待选，有标注时只提示；
-// 放大镜显示中心像素的色值（C 复制），按住 ⌘ 出整屏十字准线；S 长截图、T 钉图、O 识字；
+// 放大镜显示中心像素的色值（单按 ⇧ 切换 HEX / RGB，C 复制当前格式），按住 ⌘ 出整屏十字准线；S 长截图、T 钉图、O 识字；
 // 标注 1–0（矩形、椭圆、箭头、直线、画笔、荧光笔、文字、序号、打码（模糊 / 像素）、聚光灯，⇧ 画正方形 / 45° 线，再按一次收起；
 // 序号单击放、画笔一路累点），画完自动选中（工具保持）：粉色虚线框 + 手柄，拖手柄改大小（矩形类四角 + 边中点；⇧ 约束、⌥ 从中心）、拖箭头中间的手柄弯曲
 // （⇧ 对称、拖回弦上拉直、双击拉直）、拖本体移动（⇧ 锁轴）、⌥ 拖动复制、⌘D 复制、改颜色粗细、⌫ 删除、双击文字重新编辑，
@@ -192,7 +192,15 @@ final class SelectionView: NSView, NSTextViewDelegate {
   /// 开着的 HUD 菜单（同时最多一个）：Esc、点外面先收它
   private var hudMenu: HUDMenu?
   /// 放大镜上次取样的像素和色值（像素没变就不重取）
-  private var sampled: (x: Int, y: Int, hex: String)?
+  private var sampled: (x: Int, y: Int, hex: String, rgb: String)?
+  /// 缓存还要跟取色格式比：指针不动或移回另一块屏时，也更新信息卡
+  private var sampledUsesRGB = false
+
+  /// 放大镜显示和复制共用的当前色值；交互测试核对格式切换结果
+  var sampledColor: String? {
+    guard let sampled else { return nil }
+    return session.colorUsesRGB ? sampled.rgb : sampled.hex
+  }
   /// 上次画的悬停窗口：换到别的窗口 / 桌面时，洞和高亮框磁吸变形过去（S5）
   private var shownHover: CGRect?
   /// 指针下这一点上的几层（认元素时，见 hoverStack）
@@ -386,10 +394,10 @@ final class SelectionView: NSView, NSTextViewDelegate {
   /// 放大镜：15 × 15 像素、每格 9 pt（135 pt，圆角 10，2 pt 白环 + 阴影），0.5 pt 像素网格，中心行列粉色十字条带，
   /// 放大镜那块格子有多大（交互测试按它判断有没有带色值卡）
   static var loupeSide: CGFloat { CGFloat(loupePixels) * loupeCell }
-  /// 整块放大镜多高：截图时是格子 + 6 + 信息卡，翻译 / 识字只有格子
+  /// 整块放大镜多高：截图、录屏时是格子 + 6 + 信息卡，翻译 / 识字只有格子
   var magnifierHeight: CGFloat { magnifier.bounds.height }
 
-  /// 中心格按亮度描黑或白；截图时下贴一张 40 pt 的 HUD 信息卡（色块 + HEX + 坐标 +「C」键帽）。
+  /// 中心格按亮度描黑或白；截图、录屏时下贴一张 40 pt 的 HUD 信息卡（色块 + 色值 + 坐标 +「C」键帽）。
   /// 截图翻译 / 识字只有放大镜本身、没有那张卡（2026-10-26 用户问「翻译识字时有必要出现吗」）：
   /// 这两种模式下用户要的是把文字框准，色值是噪音；而且那张卡上的「C」在这两种模式里本来就按不动
   /// （取色那一句在 keyDown 里被 `guard adjusts` 挡着）
@@ -398,7 +406,7 @@ final class SelectionView: NSView, NSTextViewDelegate {
     let cell = Self.loupeCell
     let middle = CGFloat(Self.loupePixels / 2) * cell
     let loupeFrame = CGRect(
-      x: 0, y: annotates ? Self.infoHeight + 6 : 0, width: side, height: side)
+      x: 0, y: adjusts ? Self.infoHeight + 6 : 0, width: side, height: side)
     loupe.frame = loupeFrame
     loupe.magnificationFilter = .nearest
     loupe.cornerRadius = Style.Radius.card
@@ -472,7 +480,7 @@ final class SelectionView: NSView, NSTextViewDelegate {
     for layer in [infoSwatch, infoText, infoKey] { infoCard.addSublayer(layer) }
     magnifier.bounds = CGRect(x: 0, y: 0, width: side, height: loupeFrame.maxY)
     magnifier.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-    for layer in annotates ? [loupeShadow, loupe, infoCard] : [loupeShadow, loupe] {
+    for layer in adjusts ? [loupeShadow, loupe, infoCard] : [loupeShadow, loupe] {
       magnifier.addSublayer(layer)
     }
   }
@@ -1085,20 +1093,32 @@ final class SelectionView: NSView, NSTextViewDelegate {
     let scaleY = CGFloat(image.height) / max(bounds.height, 1)
     let x = min(max(Int(mouse.x * scaleX), 0), image.width - 1)
     let y = min(max(Int((bounds.height - mouse.y) * scaleY), 0), image.height - 1)
-    if sampled?.x != x || sampled?.y != y,
+    if sampled?.x != x || sampled?.y != y || sampledUsesRGB != session.colorUsesRGB,
       let sample = Self.sample(image, x: x, y: y, size: Self.loupePixels)
     {
       loupe.contents = sample.image
-      sampled = (x, y, sample.hex)
+      sampled = (x, y, sample.hex, sample.rgb)
+      sampledUsesRGB = session.colorUsesRGB
       let color = Self.color(hex: sample.hex)
       infoSwatch.backgroundColor = color.cgColor
       // 中心格描边按亮度选黑或白
       let luminance =
         0.299 * color.redComponent + 0.587 * color.greenComponent + 0.114 * color.blueComponent
       loupeCenter.strokeColor = (luminance > 0.6 ? NSColor.black : NSColor.white).cgColor
-      guard annotates else { return placeMagnifier() }  // 翻译 / 识字没有那张信息卡
+      guard adjusts, let sampledColor else { return placeMagnifier() }  // 翻译 / 识字没有那张信息卡
+      // RGB 的最长文本按同一字号留足宽度，HEX 保持原来的尺寸；放大镜居中对齐信息卡。
+      let width = session.colorUsesRGB ? max(Self.loupeSide, 212) : Self.loupeSide
+      infoCard.frame.size.width = width
+      infoCard.shadowPath = CGPath(
+        roundedRect: infoCard.bounds, cornerWidth: Style.Radius.card,
+        cornerHeight: Style.Radius.card, transform: nil)
+      infoText.frame.size.width = width - 68
+      infoKey.frame.origin.x = width - 30
+      loupe.frame.origin.x = (width - Self.loupeSide) / 2
+      loupeShadow.frame.origin.x = loupe.frame.origin.x
+      magnifier.bounds.size.width = width
       let info = NSMutableAttributedString(
-        string: sample.hex,
+        string: sampledColor,
         attributes: [
           .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .semibold),
           .foregroundColor: Style.HUD.text,
@@ -1208,9 +1228,10 @@ final class SelectionView: NSView, NSTextViewDelegate {
     return path
   }
 
-  /// 以像素 (x, y)（原点左上）为中心取 size×size 像素，转成 sRGB（放大镜显示用），中心像素的色值写成 #RRGGBB。
+  /// 以像素 (x, y)（原点左上）为中心取 size×size 像素，转成 sRGB（放大镜显示用），中心像素同时生成 HEX / RGB。
   /// 超出图的部分是黑色。纯函数，配单测
-  static func sample(_ image: CGImage, x: Int, y: Int, size: Int) -> (image: CGImage, hex: String)?
+  static func sample(_ image: CGImage, x: Int, y: Int, size: Int)
+    -> (image: CGImage, hex: String, rgb: String)?
   {
     let half = size / 2
     let region = CGRect(x: x - half, y: y - half, width: size, height: size)
@@ -1233,7 +1254,10 @@ final class SelectionView: NSView, NSTextViewDelegate {
     guard let data = context.data, let zoomed = context.makeImage() else { return nil }
     // 内存里第 0 行是图的顶行
     let pixel = data.assumingMemoryBound(to: UInt8.self) + half * size * 4 + half * 4
-    return (zoomed, String(format: "#%02X%02X%02X", pixel[0], pixel[1], pixel[2]))
+    return (
+      zoomed, String(format: "#%02X%02X%02X", pixel[0], pixel[1], pixel[2]),
+      "rgb(\(pixel[0]), \(pixel[1]), \(pixel[2]))"
+    )
   }
 
   // MARK: 工具栏
@@ -2409,6 +2433,7 @@ final class SelectionView: NSView, NSTextViewDelegate {
   /// 滚轮 / 触控板双指：待选、悬停着元素时换层，往上（按手指 / 滚轮的方向，不跟着「自然滚动」反过来）大一层、往下小一层，
   /// 最大到那扇窗口；到头了不动。惯性那一段不算
   override func scrollWheel(with event: NSEvent) {
+    session.colorShiftArmed = false
     if wheelRestyle(event) { return }
     guard selection == nil, drag == nil, event.momentumPhase.isEmpty, let mouse,
       hoverRect(at: mouse) != nil, var current = stack, current.layers.count > 1
@@ -2484,6 +2509,7 @@ final class SelectionView: NSView, NSTextViewDelegate {
   }
 
   override func mouseDown(with event: NSEvent) {
+    session.colorShiftArmed = false
     // 等着新的快捷键时点了一下：不改了（刚改完的那句提示也收掉）
     if rebinding != nil || !rebindTip.layer.isHidden { stopRebind() }
     let point = point(event)
@@ -2786,6 +2812,7 @@ final class SelectionView: NSView, NSTextViewDelegate {
   }
 
   override func rightMouseDown(with event: NSEvent) {
+    session.colorShiftArmed = false
     // 截图、录屏：有选区时（不管在哪块屏）右键回到待选、重新框，没有才取消；截图翻译 / 识字直接取消
     guard adjusts, selection != nil || session.hasSelection(besides: self) else {
       return session.finish(nil)
@@ -2896,6 +2923,7 @@ final class SelectionView: NSView, NSTextViewDelegate {
   ]
 
   override func keyDown(with event: NSEvent) {
+    session.colorShiftArmed = false
     if let key = rebinding { return rebind(key, with: event) }
     let code = Int(event.keyCode)
     if code == kVK_Escape { return escape() }
@@ -2957,7 +2985,7 @@ final class SelectionView: NSView, NSTextViewDelegate {
         pickColor()
         return true
       }
-      if showsMagnifier, let sampled { session.finish(.color(sampled.hex)) }
+      if showsMagnifier, let sampledColor { session.finish(.color(sampledColor)) }
       return true
     case .record where !Feature.record.isOn:
       return false
@@ -2987,6 +3015,7 @@ final class SelectionView: NSView, NSTextViewDelegate {
 
   /// 修饰键按下 / 松开：⌘ 十字准线跟着出现 / 消失；框选、拖边、画 / 拖标注途中按上次的鼠标位置重算（⇧ ⌥ ⌃ 立刻生效）
   override func flagsChanged(with event: NSEvent) {
+    updateColorFormat(with: event)
     modifiers = event.modifierFlags
     if let dragPoint {
       switch drag {
@@ -2999,11 +3028,33 @@ final class SelectionView: NSView, NSTextViewDelegate {
     super.flagsChanged(with: event)
   }
 
+  /// 只认放大镜可见时单按并松开 ⇧，组合键和拖选保留各自的用途，启动热键的松键不会切换。
+  private func updateColorFormat(with event: NSEvent) {
+    let flags = event.modifierFlags.intersection([.command, .control, .option, .shift, .function])
+    guard [kVK_Shift, kVK_RightShift].contains(Int(event.keyCode)) else {
+      session.colorShiftArmed = false
+      return
+    }
+    if flags == .shift {
+      session.colorShiftArmed = adjusts && showsMagnifier && drag == nil
+      return
+    }
+    let switches =
+      session.colorShiftArmed && flags.isEmpty && adjusts && showsMagnifier && drag == nil
+    session.colorShiftArmed = false
+    guard switches else { return }
+    session.colorUsesRGB.toggle()
+    refreshPointer()
+    announce(session.colorUsesRGB ? "颜色格式 RGB" : "颜色格式 HEX")
+  }
+
   override func keyUp(with event: NSEvent) {
+    session.colorShiftArmed = false
     if Int(event.keyCode) == kVK_Space { isSpaceDown = false } else { super.keyUp(with: event) }
   }
 
   override func performKeyEquivalent(with event: NSEvent) -> Bool {
+    session.colorShiftArmed = false
     guard adjusts, window?.isKeyWindow == true else {
       return super.performKeyEquivalent(with: event)
     }

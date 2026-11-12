@@ -193,12 +193,12 @@ struct SelectionInteractionTests {
     }
 
     /// 按下 / 松开修饰键（拖动中也行）
-    func modifiers(_ flags: NSEvent.ModifierFlags) {
+    func modifiers(_ flags: NSEvent.ModifierFlags, keyCode: Int = kVK_Shift) {
       view.flagsChanged(
         with: NSEvent.keyEvent(
           with: .flagsChanged, location: .zero, modifierFlags: flags, timestamp: 0,
           windowNumber: window.windowNumber, context: nil, characters: "",
-          charactersIgnoringModifiers: "", isARepeat: false, keyCode: 56)!)
+          charactersIgnoringModifiers: "", isARepeat: false, keyCode: UInt16(keyCode))!)
     }
 
     func rightClick(_ point: CGPoint) {
@@ -1119,6 +1119,115 @@ struct SelectionInteractionTests {
     #expect(h.view.annotations.count == 1)
     let outcome = await h.outcome { h.key(kVK_Escape, "\u{1b}") }
     #expect(outcome == nil)
+  }
+
+  /// 单按左右 ⇧ 都切换一次，指针不动也更新色值，C 交回当前显示的格式。
+  @Test(arguments: [SelectionView.Mode.capture, .record], [false, true])
+  func shiftSwitchesColorAndCopiesDisplayedValue(mode: SelectionView.Mode, copiesRGB: Bool)
+    async throws
+  {
+    let h = Harness(mode: mode)
+    h.move(CGPoint(x: 300, y: 300))
+    let hex = try #require(h.view.sampledColor)
+    #expect(hex.hasPrefix("#"))
+    let color = try #require(ContentForm.color(in: hex))
+    h.modifiers(.shift)
+    #expect(h.view.sampledColor == hex)
+    h.modifiers([])
+    let rgb = try #require(h.view.sampledColor)
+    #expect(rgb.hasPrefix("rgb("))
+    #expect(ContentForm.color(in: rgb) == color)
+    #expect(h.view.magnifierHeight > SelectionView.loupeSide)
+    h.modifiers(.shift, keyCode: kVK_RightShift)
+    h.modifiers([], keyCode: kVK_RightShift)
+    #expect(h.view.sampledColor == hex)
+    if copiesRGB {
+      h.modifiers(.shift)
+      h.modifiers([])
+    }
+    let outcome = await h.outcome { h.key(kVK_ANSI_C, "c") }
+    guard case .color(let copied)? = outcome else {
+      Issue.record("取色没有交回颜色文本")
+      return
+    }
+    #expect(copied == (copiesRGB ? rgb : hex))
+  }
+
+  /// 启动热键的松键、⇧ 组合键、滚轮和 ⇧ 拖选都不改变取色格式。
+  @Test func colorFormatIgnoresModifierCombinationsAndDragging() throws {
+    let h = Harness()
+    h.move(CGPoint(x: 300, y: 300))
+    let hex = try #require(h.view.sampledColor)
+    h.modifiers([])
+    #expect(h.view.sampledColor == hex)
+    h.modifiers([.command, .shift])
+    h.modifiers([])
+    #expect(h.view.sampledColor == hex)
+    h.modifiers(.shift)
+    h.modifiers([.shift, .control], keyCode: kVK_Control)
+    h.modifiers(.shift, keyCode: kVK_Control)
+    h.modifiers([])
+    #expect(h.view.sampledColor == hex)
+    h.modifiers(.shift)
+    h.arrow(kVK_RightArrow, flags: .shift)
+    h.modifiers([])
+    #expect(h.view.sampledColor == hex)
+    h.modifiers(.shift)
+    _ = h.keyEquivalent(kVK_ANSI_Z, "Z", flags: [.command, .shift])
+    h.modifiers([])
+    #expect(h.view.sampledColor == hex)
+    h.modifiers(.shift)
+    h.scroll(up: true)
+    h.modifiers([])
+    #expect(h.view.sampledColor == hex)
+    h.modifiers(.shift)
+    h.begin(CGPoint(x: 300, y: 200), to: CGPoint(x: 500, y: 260), flags: .shift)
+    h.modifiers([])
+    #expect(h.view.sampledColor == hex)
+    h.modifiers(.shift)
+    h.modifiers([])
+    #expect(h.view.sampledColor == hex)
+    h.release(CGPoint(x: 500, y: 260))
+  }
+
+  /// 隐藏放大镜以及识字、翻译的快速框选模式不接受颜色格式切换。
+  @Test func colorFormatRequiresVisibleColorMagnifier() {
+    let h = Harness()
+    h.modifiers(.shift)
+    h.modifiers([])
+    #expect(!h.session.colorUsesRGB)
+    h.makeSelection()
+    h.move(CGPoint(x: 500, y: 400))
+    #expect(!h.view.showsMagnifier)
+    h.modifiers(.shift)
+    h.modifiers([])
+    #expect(!h.session.colorUsesRGB)
+    let quick = Harness(mode: .quick)
+    quick.move(CGPoint(x: 300, y: 300))
+    quick.modifiers(.shift)
+    quick.modifiers([])
+    #expect(!quick.session.colorUsesRGB)
+    #expect(quick.view.magnifierHeight == SelectionView.loupeSide)
+  }
+
+  /// 多屏共用本次取色格式，跨屏松开 ⇧ 也只切换一次，新会话回到 HEX。
+  @Test func colorFormatFollowsPointerAcrossScreens() throws {
+    let (left, right) = Harness.screens()
+    let point = CGPoint(x: 300, y: 300)
+    right.move(point)
+    let hex = try #require(right.view.sampledColor)
+    left.move(point)
+    left.modifiers(.shift)
+    right.move(point)
+    right.modifiers([])
+    #expect(right.view.sampledColor?.hasPrefix("rgb(") == true)
+    left.move(point)
+    #expect(left.view.sampledColor == right.view.sampledColor)
+    left.modifiers(.shift)
+    left.modifiers([])
+    right.move(point)
+    #expect(right.view.sampledColor == hex)
+    #expect(!Harness().session.colorUsesRGB)
   }
 
   // 截图翻译 / 识字：待选和框选时有放大镜、尺寸只读，⇧ 照样正方形，松手即确认（交回裁好的图）

@@ -2,7 +2,7 @@
 // - 截图翻译 / 识字 select：拖动框选（⇧ 正方形、⌥ 从中心、空格平移、吸附窗口边），松手确认，Esc / 右键取消；
 // - 截图 capture：悬停高亮窗口，或窗口里指针下的元素（设置 › 截图开着、有辅助功能授权时：滚轮换大小、Tab 只认窗口，
 //   ElementFinder）/ 单击截下那一块、确认后可调整选区和标注，↩ 复制、⌘S 保存、⇧⌘S 另存为、T 钉图、
-//   S 长截图、工具栏识字 / 翻译，C 复制放大镜中心的色值，D 选中上次的区域；
+//   S 长截图、工具栏识字 / 翻译，C 复制放大镜中心的色值，单按 ⇧ 切换 HEX / RGB，D 选中上次的区域；
 // - 录屏 record：框选同截图（悬停、单击窗口 / 整屏、调整、尺寸胶囊、D），没有标注和出图键，↩ / 双击 / 录制条的 ● 交回选区；
 //   截图调整时按 R / 工具栏「录屏」也会切到它（选区不变，录屏第 2 批）。
 // 遮罩是不激活前台的 NSPanel（和 OverlayPanel 一样不抢前台 App），会话结束立即 orderOut 释放，不常驻
@@ -40,7 +40,7 @@ enum RegionSelector {
 
   enum Outcome {
     case capture(Capture)
-    /// 放大镜中心像素的色值（#RRGGBB，sRGB）
+    /// 放大镜中心像素的色值（#RRGGBB 或 rgb(r, g, b)，sRGB）
     case color(String)
     /// 长截图：只带选区（点，AppKit 全局坐标），不裁图（裁出的图会拖住整屏冻结帧直到长截图结束）
     case scroll(CGRect)
@@ -379,6 +379,10 @@ final class SelectionSession {
   var findsElements = false
   /// Tab 切成了只认窗口（只管这一次框选，几块屏共用）
   var windowOnly = false
+  /// 取色格式只在本次框选内保留，几块屏共用；新会话从 HEX 开始
+  var colorUsesRGB = false
+  /// 单按 ⇧ 松开时才切换，期间按键、点击或拖动会取消；跨屏时继续识别同一次按键
+  var colorShiftArmed = false
   /// 问元素的那个函数（单测、截图自检换成假的，不碰真的 App）；默认的带着这次框选的缓存
   lazy var findElements: (pid_t, CGPoint) -> ElementFinder.Answer = { [hits] pid, point in
     ElementFinder.query(pid: pid, at: point, cache: hits)

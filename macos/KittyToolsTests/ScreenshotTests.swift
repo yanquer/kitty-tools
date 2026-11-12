@@ -339,8 +339,10 @@ struct ScreenshotTests {
       context.fill(CGRect(x: 0, y: 10, width: 20, height: 10))
     }
     #expect(SelectionView.sample(image, x: 10, y: 15, size: 15)?.hex == "#3478F6")
+    #expect(SelectionView.sample(image, x: 10, y: 15, size: 15)?.rgb == "rgb(52, 120, 246)")
     let corner = try #require(SelectionView.sample(image, x: 0, y: 2, size: 15))
     #expect(corner.hex == "#FF0000")
+    #expect(corner.rgb == "rgb(255, 0, 0)")
     #expect(corner.image.width == 15 && corner.image.height == 15)
     // 放大的图也是正的：顶上 5 行、左边 7 列在图外（黑），其余是红
     let pixels = try #require(corner.image.dataProvider?.data as Data?)

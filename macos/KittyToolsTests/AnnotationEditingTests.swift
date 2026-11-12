@@ -519,11 +519,19 @@ struct AnnotationEditingTests {
     let h = harness(tool: .rectangle)
     h.drag(CGPoint(x: 350, y: 250), CGPoint(x: 450, y: 350))
     h.move(CGPoint(x: 350, y: 280))  // 空心矩形认边线
+    // 吸管让放大镜可见，按住 ⇧ 滚轮仍改标注粗细，松开时取消本次格式切换。
+    try #require(h.styleBar).onEyedropper()
+    h.modifiers(.shift)
+    #expect(h.session.colorShiftArmed)
     h.scroll(up: true)
+    #expect(!h.session.colorShiftArmed)
+    h.modifiers([])
+    #expect(!h.session.colorUsesRGB)
     #expect(h.view.annotations.first?.style.weight == .large)
     h.scroll(up: false)
     h.scroll(up: false)
     #expect(h.view.annotations.first?.style.weight == .small)
+    h.key(kVK_Escape, "\u{1b}")
     h.view.tool = .counter
     h.click(CGPoint(x: 550, y: 300))
     let styleBar = try #require(h.view.subviews.lazy.compactMap { $0 as? StyleBar }.first)
@@ -601,8 +609,9 @@ struct AnnotationEditingTests {
     #expect(h.view.annotations.map(\.shape) == [box.offset(by: CGSize(width: 10, height: 0)).shape])
   }
 
-  // 吸管（拍板 O10）：点了之后放大镜出来，单击取中心像素的颜色给当前工具；点预设色作废；Esc 取消
-  @Test func eyedropperPicksColorFromTheShot() async throws {
+  /// 吸管在 HEX / RGB 下均取中心像素，单击或 C 保留截图会话，预设色与 Esc 沿用既有行为。
+  @Test(arguments: [false, true])
+  func eyedropperPicksColorFromTheShot(usesRGB: Bool) async throws {
     // 上半红、下半蓝（上下翻了就取错）
     let context = try #require(
       CGContext(
@@ -620,6 +629,12 @@ struct AnnotationEditingTests {
     styleBar.onEyedropper()
     h.move(CGPoint(x: 500, y: 450))  // 上半
     #expect(h.view.showsMagnifier)
+    if usesRGB {
+      h.modifiers(.shift)
+      h.modifiers([])
+    }
+    #expect(h.session.colorUsesRGB == usesRGB)
+    #expect(h.view.sampledColor?.hasPrefix(usesRGB ? "rgb(" : "#") == true)
     h.click(CGPoint(x: 500, y: 450))
     #expect(h.view.annotations.isEmpty)  // 这一下只取色，不画
     let custom = try #require(h.view.style.custom)
