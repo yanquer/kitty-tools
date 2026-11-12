@@ -4555,6 +4555,27 @@ struct SnapshotProbeTests {
           to: "\(out)/sync-\(state)\(dark ? "-dark" : "").png")
       }
     }
+    // 自动加密密钥同步的状态，全部使用模拟钥匙串，避免系统提示或真实账户写入。
+    let secretStates: [(String, SecretSync.Status)] = [
+      ("preparing", .preparing), ("waiting", .waiting), ("ready", .ready),
+      ("failed", .failed("钥匙串访问失败（系统错误码 -34018）")), ("paused", .paused),
+    ]
+    for (state, status) in secretStates {
+      for dark in [false, true] {
+        try snapshot(
+          section { syncer in
+            let secrets = SecretSync(
+              services: TranslateServiceStore(services: [.zhipu]), defaults: prefs,
+              read: { _ in nil }, write: { _, _ in }, readCloudKey: { _ in nil },
+              addCloudKey: { _, _ in })
+            secrets.status = status
+            syncer.secretSync = secrets
+            syncer.status = .idle
+            syncer.lastSync = now
+          }, size: NSSize(width: 640, height: 1200), dark: dark,
+          to: "\(out)/sync-secrets-\(state)\(dark ? "-dark" : "").png")
+      }
+    }
     // 从只同步便签的版本升上来：新加的几类没勾、文件夹那一行多一句（第三轮体检 R1）
     prefs.removeObject(forKey: Prefs.syncSkipped)
     try snapshot(

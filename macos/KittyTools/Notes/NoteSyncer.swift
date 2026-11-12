@@ -94,6 +94,8 @@ import Observation
   @ObservationIgnored var clock: () -> Date = { .now }
   /// 便签之外接进同步的几类（AppDelegate 给：剪贴板、翻译历史……）
   @ObservationIgnored var sources: [SyncSource] = []
+  /// 可选的密钥同步同时供通用设置页展示解锁和失败状态。
+  var secretSync: SecretSync?
   /// 一部分（"notes" / 类别名）的功能开着没有（AppDelegate 给；单测里都开着）
   @ObservationIgnored var featureOn: (String) -> Bool = { _ in true }
   /// 这台电脑上不同步的几部分（设置页的勾）
@@ -333,8 +335,19 @@ import Observation
     // 刹车的「继续」：每部分只用自己的额度，走到刹车那一步（这一轮定了停不停）才用掉
     let allowance = confirmed
     let notesOn = syncs(Self.notesPart) && featureOn(Self.notesPart)
+    if let secretSync {
+      if syncs(SyncRecords.Kind.services.rawValue), featureOn(SyncRecords.Kind.services.rawValue) {
+        await secretSync.prepare(folder: folder, library: library)
+      } else {
+        secretSync.syncStopped()
+      }
+    }
+    guard self.folder == folder, self.library == library else { return }
+    let secretAccess = secretSync?.access
     let sources = self.sources.filter {
-      syncs($0.syncKind.rawValue) && featureOn($0.syncKind.rawValue)
+      ($0.syncKind == .secrets || syncs($0.syncKind.rawValue)) && featureOn($0.syncKind.rawValue)
+        && ($0.syncKind != .secrets
+          || (secretAccess != nil && syncs(SyncRecords.Kind.services.rawValue)))
     }
     if notesOn { store.flush() }
     // 这一轮没整轮走完（停在哪一步）的话下一轮都照常合
@@ -343,7 +356,8 @@ import Observation
     var settling: [String: Inputs] = [:]
     var skipping: Set<String> = []
     let snapshot = await NoteSyncDisk.read(
-      folder: folder, cache: cache, kinds: sources.map(\.syncKind), device: store.deviceID)
+      folder: folder, cache: cache, kinds: sources.map(\.syncKind), device: store.deviceID,
+      secretAccess: secretAccess)
     // 读的时候被关了、换了文件夹：这一轮作废
     guard self.folder == folder, self.library == library else { return }
     cache = snapshot.cache
@@ -355,6 +369,9 @@ import Observation
       return halt(problem(for: stop, in: snapshot))
     }
     if snapshot.unreadableInfo.contains(store.deviceID) { return halt(.downloading) }
+    if let error = snapshot.secretProblem {
+      secretSync?.report(error, stage: "read", library: library)
+    }
     let epoch: Int
     do {
       epoch = try store.meta(Self.epochKey).flatMap { Int($0) } ?? 0
@@ -479,9 +496,13 @@ import Observation
       name = await computerName()
       self.name = name
     }
+    // 读取或合并期间被停止密钥同步时丢弃这一轮密钥输出，其他类别照常写。
+    if secretSync?.access?.id != secretAccess?.id {
+      kindFiles[.secrets] = nil
+    }
     let written = await NoteSyncDisk.write(
       plan, folder: folder, device: store.deviceID, name: name, epoch: next,
-      images: store.images?.directory, kinds: kindFiles)
+      images: store.images?.directory, kinds: kindFiles, secretAccess: secretAccess)
     // 拿下来的图已经在本机的图片目录里了（别处出了错、换了文件夹也一样）：按「没图」建的墙卡片、编辑器里的占位框换上它们
     store.imagesArrived(Set(written.downloaded.map(\.id)))
     // 写成了的便签：这次运行里新建的空白便签丢掉时要留墓碑（NoteStore.dropIfBlank）
@@ -503,6 +524,7 @@ import Observation
     confirmed = [:]
     braked = nil
     if let trouble { return halt(trouble) }
+    if sources.contains(where: { $0.syncKind == .secrets }) { secretSync?.succeeded() }
     status = .idle
   }
 
@@ -559,6 +581,9 @@ import Observation
     previous: Inputs?
   ) -> KindStep {
     guard !source.syncBusy else { return .skipped }
+    if source.syncKind == .secrets, let error = snapshot.secretProblem {
+      return .problem(.failed(error.localizedDescription))
+    }
     let part = source.syncKind.rawValue
     let me = store.deviceID
     var own: SyncRecords.File?
@@ -579,7 +604,13 @@ import Observation
     } catch {
       return .problem(.failed("\(source.syncKind.title)的同步记录读不出来"))
     }
-    let local = source.syncValues()
+    let local: [String: String]
+    do {
+      local = try source.syncValues()
+    } catch {
+      (source as? SecretSync)?.report(error, stage: "collect", library: library)
+      return .problem(.failed(error.localizedDescription))
+    }
     let inputs =
       snapshot.unsettled.contains(part)
       ? nil
@@ -610,6 +641,7 @@ import Observation
       // 有一条是更新版本写的（多了这一版不认识的字段）：整类没落，等这台更新
       case .newer: return .problem(.newerFormat)
       case .failed: return .problem(.failed("\(source.syncKind.title)没存上"))
+      case .failure(let reason): return .problem(.failed(reason))
       }
     }
     // 和读到的自己那份按字节比（String 的相等按 Unicode 等价，只换了写法的改动会漏写）

@@ -100,7 +100,7 @@ struct TranslateServiceDetail: View {
         } header: {
           Text("密钥")
         } footer: {
-          SectionFootnote("只存在这台 Mac 的钥匙串里。")
+          SectionFootnote("保存在本机钥匙串。开启通用设置中的「翻译服务」同步后，会自动加密同步到同一 Apple 账户的 Mac，需要系统开启「密码与钥匙串」同步。")
         }
       }
       Section {

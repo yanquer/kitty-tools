@@ -326,6 +326,10 @@ enum Prefs {
   /// 这台电脑上不同步的几部分（全局同步 A3：设置页每类一个勾；"notes" 和 SyncRecords.Kind 的名字），同样是这台电脑自己的
   /// 状态、不注册默认值（没有 = 都同步）
   nonisolated static let syncSkipped = "syncSkipped"
+  /// 首次自动准备加密同步时的候选密钥编号，按库编号后缀存储；仅含编号，不注册默认值。
+  nonisolated static let syncSecretsCandidate = "syncSecretsCandidate"
+  /// 密钥写入中断的本机恢复记录，按同步库编号后缀存密文，不注册默认值。
+  nonisolated static let syncSecretsRecovery = "syncSecretsRecovery"
   /// 设置页「同步」那一节要不要说「现在也能同步别的几类」（从只同步便签的版本升上来时存下，勾上哪一类、看过那一节就删；NoteSyncer），
   /// 同样是这台电脑自己的状态、不注册默认值
   nonisolated static let syncNewKindsHint = "syncNewKindsHint"

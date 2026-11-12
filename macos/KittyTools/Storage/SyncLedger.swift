@@ -16,7 +16,7 @@ import Foundation
   /// 这一轮先别合（剪贴板面板里有还能撤销的删除、改动：还没落库，落下去之前合会把它们算成删了又加回来）
   var syncBusy: Bool { get }
   /// 本机该同步的那份：编号 → 内容（JSON，键排好序；编 → 落 → 再编得到一样的字节）
-  func syncValues() -> [String: String]
+  func syncValues() throws -> [String: String]
   /// 每条真正改的时刻（毫秒；仓库记着的才给，没给的引擎用「现在」）
   func syncChanged() -> [String: Int64]
   /// 账本（library 是文件夹的库编号；没有、是别的库的 = nil，第一次合）。读不出来抛错（当成第一次合的话，本机上一轮之后改的
@@ -30,12 +30,14 @@ import Foundation
 }
 
 /// 落合并结果落成了没有
-enum SyncApplied {
+enum SyncApplied: Equatable {
   case saved
   /// 有一条是更新版本写的（SyncRecords.decodeExact 解不出、编号或种类这一版不认识）：整个不落，这一类停下说先更新
   case newer
   /// 写库、存账本没成
   case failed
+  /// 可定位的失败原因；密钥同步使用它传递解密、服务校验及钥匙串错误。
+  case failure(String)
 }
 
 extension SyncSource {

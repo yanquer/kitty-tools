@@ -234,7 +234,9 @@ struct SyncProbeTests {
       var ledger: SyncRecords.Ledger?
       var outcome = SyncRecords.Outcome()
       Self.time("\(prefix) \(kind.rawValue).values(\(own?.records.count ?? 0))") {
-        local = source.syncValues()
+        do { local = try source.syncValues() } catch {
+          Issue.record("同步探针读取数据失败：\(error)")
+        }
         changed = source.syncChanged()
       }
       Self.time("\(prefix) \(kind.rawValue).ledger") {

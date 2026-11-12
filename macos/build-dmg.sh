@@ -32,8 +32,15 @@ jq -e --arg v "$VERSION" 'any(.[]; .version == $v)' "$CHANGELOG" >/dev/null \
   || { echo "changelog.json 缺少 $VERSION 条目"; exit 1; }
 codesign --verify --deep --strict --verbose=2 "$APP"
 # 先存变量再判断：pipefail 下 grep -q 提前退出会让管道报错，导致漏报
-ENT=$(codesign -d --entitlements - "$APP" 2>&1 || true)
+ENT=$(codesign -d --entitlements - --xml "$APP" 2>/dev/null)
 [[ "$ENT" != *get-task-allow* ]] || { echo "get-task-allow 混入发布包"; exit 1; }
+# 自动密钥同步依赖实际签名中的应用身份与私有钥匙串访问组，缺失时禁止分发产物。
+SYNC_APP_ID="HTX9F4KG39.$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")"
+[[ "$(printf '%s' "$ENT" | plutil -extract 'com\.apple\.application-identifier' raw -o - -)" == "$SYNC_APP_ID" ]] \
+  || { echo "自动加密同步缺少正确的应用身份授权"; exit 1; }
+printf '%s' "$ENT" | plutil -extract keychain-access-groups json -o - - \
+  | jq -e --arg group "$SYNC_APP_ID" 'index($group) != null' >/dev/null \
+  || { echo "自动加密同步缺少应用私有钥匙串访问组"; exit 1; }
 lipo -archs "$APP/Contents/MacOS/$NAME"
 # 访达扩展（第十一族「访达右键」，mac-native §6）：在包里、本团队签名、开着沙盒、没有 get-task-allow
 FX="$APP/Contents/PlugIns/KittyToolsFinder.appex"

@@ -49,6 +49,8 @@ nonisolated enum NoteSyncDisk {
       var read: SyncRecords.Read
       /// 原样的字节（只留本机自己的：合完要写的和它一样就不写）
       var bytes: Data?
+      /// 解锁会话变化后不能复用旧的密钥明文缓存。
+      var secretAccessID: UUID?
     }
     var kinds: [String: KindEntry] = [:]
   }
@@ -96,13 +98,16 @@ nonisolated enum NoteSyncDisk {
     var unsettled: Set<String> = []
     /// 本机自己那几类文件的原样字节（device 给了才有）
     var ownBytes: [SyncRecords.Kind: Data] = [:]
+    /// 加密文件解密或认证失败的具体原因，执行层与设置页据此停止这一类。
+    var secretProblem: (any Error)?
   }
 
   // MARK: 读
 
   /// kinds：这一轮要合的几类（每台子文件夹里读它们的 `<类别>.json`）；device：本机的电脑编号（留下自己那几类的原样字节）
   @concurrent static func read(
-    folder root: URL, cache old: Cache, kinds: [SyncRecords.Kind] = [], device me: String? = nil
+    folder root: URL, cache old: Cache, kinds: [SyncRecords.Kind] = [], device me: String? = nil,
+    secretAccess: SecretSyncCipher.Access? = nil
   ) async -> Snapshot {
     var snapshot = Snapshot()
     guard isDirectory(root) else {
@@ -235,13 +240,27 @@ nonisolated enum NoteSyncDisk {
           var entry: Cache.KindEntry?
           if let cached = old.kinds[url.path], cached.file == attributes.file,
             cached.modified == attributes.modified, cached.size == attributes.size,
-            name != me || cached.bytes != nil
+            name != me || cached.bytes != nil,
+            kind != .secrets || cached.secretAccessID == secretAccess?.id
           {
             entry = cached
-          } else if let data = coordinatedRead(url) {
-            entry = Cache.KindEntry(
-              file: attributes.file, modified: attributes.modified, size: attributes.size,
-              read: SyncRecords.file(from: data, kind: kind), bytes: name == me ? data : nil)
+          } else {
+            do {
+              let data = try coordinatedReadChecked(url)
+              let plain: Data
+              if kind == .secrets {
+                guard let secretAccess else { throw SecretSyncCipher.Failure.disabled }
+                plain = try secretAccess.open(data, device: name)
+              } else {
+                plain = data
+              }
+              entry = Cache.KindEntry(
+                file: attributes.file, modified: attributes.modified, size: attributes.size,
+                read: SyncRecords.file(from: plain, kind: kind), bytes: name == me ? plain : nil,
+                secretAccessID: kind == .secrets ? secretAccess?.id : nil)
+            } catch {
+              if kind == .secrets { snapshot.secretProblem = error }
+            }
           }
           if let entry, Date.now.timeIntervalSince(attributes.modified) > 2 {
             snapshot.cache.kinds[url.path] = entry
@@ -364,11 +383,21 @@ nonisolated enum NoteSyncDisk {
 
   /// 协调着读一个文件（同步盘的守护进程在写它时等它写完）
   private static func coordinatedRead(_ url: URL) -> Data? {
+    try? coordinatedReadChecked(url)
+  }
+
+  /// 保留文件读取和协调的原始错误，密钥同步不能把权限失败归为正常空结果。
+  private static func coordinatedReadChecked(_ url: URL) throws -> Data {
     var data: Data?
+    var failure: Error?
     var error: NSError?
     NSFileCoordinator(filePresenter: nil).coordinate(
       readingItemAt: url, options: .withoutChanges, error: &error
-    ) { data = try? Data(contentsOf: $0) }
+    ) { target in
+      do { data = try Data(contentsOf: target) } catch { failure = error }
+    }
+    if let failure = failure ?? error { throw failure }
+    guard let data else { throw CocoaError(.fileReadUnknown) }
     return data
   }
 
@@ -390,7 +419,8 @@ nonisolated enum NoteSyncDisk {
   /// kinds：一类一类数据里要（重）写的那几份（编好的文件内容，SyncRecords.data），写在 device.json 之前
   @concurrent static func write(
     _ plan: NoteSyncFolder.Publish, folder root: URL, device: String, name: String,
-    epoch: Int, images: URL?, kinds: [SyncRecords.Kind: Data] = [:]
+    epoch: Int, images: URL?, kinds: [SyncRecords.Kind: Data] = [:],
+    secretAccess: SecretSyncCipher.Access? = nil
   ) async -> Written {
     var result = Written()
     func note(_ error: Error) {
@@ -471,7 +501,21 @@ nonisolated enum NoteSyncDisk {
       }
     }
     for (kind, data) in kinds.sorted(by: { $0.key.rawValue < $1.key.rawValue }) {
-      do { try coordinatedWrite(data, to: mine.appending(path: kind.fileName)) } catch {
+      do {
+        let bytes: Data
+        if kind == .secrets {
+          guard let secretAccess else { throw SecretSyncCipher.Failure.disabled }
+          bytes = try secretAccess.seal(data, device: device)
+        } else {
+          bytes = data
+        }
+        try coordinatedWrite(bytes, to: mine.appending(path: kind.fileName))
+      } catch {
+        if kind == .secrets {
+          Log.storage.error(
+            "secret-sync write failed stage=encrypt-or-write device=\(device, privacy: .public) type=\(String(reflecting: type(of: error)), privacy: .public) reason=\(error.localizedDescription, privacy: .public)"
+          )
+        }
         note(error)
       }
     }
@@ -537,6 +581,55 @@ nonisolated enum NoteSyncDisk {
   }
 
   // MARK: 标记
+
+  /// 读取加密密钥编号前先认同步库，未下载或缺失的配置不能冒充首次启用。
+  @concurrent static func secretConfiguration(
+    in root: URL, library: String
+  ) async throws -> SecretSyncCipher.Configuration? {
+    guard
+      case .read(let marker) = small(
+        root.appending(path: NoteSyncFolder.markerName), as: NoteSyncFolder.Marker.self),
+      marker.library == library, marker.format <= NoteSyncFolder.format
+    else { throw SecretSyncCipher.Failure.downloading }
+    let url = root.appending(path: SecretSyncCipher.configurationName)
+    switch state(of: url, limit: maxSmallBytes) {
+    case .absent:
+      let devices = root.appending(path: NoteSyncFolder.devicesName)
+      guard let names = entries(devices) else { throw SecretSyncCipher.Failure.downloading }
+      for name in names where isDeviceName(name) {
+        let file = devices.appending(path: name).appending(path: SyncRecords.Kind.secrets.fileName)
+        if case .absent = state(of: file, limit: SecretSyncCipher.maxBytes * 2) { continue }
+        throw SecretSyncCipher.Failure.missing
+      }
+      return nil
+    case .notHere: throw SecretSyncCipher.Failure.downloading
+    case .tooLarge: throw SecretSyncCipher.Failure.tooLarge
+    case .here:
+      return try JSONDecoder().decode(
+        SecretSyncCipher.Configuration.self, from: coordinatedReadChecked(url))
+    }
+  }
+
+  /// 首次启用以不覆盖方式落盘，保留并发创建和文件系统的原始错误。
+  @concurrent static func createSecretConfiguration(
+    _ configuration: SecretSyncCipher.Configuration, in root: URL, library: String
+  ) async throws {
+    guard
+      case .read(let marker) = small(
+        root.appending(path: NoteSyncFolder.markerName), as: NoteSyncFolder.Marker.self),
+      marker.library == library
+    else { throw SecretSyncCipher.Failure.downloading }
+    let data = try SyncRecords.encoder.encode(configuration)
+    var failure: Error?
+    var coordination: NSError?
+    NSFileCoordinator(filePresenter: nil).coordinate(
+      writingItemAt: root.appending(path: SecretSyncCipher.configurationName), options: [],
+      error: &coordination
+    ) { target in
+      do { try data.write(to: target, options: .withoutOverwriting) } catch { failure = error }
+    }
+    if let error = failure ?? coordination { throw error }
+  }
 
   /// 选了一个文件夹，开同步之前看一眼：有没有标记（已经有库了）、有几台别的电脑、多少条便签
   struct Inspection: Equatable, Sendable {

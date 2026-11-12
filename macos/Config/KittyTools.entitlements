@@ -6,6 +6,13 @@
      隐私设置里也没有这一项） -->
 <plist version="1.0">
 <dict>
+	<!-- 自动加密同步经 iCloud 钥匙串传递随机密钥；访问组按正式版与 Dev 版各自的应用身份隔离。 -->
+	<key>com.apple.application-identifier</key>
+	<string>$(DEVELOPMENT_TEAM).$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(DEVELOPMENT_TEAM).$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	</array>
 	<key>com.apple.security.automation.apple-events</key>
 	<true/>
 	<key>com.apple.security.device.audio-input</key>

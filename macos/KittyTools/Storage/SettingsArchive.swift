@@ -17,7 +17,7 @@
 // - vocabulary：生词本（收藏的翻译）；
 // - notes：便签（没删的，含归档；每条带编号、标题、正文、颜色、建于、改于、修订号、归档、固定、顺序）；这三类是明文；
 // - secrets：翻译服务的密钥，默认不带；要带就用密码加密（PBKDF2-HMAC-SHA256 → AES-256-GCM），文件里没有明文密钥。
-//   密钥平时只在钥匙串里（mac-native §2），这是它唯一出钥匙串的地方：用户自己勾选、自己设密码。密钥和各服务往哪发请求
+//   密钥平时只在钥匙串里（mac-native §2），导出时由用户自己勾选、自己设密码；自动同步另走 SecretSync。密钥和各服务往哪发请求
 //   （routing）绑在一起校验：文件里某个服务的地址被人改过，密钥就解不开，不会带着密钥连到改过的地址。
 //
 // 导入：文件可能是别人给的、手改过的，read 把不认识、类型不对、超出范围的项都丢掉，后面的 apply 只见查过的。
@@ -501,7 +501,12 @@ struct SettingsArchive: Codable, Equatable {
   /// 和密钥一起校验的内容（不加密、只防改）：每个服务往哪发请求——id、种类、协议、地址、走不走 DeepLX，
   /// 每项写成「字节数:内容」连起来（分得清边界，写法不随系统版本变）
   private var routing: Data {
-    let fields = (translateServices ?? []).flatMap { service in
+    Self.routing(of: translateServices ?? [])
+  }
+
+  /// 导出和加密同步共用服务请求去向的认证字节，保持已有导出文件兼容。
+  nonisolated static func routing(of services: [TranslateService]) -> Data {
+    let fields = services.flatMap { service in
       [
         service.id, service.kind.rawValue, service.aiProtocol?.rawValue ?? "",
         service.baseURL ?? "", service.usesDeepLX == true ? "1" : "0",

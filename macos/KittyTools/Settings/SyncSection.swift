@@ -71,8 +71,20 @@ struct SyncSection: View {
           detail: "启动器里的网页搜索和快捷链接", feature: "启动器", isOn: launcherOn)
         part(
           SyncRecords.Kind.services.rawValue, title: SyncRecords.Kind.services.title,
-          detail: "哪几个服务、顺序和设置；密钥不同步，别的 Mac 上要自己填一次", feature: "翻译",
+          detail: "哪几个服务、顺序和设置；密钥通过 iCloud 钥匙串自动加密同步", feature: "翻译",
           isOn: translateOn)
+        if let secrets = syncer.secretSync {
+          LabeledContent {
+            if case .failed = secrets.status {
+              Text(secretStatus(secrets)).foregroundStyle(.orange)
+            } else {
+              Text(secretStatus(secrets)).foregroundStyle(.secondary)
+            }
+          } label: {
+            Text("翻译密钥")
+            Text("同一 Apple 账户并开启 iCloud 钥匙串后自动接入")
+          }
+        }
         part(
           SyncRecords.Kind.statuses.rawValue, title: SyncRecords.Kind.statuses.title,
           detail: "状态屏里自己写的那几个状态", feature: "状态屏", isOn: statusScreenOn)
@@ -96,12 +108,23 @@ struct SyncSection: View {
       Text("同步")
     } footer: {
       SectionFootnote(
-        "勾上的几类在几台 Mac 之间保持一样，取消一类只是不再同步它。同步文件夹里放的是不加密的文本文件和图片，能打开这个文件夹的人都看得到。每台 Mac 只往自己的那份里写、读所有 Mac 的，改动一般几十秒到几分钟传过去（看同步盘多快）。两台都改了同一条时，后改的留下（便签的另一版放进「最近删除」）；别处删掉的片段、收藏和生词，这台 Mac 上只是不再收藏；一轮要删的太多会先停下来问。停止同步后，文件夹里的东西留着，这台 Mac 上的也不动。"
+        "勾上的几类在几台 Mac 之间保持一样，取消一类只是不再同步它。翻译密钥使用随机密钥加密，解密密钥由同一 Apple 账户的 iCloud 钥匙串传递；其他内容以文本文件和图片保存，能打开文件夹的人都看得到。每台 Mac 只往自己的那份里写、读所有 Mac 的，改动一般几十秒到几分钟传过去（看同步盘多快）。两台都改了同一条时，后改的留下（便签的另一版放进「最近删除」）；别处删掉的片段、收藏和生词，这台 Mac 上只是不再收藏；一轮要删的太多会先停下来问。停止同步后，文件夹里的东西留着，这台 Mac 上的也不动。"
       )
     }
   }
 
   // MARK: 没开
+
+  /// 独立展示密钥的自动解锁和失败状态，等待钥匙串时其他同步内容继续处理。
+  private func secretStatus(_ secrets: SecretSync) -> String {
+    switch secrets.status {
+    case .preparing: "正在准备加密同步…"
+    case .waiting: "等待 iCloud 钥匙串，请确认系统已开启「密码与钥匙串」同步"
+    case .ready: "已自动解锁，随翻译服务同步"
+    case .paused: "随翻译服务暂停"
+    case .failed(let reason): reason
+    }
+  }
 
   private var offRow: some View {
     LabeledContent {
@@ -136,7 +159,7 @@ struct SyncSection: View {
 
   /// 「合在一起？」的说明：第一次选文件夹时、开着同步时勾上还没合过的一类时（升级上来的那台）共用
   static let joinNote =
-    "合在一起后，这台 Mac 上的便签、片段、收藏、生词和状态屏的状态和它们的会出现在每台 Mac 上（同样的不重复）；设置、快捷键、功能开关（连同内置的网页搜索、翻译服务）换成已经在同步的那几台的——剪贴板的保留天数、「不记录」的 App 也跟着换，超出新保留天数的历史会清掉。之后同一条两边都改过的，后改的留下。"
+    "合在一起后，这台 Mac 上的便签、片段、收藏、生词和状态屏的状态和它们的会出现在每台 Mac 上（同样的不重复）；设置、快捷键、功能开关（连同内置的网页搜索、翻译服务）换成已经在同步的那几台的——剪贴板的保留天数、「不记录」的 App 也跟着换，超出新保留天数的历史会清掉。同一 Apple 账户开启 iCloud 钥匙串后，翻译密钥也会自动加密同步，首次加入采用已有的同名服务密钥。之后同一条两边都改过的，后改的留下。"
 
   /// 选文件夹：先看一眼（主线程外），已经有别的 Mac 在用就先问，不然直接开。面板是设置窗上的表单（开着时点不到
   /// 便签的开关、换不了页：不然关掉便签之后还会把同步起起来，换了页这一节的状态也丢了）

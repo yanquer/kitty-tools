@@ -625,7 +625,7 @@ struct NoteSyncerTests {
     for mac in [a, b] { #expect(await mac.syncer.enable(folder: shared) == nil) }
     await settle([a, b], times: 3)
     func stamps(_ mac: Mac) throws -> [Date?] {
-      try SyncRecords.Kind.allCases.map(\.rawValue).map { kind in
+      try mac.syncer.sources.map { $0.syncKind.rawValue }.map { kind in
         let url = shared.appending(path: "devices/\(mac.store.deviceID)/\(kind).json")
         return try FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate]
           as? Date
@@ -1147,7 +1147,7 @@ struct NoteSyncerTests {
     await settle([a, b])
     try age(to: past)
     await settle([a, b])
-    let all = Set([NoteSyncer.notesPart] + SyncRecords.Kind.allCases.map(\.rawValue))
+    let all = Set([NoteSyncer.notesPart] + a.syncer.sources.map { $0.syncKind.rawValue })
     #expect(a.syncer.skippedParts == all && b.syncer.skippedParts == all)
     #expect(a.syncer.status == .idle)
     // 对面改了一条便签（换了一个文件；拨到同一个旧时刻，只有它的文件号、大小变了）

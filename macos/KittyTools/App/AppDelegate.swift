@@ -1278,9 +1278,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           "同步来的快捷键撞上了", detail: "\(pair)用的是同一个组合，到 设置 › 快捷键 里改一个",
           tone: .warning, actions: [openHotKeySettings])
       }
+      let secrets = SecretSync(services: serviceStore)
+      syncer.secretSync = secrets
       syncer.sources = [
         clipboardStore, historyStore, WebSearchSync(), TranslateServiceSync(store: serviceStore),
-        launcherUsage, StatusPresetSync(), ReminderSync(), settings,
+        launcherUsage, StatusPresetSync(), ReminderSync(), settings, secrets,
       ]
       syncer.featureOn = { Self.syncFeatures[$0]?.isOn ?? true }
       noteSyncer = syncer
@@ -1293,6 +1295,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     NoteSyncer.notesPart: .notes, SyncRecords.Kind.clips.rawValue: .clipboard,
     SyncRecords.Kind.vocabulary.rawValue: .translate, SyncRecords.Kind.engines.rawValue: .launcher,
     SyncRecords.Kind.services.rawValue: .translate, SyncRecords.Kind.launcher.rawValue: .launcher,
+    SyncRecords.Kind.secrets.rawValue: .translate,
     SyncRecords.Kind.statuses.rawValue: .statusScreen,
     SyncRecords.Kind.reminders.rawValue: .reminders,
   ]

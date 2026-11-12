@@ -76,6 +76,8 @@ struct SettingsListTests {
     #expect(SettingsPage.translate.matches("浮窗位置") && SettingsPage.translate.matches("清空"))
     // 截图拷贝为 PNG 文件（2026-11-06）
     #expect(SettingsPage.screenshot.matches("PNG") && SettingsPage.screenshot.matches("对拷线"))
+    // 自动加密密钥同步从通用页进入。
+    #expect(SettingsPage.general.matches("加密") && SettingsPage.general.matches("钥匙串"))
   }
 
   /// 搜页名停在那一页：「录制」也是通用页（屏幕录制）、快捷键页里的说法，「快捷键」也是录制页里的（只显示快捷键）；
