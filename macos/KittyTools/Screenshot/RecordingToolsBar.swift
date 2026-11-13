@@ -35,6 +35,14 @@ final class RecordingToolsBar: NSView, NSWindowDelegate {
   private var controlFrame: CGRect?
   private var visibleFrame: CGRect?
   private var isPlacing = false
+  private(set) var isShown = false
+  private var isBubbleShown = false
+  private var toolbarMotionID = 0
+  private var bubbleMotionID = 0
+  private var parameterAnchor = CGPoint.zero
+  private var displayedOptionsTarget: OptionsTarget?
+  private var closesAfterHide = false
+  static let visibilityAnimationKey = "recording-tools-visibility"
   private static let margin: CGFloat = 16
 
   /// 只构建工具窗口，present 才上屏；所有按钮不拿第一响应者。
@@ -216,6 +224,7 @@ final class RecordingToolsBar: NSView, NSWindowDelegate {
 
   /// 仅在参数种类变化时重排，改变颜色和线宽时保留正在跟踪的按钮。
   private func arrangeOptions() {
+    guard optionsTarget != nil else { return hideOptionsWindow() }
     let shown: [Bool]
     switch optionsTarget {
     case .tool: shown = [true, true, false]
@@ -302,6 +311,8 @@ final class RecordingToolsBar: NSView, NSWindowDelegate {
   override func mouseDown(with event: NSEvent) {
     NSCursor.closedHand.push()
     defer { NSCursor.pop() }
+    layer?.removeAnimation(forKey: Self.visibilityAnimationKey)
+    if isBubbleShown { parameterRoot.layer?.removeAnimation(forKey: Self.visibilityAnimationKey) }
     let before = panel.frame.origin
     panel.performDrag(with: event)
     guard panel.frame.origin != before else { return }
@@ -325,15 +336,8 @@ final class RecordingToolsBar: NSView, NSWindowDelegate {
     let x = placement.tipX
     let edge = placement.pointsUp ? parameterBar.frame.maxY : parameterBar.frame.minY
     let direction: CGFloat = placement.pointsUp ? 1 : -1
-    let path = CGMutablePath()
-    path.move(to: CGPoint(x: x - 10, y: edge))
-    path.addCurve(
-      to: CGPoint(x: x, y: edge + direction * 8),
-      control1: CGPoint(x: x - 6, y: edge), control2: CGPoint(x: x - 3, y: edge + direction * 8))
-    path.addCurve(
-      to: CGPoint(x: x + 10, y: edge),
-      control1: CGPoint(x: x + 3, y: edge + direction * 8), control2: CGPoint(x: x + 6, y: edge))
-    path.closeSubpath()
+    let path = RecordingTools.bubbleTip(at: CGPoint(x: x, y: edge), pointsUp: placement.pointsUp)
+    parameterAnchor = CGPoint(x: x, y: edge + direction * RecordingTools.bubbleArrowHeight)
     CATransaction.begin()
     CATransaction.setDisableActions(true)
     tip.contentsScale = optionsPanel.backingScaleFactor
@@ -351,11 +355,16 @@ final class RecordingToolsBar: NSView, NSWindowDelegate {
 
   /// 贴着录制控制条显示主栏，参数气泡跟随本次点击的按钮，两个窗口均不激活应用。
   func present(anchor: CGRect, visible: CGRect) {
+    guard !closesAfterHide else { return }
     arrange(anchor: anchor, visible: visible)
     panel.orderFrontRegardless()
+    setSurfaceShown(true, parameters: false)
     guard hasOptions else { return hideOptionsWindow() }
-    let appearing = !optionsPanel.isVisible
+    let appearing = !isBubbleShown
+    let changed = displayedOptionsTarget != optionsTarget
     optionsPanel.orderFrontRegardless()
+    setSurfaceShown(true, parameters: true, replay: changed)
+    displayedOptionsTarget = optionsTarget
     if appearing { monitorOutsideClicks() }
   }
 
@@ -393,26 +402,134 @@ final class RecordingToolsBar: NSView, NSWindowDelegate {
   }
 
   /// 收走气泡并成对卸载鼠标监听，模型同步时不反向发送状态回调。
-  private func hideOptionsWindow() {
+  private func hideOptionsWindow(animated: Bool = true) {
     dismissalMonitors.forEach(NSEvent.removeMonitor)
     dismissalMonitors = []
-    optionsPanel.orderOut(nil)
+    setSurfaceShown(false, parameters: true, animated: animated)
   }
 
   /// 收起主栏和参数气泡。
-  func hide() {
-    panel.orderOut(nil)
-    dismissOptions()
+  func hide(animated: Bool = true) {
+    setSurfaceShown(false, parameters: false, animated: animated)
+    let hadOptions = hasOptions
+    optionsTarget = nil
+    hideOptionsWindow(animated: animated)
+    if hadOptions { onDismissOptions() }
   }
 
-  /// 停止录制时拆开窗口和内容的相互持有关系。
-  func close() {
+  /// 结束时立即停止交互，显示过的窗口渐隐后释放，强制收尾则当场拆开引用。
+  func close(animated: Bool = true) {
+    if closesAfterHide, animated { return }
+    closesAfterHide = true
     onDismissOptions = {}
-    hide()
     onAction = { _ in }
+    let fading =
+      animated && (isShown || layer?.animation(forKey: Self.visibilityAnimationKey) != nil)
+    hide(animated: fading)
+    if !fading { releaseContent() }
+  }
+
+  /// 动画结束或立即收尾时，拆开窗口和内容的相互持有关系。
+  private func releaseContent() {
+    toolbarMotionID += 1
+    bubbleMotionID += 1
+    layer?.removeAnimation(forKey: Self.visibilityAnimationKey)
+    parameterRoot.layer?.removeAnimation(forKey: Self.visibilityAnimationKey)
+    panel.orderOut(nil)
+    optionsPanel.orderOut(nil)
     removeFromSuperview()
     panel.contentView = nil
     optionsPanel.contentView = nil
+  }
+
+  /// 构造与 Whisker 一致的弹出、渐显和渐隐动画，减弱动态效果时仅改变透明度。
+  static func visibilityAnimation(
+    show: Bool, anchor: CGPoint, rise: CGFloat, from layer: CALayer? = nil, reduced: Bool
+  ) -> CAAnimationGroup {
+    let fade = CABasicAnimation(keyPath: "opacity")
+    fade.fromValue = layer?.opacity ?? (show ? 0 : 1)
+    fade.toValue = show ? 1 : 0
+    fade.duration = reduced ? 0.2 : (show ? Style.fadeIn : Style.fadeOut)
+    fade.timingFunction = CAMediaTimingFunction(
+      name: reduced ? .easeInEaseOut : (show ? .easeOut : .easeIn))
+    var animations: [CAAnimation] = [fade]
+    if show, !reduced,
+      let grow = Style.Motion.pop.caAnimation(keyPath: "transform", reduced: false, bounce: 0.18)
+        as? CABasicAnimation
+    {
+      var collapsed = CATransform3DMakeTranslation(-anchor.x, -anchor.y, 0)
+      collapsed = CATransform3DConcat(collapsed, CATransform3DMakeScale(0.94, 0.94, 1))
+      collapsed = CATransform3DConcat(
+        collapsed, CATransform3DMakeTranslation(anchor.x, anchor.y + rise, 0))
+      grow.fromValue = NSValue(caTransform3D: layer?.transform ?? collapsed)
+      grow.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+      animations.append(grow)
+    }
+    let group = CAAnimationGroup()
+    group.animations = animations
+    group.duration = animations.map(\.duration).max() ?? fade.duration
+    return group
+  }
+
+  /// 管理两个表面的动画目标与收尾，失效的旧回调不能关闭重新打开的窗口。
+  func setSurfaceShown(_ show: Bool, parameters: Bool, animated: Bool = true, replay: Bool = false)
+  {
+    guard !show || !closesAfterHide else { return }
+    let previous = parameters ? isBubbleShown : isShown
+    guard show != previous || replay || !animated else { return }
+    if parameters {
+      isBubbleShown = show
+      bubbleMotionID += 1
+    } else {
+      isShown = show
+      toolbarMotionID += 1
+    }
+    let generation = parameters ? bubbleMotionID : toolbarMotionID
+    let window = parameters ? optionsPanel : panel
+    let root: NSView = parameters ? parameterRoot : self
+    window.ignoresMouseEvents = !show
+    guard let layer = root.layer else {
+      root.isHidden = !show
+      if !show { window.orderOut(nil) }
+      return
+    }
+    let interrupted = layer.animation(forKey: Self.visibilityAnimationKey) != nil
+    let from =
+      replay || (show && !interrupted) ? nil : (layer.presentation() ?? (show ? nil : layer))
+    let heldTransform = from?.transform ?? CATransform3DIdentity
+    let above = controlFrame.map { panel.frame.midY > $0.midY } ?? true
+    let anchor =
+      parameters
+      ? parameterAnchor : CGPoint(x: bounds.midX, y: above ? body.frame.minY : body.frame.maxY)
+    let animation = Self.visibilityAnimation(
+      show: show, anchor: anchor, rise: anchor.y < root.bounds.midY ? -6 : 6,
+      from: from, reduced: Style.reduceMotion)
+    layer.removeAnimation(forKey: Self.visibilityAnimationKey)
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    root.isHidden = false
+    layer.opacity = show ? 1 : 0
+    layer.transform = show ? CATransform3DIdentity : heldTransform
+    if animated {
+      CATransaction.setCompletionBlock { [weak self, weak root, weak window] in
+        MainActor.assumeIsolated {
+          guard let self,
+            (parameters ? self.bubbleMotionID : self.toolbarMotionID) == generation,
+            !(parameters ? self.isBubbleShown : self.isShown)
+          else { return }
+          root?.isHidden = true
+          window?.orderOut(nil)
+          root?.layer?.transform = CATransform3DIdentity
+          if !parameters, self.closesAfterHide { self.releaseContent() }
+        }
+      }
+      layer.add(animation, forKey: Self.visibilityAnimationKey)
+    } else if !show {
+      root.isHidden = true
+      window.orderOut(nil)
+      layer.transform = CATransform3DIdentity
+    }
+    CATransaction.commit()
   }
 
   /// 返回画图工具按钮供屏外测试核对选择和回调。

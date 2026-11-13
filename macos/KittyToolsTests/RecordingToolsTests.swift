@@ -381,6 +381,82 @@ struct RecordingToolsTests {
     #expect(bar.hitTest(point) === pen)
   }
 
+  /// 指示尾末端保留圆弧宽度，朝上与朝下使用同一条对称曲线，避免回到尖 V 形。
+  @Test(arguments: [true, false])
+  func bubbleTipHasARoundedEnd(_ pointsUp: Bool) {
+    let origin = CGPoint(x: 50, y: 50)
+    let path = RecordingTools.bubbleTip(at: origin, pointsUp: pointsUp)
+    let direction: CGFloat = pointsUp ? 1 : -1
+    let nearEnd = origin.y + direction * (RecordingTools.bubbleArrowHeight - 0.5)
+    #expect(path.contains(CGPoint(x: origin.x - 1.5, y: nearEnd)))
+    #expect(path.contains(CGPoint(x: origin.x + 1.5, y: nearEnd)))
+    #expect(path.boundingBox.width == RecordingTools.bubbleArrowHalfWidth * 2)
+    #expect(path.boundingBox.height == RecordingTools.bubbleArrowHeight)
+  }
+
+  /// 弹出包含缩放和渐显，收起渐隐，减弱动态效果仅保留透明度动画。
+  @Test func surfaceAnimationsRespectReducedMotionAndCurrentOpacity() throws {
+    let source = CALayer()
+    source.opacity = 0.6
+    let opening = RecordingToolsBar.visibilityAnimation(
+      show: true, anchor: CGPoint(x: 100, y: 8), rise: -6, from: source, reduced: false)
+    let animations = try #require(opening.animations as? [CABasicAnimation])
+    #expect(animations.map(\.keyPath) == ["opacity", "transform"])
+    #expect(try #require(animations.first?.fromValue as? NSNumber).floatValue == 0.6)
+    let closing = RecordingToolsBar.visibilityAnimation(
+      show: false, anchor: .zero, rise: 6, from: source, reduced: false)
+    #expect(closing.duration == Style.fadeOut)
+    for show in [true, false] {
+      let reduced = RecordingToolsBar.visibilityAnimation(
+        show: show, anchor: .zero, rise: 6, reduced: true)
+      #expect(reduced.animations?.count == 1 && reduced.duration == 0.2)
+      #expect((reduced.animations?.first as? CABasicAnimation)?.keyPath == "opacity")
+    }
+  }
+
+  /// 屏外仅驱动图层动画，关闭中重新打开不会被旧回调隐藏，真正结束时立即清理。
+  @Test func visibilityCanReverseWithoutStaleHideCallbacks() async throws {
+    let bar = RecordingToolsBar()
+    defer { bar.close() }
+    bar.setSurfaceShown(true, parameters: false)
+    #expect(bar.isShown && !bar.panel.ignoresMouseEvents)
+    #expect(bar.layer?.animation(forKey: RecordingToolsBar.visibilityAnimationKey) != nil)
+    bar.hide()
+    #expect(!bar.isShown && bar.panel.ignoresMouseEvents)
+    bar.setSurfaceShown(true, parameters: false)
+    try await Task.sleep(for: .milliseconds(350))
+    #expect(bar.isShown && !bar.isHidden && !bar.panel.ignoresMouseEvents)
+    #expect(!bar.panel.isVisible)
+    var state = RecordingTools()
+    state.apply(.mode(.pen))
+    bar.update(state, escapes: true)
+    let parameters = try #require(bar.optionsPanel.contentView)
+    let surface = try #require(parameters.subviews.first as? HUDBar)
+    let count = surface.stack.arrangedSubviews.count
+    bar.setSurfaceShown(true, parameters: true)
+    bar.dismissOptions()
+    bar.update(state, escapes: true)
+    #expect(surface.stack.arrangedSubviews.count == count && count > 0)
+    bar.setSurfaceShown(true, parameters: true)
+    try await Task.sleep(for: .milliseconds(350))
+    #expect(!parameters.isHidden && !bar.optionsPanel.ignoresMouseEvents)
+    bar.close(animated: false)
+    #expect(!bar.isShown && bar.isHidden && bar.layer?.animationKeys()?.isEmpty != false)
+  }
+
+  /// 结束时先点穿和渐隐，再释放两层窗口，全部验证在不显示窗口的图层上进行。
+  @Test func closingReleasesContentAfterTheFade() async throws {
+    let bar = RecordingToolsBar()
+    defer { bar.close(animated: false) }
+    bar.setSurfaceShown(true, parameters: false)
+    bar.close()
+    #expect(!bar.isShown && bar.panel.ignoresMouseEvents)
+    #expect(bar.panel.contentView != nil)
+    try await Task.sleep(for: .milliseconds(350))
+    #expect(bar.panel.contentView == nil && bar.optionsPanel.contentView == nil)
+    #expect(!bar.panel.isVisible && !bar.optionsPanel.isVisible)
+  }
+
   /// 小屏、负坐标副屏和控制条贴边时工具箱仍保持在可见区内。
   @Test(arguments: [
     CGRect(x: 0, y: 0, width: 800, height: 600),

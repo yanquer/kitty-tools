@@ -86,6 +86,25 @@ struct RecordingTools {
   /// 气泡窗口保留的阴影边与圆弧箭头高度。
   static let bubbleMargin: CGFloat = 16
   static let bubbleArrowHeight: CGFloat = 8
+  static let bubbleArrowHalfWidth: CGFloat = 12
+
+  /// 气泡指示尾的肩部与尖端均以相切曲线连接，末端留出较宽的圆弧。
+  static func bubbleTip(at origin: CGPoint, pointsUp: Bool) -> CGPath {
+    let x = origin.x
+    let y = origin.y
+    let direction: CGFloat = pointsUp ? 1 : -1
+    let end = y + direction * bubbleArrowHeight
+    let path = CGMutablePath()
+    path.move(to: CGPoint(x: x - bubbleArrowHalfWidth, y: y))
+    path.addCurve(
+      to: CGPoint(x: x, y: end),
+      control1: CGPoint(x: x - 7, y: y), control2: CGPoint(x: x - 5, y: end))
+    path.addCurve(
+      to: CGPoint(x: x + bubbleArrowHalfWidth, y: y),
+      control1: CGPoint(x: x + 5, y: end), control2: CGPoint(x: x + 7, y: y))
+    path.closeSubpath()
+    return path
+  }
 
   /// 气泡的屏幕位置、箭头方向和箭头在窗口内的横坐标。
   struct BubblePlacement: Equatable {
@@ -116,7 +135,8 @@ struct RecordingTools {
       max(pointsUp ? below : above, visible.minY),
       max(visible.minY, visible.maxY - windowSize.height))
     let frame = CGRect(origin: CGPoint(x: x, y: y), size: windowSize)
-    let tipX = min(max(anchor.midX - x, margin + 19), windowSize.width - margin - 19)
+    let inset = margin + 10 + bubbleArrowHalfWidth
+    let tipX = min(max(anchor.midX - x, inset), windowSize.width - inset)
     return BubblePlacement(frame: frame, pointsUp: pointsUp, tipX: tipX)
   }
 

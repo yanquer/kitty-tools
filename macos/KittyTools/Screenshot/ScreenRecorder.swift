@@ -837,7 +837,7 @@ final class ScreenRecorder: NSObject {
   /// 控制条上的唯一入口负责展开和收起，收起时返回操作模式，保留标注与焦点。
   private func toggleDrawingTools() {
     guard let canvas = drawingCanvas, startedAt != nil, endedAt == nil else { return }
-    if toolsBar?.panel.isVisible == true {
+    if toolsBar?.isShown == true {
       applyDrawingTool(.close)
       return
     }
@@ -891,7 +891,7 @@ final class ScreenRecorder: NSObject {
 
   /// 工具箱跟着控制条与当前屏幕可见区摆放，不激活应用，也不改变录制区域。
   private func placeToolsBar(show: Bool = false) {
-    guard let toolsBar, show || toolsBar.panel.isVisible, let hud,
+    guard let toolsBar, show || toolsBar.isShown, let hud,
       let screen = toolsBar.draggedScreen ?? hud.panel.screen
         ?? NSScreen.screens.first(where: { $0.displayID == displayID })
     else { return }
