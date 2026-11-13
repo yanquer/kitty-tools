@@ -386,7 +386,11 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
   /// 节标题换成它的名字
   static func visibleSections(enabled: Set<Feature>) -> [(title: String, actions: [HotKeyAction])] {
     allSections.compactMap { section in
-      let actions = section.actions.filter { $0.feature.map(enabled.contains) ?? true }
+      let actions = section.actions.filter { action in
+        // 显式传入功能，避开 Swift 6.2.4 在 Release 优化下对集合方法引用的错误编译。
+        guard let feature = action.feature else { return true }
+        return enabled.contains(feature)
+      }
       guard let first = actions.first else { return nil }
       let shared = Set(section.actions.map(\.feature)).count > 1
       let alone = Set(actions.map(\.feature)).count == 1

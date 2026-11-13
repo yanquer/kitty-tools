@@ -262,8 +262,15 @@ struct ShortcutsSheet: View {
       let owners = group.features.isEmpty ? group.globals.compactMap(\.feature) : group.features
       guard owners.isEmpty || owners.contains(where: enabled.contains) else { return nil }
       var group = group
-      group.globals = group.globals.filter { $0.feature.map(enabled.contains) ?? true }
-      group.entries = group.entries.filter { $0.needs.map(enabled.contains) ?? true }
+      // 同主界面分组：显式传参，避开 Swift 6.2.4 对嵌套集合方法引用的错误优化。
+      group.globals = group.globals.filter { action in
+        guard let feature = action.feature else { return true }
+        return enabled.contains(feature)
+      }
+      group.entries = group.entries.filter { entry in
+        guard let feature = entry.needs else { return true }
+        return enabled.contains(feature)
+      }
       return group
     }
   }
