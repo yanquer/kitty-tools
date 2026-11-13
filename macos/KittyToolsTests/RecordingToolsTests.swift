@@ -321,11 +321,64 @@ struct RecordingToolsTests {
           #expect(visible.contains(placement.frame))
           #expect(placement.tipX >= RecordingTools.bubbleMargin + 19)
           #expect(placement.tipX <= placement.frame.width - RecordingTools.bubbleMargin - 19)
-          if y == visible.minY + 20 { #expect(!placement.pointsUp) }
+          if y <= visible.midY { #expect(!placement.pointsUp) }
           if y == visible.maxY - 52 { #expect(placement.pointsUp) }
         }
       }
     }
+  }
+
+  /// 气泡默认向上，只有上方会遮住录制控制条时翻到下方。
+  @Test func bubblePrefersAboveAndAvoidsTheControlBar() {
+    let visible = CGRect(x: 0, y: 0, width: 800, height: 600)
+    let trigger = CGRect(x: 300, y: 250, width: 32, height: 32)
+    let normal = RecordingTools.bubble(
+      size: CGSize(width: 200, height: 34), anchor: trigger, visible: visible)
+    #expect(!normal.pointsUp)
+    let blocked = RecordingTools.bubble(
+      size: CGSize(width: 200, height: 34), anchor: trigger, visible: visible,
+      avoiding: CGRect(x: 250, y: 300, width: 200, height: 40))
+    #expect(blocked.pointsUp)
+  }
+
+  /// 用屏外窗口移动模拟拖动，位置不随录制条或参数变化复位，气泡连续跟随。
+  @Test func draggedToolbarKeepsItsPositionAndMovesTheBubble() throws {
+    let bar = RecordingToolsBar()
+    defer { bar.close() }
+    let visible = CGRect(x: -20000, y: -20000, width: 1400, height: 1000)
+    let anchor = CGRect(x: -19300, y: -19700, width: 200, height: 40)
+    var state = RecordingTools()
+    state.apply(.mode(.pen))
+    bar.update(state, escapes: true)
+    bar.arrange(anchor: anchor, visible: visible)
+    #expect(bar.panel.isMovableByWindowBackground)
+    let desired = CGPoint(x: -19800, y: -19500)
+    bar.panel.setFrameOrigin(desired)
+    bar.windowDidMove(Notification(name: NSWindow.didMoveNotification, object: bar.panel))
+    let bubble = bar.optionsPanel.frame
+    state.apply(.color(.blue))
+    bar.update(state, escapes: true)
+    bar.arrange(anchor: anchor.offsetBy(dx: 100, dy: -100), visible: visible)
+    #expect(bar.panel.frame.origin == desired)
+    #expect(bar.optionsPanel.frame == bubble)
+    bar.panel.setFrameOrigin(CGPoint(x: desired.x + 100, y: desired.y + 50))
+    bar.windowDidMove(Notification(name: NSWindow.didMoveNotification, object: bar.panel))
+    #expect(bar.optionsPanel.frame.origin == CGPoint(x: bubble.minX + 100, y: bubble.minY + 50))
+    #expect(!bar.panel.isVisible && !bar.optionsPanel.isVisible && !bar.panel.isKeyWindow)
+  }
+
+  /// 拖动区域接到根视图，工具按钮仍然接收自己的点击。
+  @Test func dragHandleAndButtonsHaveSeparateHitTargets() throws {
+    let bar = RecordingToolsBar()
+    defer { bar.close() }
+    let hud = try #require(bar.subviews.first as? HUDBar)
+    let handle = try #require(hud.stack.arrangedSubviews.first as? NSImageView)
+    #expect(handle.image != nil && handle.toolTip == "拖动工具栏")
+    bar.layoutSubtreeIfNeeded()
+    #expect(bar.hitTest(CGPoint(x: 28, y: 36)) === bar)
+    let pen = try #require(bar.button(for: .pen))
+    let point = pen.convert(CGPoint(x: pen.bounds.midX, y: pen.bounds.midY), to: bar.superview)
+    #expect(bar.hitTest(point) === pen)
   }
 
   /// 小屏、负坐标副屏和控制条贴边时工具箱仍保持在可见区内。

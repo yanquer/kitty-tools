@@ -4,7 +4,7 @@ import AppKit
 import OSLog
 
 /// 录制控制条旁的紧凑工具箱，复用截图色点与线宽控件，状态由画板单向同步。
-final class RecordingToolsBar: NSView {
+final class RecordingToolsBar: NSView, NSWindowDelegate {
   let panel: NSPanel
   let optionsPanel: NSPanel
   var onDismissOptions: () -> Void = {}
@@ -13,6 +13,7 @@ final class RecordingToolsBar: NSView {
   private let parameterBar = HUDBar(radius: Style.Radius.card, height: 34, blending: .behindWindow)
   private let parameterRoot = NSView()
   private let tip = CAShapeLayer()
+  private let dragHandle = NSImageView()
   private var options: NSStackView { parameterBar.stack }
   private var modes: [RecordingTools.Mode: ToggleButton] = [:]
   private var focuses: [RecordingTools.Focus: ToggleButton] = [:]
@@ -30,6 +31,10 @@ final class RecordingToolsBar: NSView {
     case focus(RecordingTools.Focus)
   }
   private var shownOptions: [Bool] = []
+  private var draggedOrigin: CGPoint?
+  private var controlFrame: CGRect?
+  private var visibleFrame: CGRect?
+  private var isPlacing = false
   private static let margin: CGFloat = 16
 
   /// 只构建工具窗口，present 才上屏；所有按钮不拿第一响应者。
@@ -50,6 +55,7 @@ final class RecordingToolsBar: NSView {
     panel.hidesOnDeactivate = false
     panel.isReleasedWhenClosed = false
     panel.animationBehavior = .none
+    panel.isMovableByWindowBackground = true
     panel.allowsToolTipsWhenApplicationIsInactive = true
     panel.contentView = self
     addSubview(body)
@@ -60,12 +66,21 @@ final class RecordingToolsBar: NSView {
     setAccessibilityElement(true)
     setAccessibilityRole(.group)
     setAccessibilityLabel("录屏讲解工具")
+    panel.delegate = self
   }
 
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
   /// 主行按操作、画图、鼠标效果、撤销清空与关闭分组，焦点按钮再次点击即关闭效果。
   private func makeTools() {
+    dragHandle.image = NSImage(
+      systemSymbolName: "line.3.horizontal", accessibilityDescription: "拖动工具栏")
+    dragHandle.imageScaling = .scaleNone
+    dragHandle.symbolConfiguration = .init(pointSize: 10, weight: .medium)
+    dragHandle.contentTintColor = Style.HUD.secondaryText
+    dragHandle.toolTip = "拖动工具栏"
+    dragHandle.widthAnchor.constraint(equalToConstant: 16).isActive = true
+    dragHandle.heightAnchor.constraint(equalToConstant: 32).isActive = true
     var views: [NSView] = RecordingTools.Mode.allCases.map { mode in
       let button = ToggleButton()
       button.tag = mode.rawValue
@@ -94,7 +109,7 @@ final class RecordingToolsBar: NSView {
       NSImage(systemSymbolName: "xmark", accessibilityDescription: nil)!,
       tip: "收起工具箱并返回操作窗口，保留标注", action: #selector(closeClicked))
     views += [barSeparator(), undo, clear, barSeparator(), close]
-    body.install(views)
+    body.install([dragHandle] + views)
   }
 
   /// 参数复用截图的颜色、线宽色点和空心范围圆，由气泡按触发工具组合。
@@ -234,10 +249,24 @@ final class RecordingToolsBar: NSView {
 
   var hasOptions: Bool { optionsTarget != nil }
 
+  /// 手动摆过的工具栏使用自身所在屏幕，参数变化时保持本次录制中的位置。
+  var draggedScreen: NSScreen? { draggedOrigin == nil ? nil : panel.screen }
+
   /// 将主栏与气泡摆到屏幕坐标，不显示窗口，供实际呈现和屏外验证共用。
   func arrange(anchor: CGRect, visible: CGRect) {
+    controlFrame = anchor
+    visibleFrame = visible
+    isPlacing = true
     panel.setFrame(
-      RecordingTools.frame(size: frame.size, anchor: anchor, visible: visible), display: false)
+      RecordingTools.frame(
+        size: frame.size, anchor: anchor, visible: visible, dragged: draggedOrigin), display: false)
+    isPlacing = false
+    arrangeBubble(avoiding: anchor, visible: visible)
+    panel.invalidateCursorRects(for: self)
+  }
+
+  /// 主栏移动后，气泡重新定位到原来的触发按钮。
+  private func arrangeBubble(avoiding anchor: CGRect, visible: CGRect) {
     guard hasOptions, let button = optionsAnchor else { return }
     body.layoutSubtreeIfNeeded()
     let local = button.convert(button.bounds, to: self)
@@ -252,6 +281,43 @@ final class RecordingToolsBar: NSView {
       x: RecordingTools.bubbleMargin,
       y: RecordingTools.bubbleMargin + (placement.pointsUp ? 0 : RecordingTools.bubbleArrowHeight))
     updateTip(placement)
+  }
+
+  /// 按钮继续接收点击，其余栏内区域由根视图接收拖动，沿用录制 HUD 的原生拖动方式。
+  override func hitTest(_ point: NSPoint) -> NSView? {
+    let hit = super.hitTest(point)
+    return hit == nil || hit is NSButton ? hit : self
+  }
+
+  /// 非激活窗口中的第一次点击即可拖动。
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+  /// 把手显示拖动光标，位置跟随主栏的实际布局。
+  override func resetCursorRects() {
+    super.resetCursorRects()
+    addCursorRect(dragHandle.convert(dragHandle.bounds, to: self), cursor: .openHand)
+  }
+
+  /// 原生拖动保持前台应用，松手后夹回所在屏幕的可见区。
+  override func mouseDown(with event: NSEvent) {
+    NSCursor.closedHand.push()
+    defer { NSCursor.pop() }
+    let before = panel.frame.origin
+    panel.performDrag(with: event)
+    guard panel.frame.origin != before else { return }
+    draggedOrigin = panel.frame.origin
+    if let anchor = controlFrame, let visible = panel.screen?.visibleFrame ?? visibleFrame {
+      arrange(anchor: anchor, visible: visible)
+    }
+  }
+
+  /// 拖动过程中连续保存位置，并让已经打开的气泡跟随按钮移动。
+  func windowDidMove(_ notification: Notification) {
+    guard !isPlacing, let anchor = controlFrame,
+      let visible = panel.screen?.visibleFrame ?? visibleFrame
+    else { return }
+    draggedOrigin = panel.frame.origin
+    arrangeBubble(avoiding: anchor, visible: visible)
   }
 
   /// 箭头使用圆弧过渡，尖端对准触发控件，靠屏幕边缘时只移动气泡主体。

@@ -892,7 +892,8 @@ final class ScreenRecorder: NSObject {
   /// 工具箱跟着控制条与当前屏幕可见区摆放，不激活应用，也不改变录制区域。
   private func placeToolsBar(show: Bool = false) {
     guard let toolsBar, show || toolsBar.panel.isVisible, let hud,
-      let screen = hud.panel.screen ?? NSScreen.screens.first(where: { $0.displayID == displayID })
+      let screen = toolsBar.draggedScreen ?? hud.panel.screen
+        ?? NSScreen.screens.first(where: { $0.displayID == displayID })
     else { return }
     toolsBar.present(anchor: hud.screenFrame, visible: screen.visibleFrame)
   }

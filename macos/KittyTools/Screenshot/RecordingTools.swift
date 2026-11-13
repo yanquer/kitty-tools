@@ -94,7 +94,7 @@ struct RecordingTools {
     let tipX: CGFloat
   }
 
-  /// 参数气泡优先位于触发控件下方，空间不足时翻到上方，箭头始终朝向触发控件。
+  /// 参数气泡优先位于触发控件上方，空间不足或遮挡录制控制条时翻到下方。
   static func bubble(size: CGSize, anchor: CGRect, visible: CGRect, avoiding: CGRect? = nil)
     -> BubblePlacement
   {
@@ -109,9 +109,9 @@ struct RecordingTools {
       max(visible.minX, visible.maxX - windowSize.width))
     let coversControl =
       avoiding.map {
-        CGRect(x: x, y: below, width: windowSize.width, height: windowSize.height).intersects($0)
+        CGRect(x: x, y: above, width: windowSize.width, height: windowSize.height).intersects($0)
       } ?? false
-    let pointsUp = below >= visible.minY && !coversControl
+    let pointsUp = above + windowSize.height > visible.maxY || coversControl
     let y = min(
       max(pointsUp ? below : above, visible.minY),
       max(visible.minY, visible.maxY - windowSize.height))
@@ -181,15 +181,17 @@ struct RecordingTools {
     draft = nil
   }
 
-  /// 工具箱贴在录制控制条附近，优先向上展开，贴边和负坐标屏幕均夹回可见区。
-  static func frame(size: CGSize, anchor: CGRect, visible: CGRect) -> CGRect {
+  /// 初次显示贴在录制控制条附近；拖过后采用本次记住的位置，并夹回可见区。
+  static func frame(size: CGSize, anchor: CGRect, visible: CGRect, dragged: CGPoint? = nil)
+    -> CGRect
+  {
     let y =
       anchor.maxY + 8 + size.height <= visible.maxY
       ? anchor.maxY + 8 : anchor.minY - size.height - 8
+    let proposed = dragged ?? CGPoint(x: anchor.maxX - size.width, y: y)
     return CGRect(
-      x: min(
-        max(anchor.maxX - size.width, visible.minX), max(visible.minX, visible.maxX - size.width)),
-      y: min(max(y, visible.minY), max(visible.minY, visible.maxY - size.height)),
+      x: min(max(proposed.x, visible.minX), max(visible.minX, visible.maxX - size.width)),
+      y: min(max(proposed.y, visible.minY), max(visible.minY, visible.maxY - size.height)),
       width: size.width, height: size.height)
   }
 }
