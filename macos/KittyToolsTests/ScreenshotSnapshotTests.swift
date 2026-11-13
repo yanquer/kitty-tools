@@ -552,6 +552,7 @@ struct ScreenshotSnapshotTests {
       ("halo", RecordingTools.Focus.halo, RecordingTools.Mode.pointer),
       ("spotlight", .spotlight, .pointer),
       ("drawing", .off, .pen),
+      ("drawing-focus", .halo, .pen),
       ("laser", .halo, .laser),
     ] {
       let root = NSView(frame: bounds)
@@ -618,7 +619,22 @@ struct ScreenshotSnapshotTests {
           canvas.updatePointer(at: CGPoint(x: 370, y: 480), animated: false)
         }
         bar.update(canvas.state, escapes: true)
-        bar.frame.origin = CGPoint(x: bounds.maxX - bar.frame.width - 16, y: 80)
+        if name == "drawing-focus" {
+          bar.onAction = { [weak bar, weak canvas] action in
+            guard let canvas else { return }
+            canvas.apply(action)
+            bar?.update(canvas.state, escapes: true)
+          }
+          bar.focusButton(for: .halo)?.performClick(nil)
+          bar.focusButton(for: .halo)?.performClick(nil)
+        }
+        bar.arrange(anchor: hud.frame, visible: bounds)
+        bar.frame.origin = bar.panel.frame.origin
+        if bar.hasOptions, let bubble = bar.optionsPanel.contentView {
+          bubble.removeFromSuperview()
+          bubble.frame = bar.optionsPanel.frame
+          root.addSubview(bubble)
+        }
         Self.snapshotRecordingHUDs(in: root)
       }
     }

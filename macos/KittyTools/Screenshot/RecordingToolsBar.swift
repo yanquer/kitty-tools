@@ -1,13 +1,19 @@
-// 录屏讲解工具箱：统一 HUD 表面承载主工具行与按需显示的参数行，工具窗口排除在成片之外。
+// 录屏讲解工具箱：固定单行工具栏与指向触发控件的参数气泡，两个窗口均排除在成片之外。
 
 import AppKit
+import OSLog
 
 /// 录制控制条旁的紧凑工具箱，复用截图色点与线宽控件，状态由画板单向同步。
 final class RecordingToolsBar: NSView {
   let panel: NSPanel
+  let optionsPanel: NSPanel
+  var onDismissOptions: () -> Void = {}
   var onAction: (RecordingTools.Action) -> Void = { _ in }
-  private let body = HUDBar(radius: Style.Radius.panel, height: 80, blending: .behindWindow)
-  private let options = NSStackView()
+  private let body = HUDBar(radius: Style.Radius.panel, height: 40, blending: .behindWindow)
+  private let parameterBar = HUDBar(radius: Style.Radius.card, height: 34, blending: .behindWindow)
+  private let parameterRoot = NSView()
+  private let tip = CAShapeLayer()
+  private var options: NSStackView { parameterBar.stack }
   private var modes: [RecordingTools.Mode: ToggleButton] = [:]
   private var focuses: [RecordingTools.Focus: ToggleButton] = [:]
   private var colors: [Swatch] = []
@@ -16,8 +22,14 @@ final class RecordingToolsBar: NSView {
   private var undo: BarButton!
   private var clear: BarButton!
   private var currentFocus = RecordingTools.Focus.off
+  private var currentMode = RecordingTools.Mode.pointer
+  private var optionsTarget: OptionsTarget?
+  private var dismissalMonitors: [Any] = []
+  private enum OptionsTarget: Equatable {
+    case tool(RecordingTools.Mode)
+    case focus(RecordingTools.Focus)
+  }
   private var shownOptions: [Bool] = []
-  private var toolsCenter: NSLayoutConstraint?
   private static let margin: CGFloat = 16
 
   /// 只构建工具窗口，present 才上屏；所有按钮不拿第一响应者。
@@ -25,6 +37,9 @@ final class RecordingToolsBar: NSView {
     panel = NSPanel(
       contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered,
       defer: true)
+    optionsPanel = NSPanel(
+      contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered,
+      defer: false)
     super.init(frame: .zero)
     wantsLayer = true
     panel.level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 3)
@@ -40,9 +55,7 @@ final class RecordingToolsBar: NSView {
     addSubview(body)
     makeTools()
     makeOptions()
-    toolsCenter = body.effect.constraints.first {
-      $0.firstItem === body.stack && $0.firstAttribute == .centerY
-    }
+    makeBubble()
     update(RecordingTools(), escapes: false)
     setAccessibilityElement(true)
     setAccessibilityRole(.group)
@@ -84,7 +97,7 @@ final class RecordingToolsBar: NSView {
     body.install(views)
   }
 
-  /// 参数使用截图的颜色、线宽色点和空心范围圆，全部放在同一块材质内。
+  /// 参数复用截图的颜色、线宽色点和空心范围圆，由气泡按触发工具组合。
   private func makeOptions() {
     colors = Annotation.Palette.allCases.map { color in
       let button = Swatch(fill: color.color, diameter: 14, outlined: true, label: "\(color.title)色")
@@ -112,18 +125,41 @@ final class RecordingToolsBar: NSView {
       button.symbolConfiguration = .init(pointSize: [8, 12, 16][size.rawValue], weight: .medium)
       return button
     }
-    options.spacing = 2
-    options.translatesAutoresizingMaskIntoConstraints = false
-    body.effect.addSubview(options)
-    NSLayoutConstraint.activate([
-      options.centerXAnchor.constraint(equalTo: body.effect.centerXAnchor),
-      options.bottomAnchor.constraint(equalTo: body.effect.bottomAnchor, constant: 7),
-    ])
+    options.edgeInsets = NSEdgeInsets(top: 0, left: 6, bottom: 0, right: 6)
+  }
+
+  /// 气泡使用独立的普通 NSPanel，箭头与参数面板共同指向触发控件，永不拿键盘。
+  private func makeBubble() {
+    optionsPanel.level = NSWindow.Level(rawValue: panel.level.rawValue + 1)
+    optionsPanel.collectionBehavior = panel.collectionBehavior
+    optionsPanel.isOpaque = false
+    optionsPanel.backgroundColor = .clear
+    optionsPanel.hasShadow = false
+    optionsPanel.hidesOnDeactivate = false
+    optionsPanel.isReleasedWhenClosed = false
+    optionsPanel.animationBehavior = .none
+    optionsPanel.allowsToolTipsWhenApplicationIsInactive = true
+    parameterRoot.wantsLayer = true
+    tip.fillColor = Style.HUD.solidFill.cgColor
+    parameterRoot.layer?.addSublayer(tip)
+    parameterRoot.addSubview(parameterBar)
+    optionsPanel.contentView = parameterRoot
+    parameterRoot.setAccessibilityElement(true)
+    parameterRoot.setAccessibilityRole(.group)
+    parameterRoot.setAccessibilityLabel("录屏工具参数")
   }
 
   /// 同步选择状态，操作说明保留在工具提示和无障碍帮助中。
   func update(_ state: RecordingTools, escapes: Bool) {
+    if state.mode != currentMode, state.isDrawing {
+      optionsTarget = .tool(state.mode)
+    } else if state.focus != currentFocus, state.focus != .off {
+      optionsTarget = .focus(state.focus)
+    }
+    currentMode = state.mode
     currentFocus = state.focus
+    if case .tool(let tool) = optionsTarget, state.mode != tool { optionsTarget = nil }
+    if case .focus(let focus) = optionsTarget, state.focus != focus { optionsTarget = nil }
     let exitHint = escapes ? "Esc 返回操作窗口" : "点箭头返回操作窗口"
     for (mode, button) in modes {
       let selected = state.mode == mode
@@ -159,13 +195,19 @@ final class RecordingToolsBar: NSView {
     undo.isEnabled = state.canUndo
     clear.isEnabled = state.canUndo
     setAccessibilityHelp(state.isDrawing ? "\(state.mode.title)，\(exitHint)" : "操作窗口，标注会录入视频")
-    arrangeOptions(state)
+    arrangeOptions()
     arrange()
   }
 
   /// 仅在参数种类变化时重排，改变颜色和线宽时保留正在跟踪的按钮。
-  private func arrangeOptions(_ state: RecordingTools) {
-    let shown = [state.isDrawing || state.focus == .halo, state.isDrawing, state.focus != .off]
+  private func arrangeOptions() {
+    let shown: [Bool]
+    switch optionsTarget {
+    case .tool: shown = [true, true, false]
+    case .focus(.halo): shown = [true, false, true]
+    case .focus(.spotlight): shown = [false, false, true]
+    default: shown = [false, false, false]
+    }
     guard shown != shownOptions else { return }
     shownOptions = shown
     for view in options.arrangedSubviews { view.removeFromSuperview() }
@@ -176,36 +218,135 @@ final class RecordingToolsBar: NSView {
       if !options.arrangedSubviews.isEmpty { options.addArrangedSubview(barSeparator()) }
       group.forEach(options.addArrangedSubview)
     }
-    options.isHidden = options.arrangedSubviews.isEmpty
+    if options.arrangedSubviews.isEmpty {
+      optionsTarget = nil
+      hideOptionsWindow()
+    } else {
+      parameterBar.fit()
+    }
   }
 
-  /// 一块材质承载一行或两行，统一宽度；参数行按需展开，四周只留阴影所需的透明边。
+  /// 主工具行始终保持同样尺寸，参数气泡使用独立窗口。
   private func arrange() {
-    let expanded = !options.isHidden
-    let width = ceil(
-      max(body.stack.fittingSize.width, options.fittingSize.width) + 2 * HUDBar.materialInset)
-    body.frame = CGRect(x: Self.margin, y: Self.margin, width: width, height: expanded ? 80 : 40)
-    toolsCenter?.constant = expanded ? 20 : 0
-    body.applyGeometry()
-    frame.size = CGSize(width: width + Self.margin * 2, height: body.frame.height + Self.margin * 2)
+    body.frame.origin = CGPoint(x: Self.margin, y: Self.margin)
+    frame.size = CGSize(width: body.frame.width + Self.margin * 2, height: 40 + Self.margin * 2)
   }
 
-  /// 贴着录制控制条展开，全部位于当前屏幕可见区域，永不当 key。
-  func present(anchor: CGRect, visible: CGRect) {
+  var hasOptions: Bool { optionsTarget != nil }
+
+  /// 将主栏与气泡摆到屏幕坐标，不显示窗口，供实际呈现和屏外验证共用。
+  func arrange(anchor: CGRect, visible: CGRect) {
     panel.setFrame(
       RecordingTools.frame(size: frame.size, anchor: anchor, visible: visible), display: false)
-    panel.orderFrontRegardless()
+    guard hasOptions, let button = optionsAnchor else { return }
+    body.layoutSubtreeIfNeeded()
+    let local = button.convert(button.bounds, to: self)
+    let source = CGRect(
+      x: panel.frame.minX + local.minX, y: panel.frame.minY + body.frame.midY - 16,
+      width: button.bounds.width, height: 32)
+    let placement = RecordingTools.bubble(
+      size: parameterBar.frame.size, anchor: source, visible: visible, avoiding: anchor)
+    optionsPanel.setFrame(placement.frame, display: false)
+    parameterRoot.frame = CGRect(origin: .zero, size: placement.frame.size)
+    parameterBar.frame.origin = CGPoint(
+      x: RecordingTools.bubbleMargin,
+      y: RecordingTools.bubbleMargin + (placement.pointsUp ? 0 : RecordingTools.bubbleArrowHeight))
+    updateTip(placement)
   }
 
-  /// 收起并保留本次会话的工具状态。
-  func hide() { panel.orderOut(nil) }
+  /// 箭头使用圆弧过渡，尖端对准触发控件，靠屏幕边缘时只移动气泡主体。
+  private func updateTip(_ placement: RecordingTools.BubblePlacement) {
+    let x = placement.tipX
+    let edge = placement.pointsUp ? parameterBar.frame.maxY : parameterBar.frame.minY
+    let direction: CGFloat = placement.pointsUp ? 1 : -1
+    let path = CGMutablePath()
+    path.move(to: CGPoint(x: x - 10, y: edge))
+    path.addCurve(
+      to: CGPoint(x: x, y: edge + direction * 8),
+      control1: CGPoint(x: x - 6, y: edge), control2: CGPoint(x: x - 3, y: edge + direction * 8))
+    path.addCurve(
+      to: CGPoint(x: x + 10, y: edge),
+      control1: CGPoint(x: x + 3, y: edge + direction * 8), control2: CGPoint(x: x + 6, y: edge))
+    path.closeSubpath()
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    tip.contentsScale = optionsPanel.backingScaleFactor
+    tip.path = path
+    CATransaction.commit()
+  }
+
+  private var optionsAnchor: NSButton? {
+    switch optionsTarget {
+    case .tool(let mode): modes[mode]
+    case .focus(let focus): focuses[focus]
+    case nil: nil
+    }
+  }
+
+  /// 贴着录制控制条显示主栏，参数气泡跟随本次点击的按钮，两个窗口均不激活应用。
+  func present(anchor: CGRect, visible: CGRect) {
+    arrange(anchor: anchor, visible: visible)
+    panel.orderFrontRegardless()
+    guard hasOptions else { return hideOptionsWindow() }
+    let appearing = !optionsPanel.isVisible
+    optionsPanel.orderFrontRegardless()
+    if appearing { monitorOutsideClicks() }
+  }
+
+  /// 气泡打开时才安装被动鼠标监听，点到其他位置只收气泡，原点击继续传递。
+  private func monitorOutsideClicks() {
+    guard dismissalMonitors.isEmpty else { return }
+    let mask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+    let global = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in
+      MainActor.assumeIsolated { self?.dismissOptionsIfOutside(at: NSEvent.mouseLocation) }
+    }
+    let local = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+      MainActor.assumeIsolated { self?.dismissOptionsIfOutside(at: NSEvent.mouseLocation) }
+      return event
+    }
+    dismissalMonitors = [global, local].compactMap { $0 }
+    if dismissalMonitors.count != 2 {
+      Log.record.error(
+        "录屏参数气泡点外收起监听未全部建立 window=\(self.optionsPanel.windowNumber) installed=\(self.dismissalMonitors.count)"
+      )
+    }
+  }
+
+  /// 点击主栏或参数区域继续操作，其他位置收起参数气泡。
+  func dismissOptionsIfOutside(at point: CGPoint) {
+    guard !panel.frame.contains(point), !optionsPanel.frame.contains(point) else { return }
+    dismissOptions()
+  }
+
+  /// 收起参数并通知会话更新临时 Esc，画板模式与已有笔迹保持当前状态。
+  func dismissOptions() {
+    guard hasOptions else { return }
+    optionsTarget = nil
+    hideOptionsWindow()
+    onDismissOptions()
+  }
+
+  /// 收走气泡并成对卸载鼠标监听，模型同步时不反向发送状态回调。
+  private func hideOptionsWindow() {
+    dismissalMonitors.forEach(NSEvent.removeMonitor)
+    dismissalMonitors = []
+    optionsPanel.orderOut(nil)
+  }
+
+  /// 收起主栏和参数气泡。
+  func hide() {
+    panel.orderOut(nil)
+    dismissOptions()
+  }
 
   /// 停止录制时拆开窗口和内容的相互持有关系。
   func close() {
+    onDismissOptions = {}
     hide()
     onAction = { _ in }
     removeFromSuperview()
     panel.contentView = nil
+    optionsPanel.contentView = nil
   }
 
   /// 返回画图工具按钮供屏外测试核对选择和回调。
@@ -215,12 +356,16 @@ final class RecordingToolsBar: NSView {
   /// 选择画图工具或操作窗口。
   @objc private func modeClicked(_ sender: NSButton) {
     guard let mode = RecordingTools.Mode(rawValue: sender.tag) else { return }
+    optionsTarget = mode == .pointer || optionsTarget == .tool(mode) ? nil : .tool(mode)
     onAction(.mode(mode))
   }
   /// 再次点击已开启的鼠标效果时关闭。
   @objc private func focusClicked(_ sender: NSButton) {
     guard let focus = RecordingTools.Focus(rawValue: sender.tag) else { return }
-    onAction(.focus(currentFocus == focus ? .off : focus))
+    let next: RecordingTools.Focus = currentFocus == focus ? .off : focus
+    optionsTarget = next == .off ? nil : .focus(next)
+    if next == .off { hideOptionsWindow() }
+    onAction(.focus(next))
   }
   /// 调整后续笔迹与跟随光圈的颜色。
   @objc private func colorClicked(_ sender: NSButton) {

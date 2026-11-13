@@ -83,6 +83,43 @@ struct RecordingTools {
   var radius: CGFloat { [CGFloat(28), 48, 80][focusSize.rawValue] }
   var canUndo: Bool { !annotations.isEmpty }
 
+  /// 气泡窗口保留的阴影边与圆弧箭头高度。
+  static let bubbleMargin: CGFloat = 16
+  static let bubbleArrowHeight: CGFloat = 8
+
+  /// 气泡的屏幕位置、箭头方向和箭头在窗口内的横坐标。
+  struct BubblePlacement: Equatable {
+    let frame: CGRect
+    let pointsUp: Bool
+    let tipX: CGFloat
+  }
+
+  /// 参数气泡优先位于触发控件下方，空间不足时翻到上方，箭头始终朝向触发控件。
+  static func bubble(size: CGSize, anchor: CGRect, visible: CGRect, avoiding: CGRect? = nil)
+    -> BubblePlacement
+  {
+    let margin = bubbleMargin
+    let arrow = bubbleArrowHeight
+    let windowSize = CGSize(
+      width: size.width + margin * 2, height: size.height + arrow + margin * 2)
+    let below = anchor.minY - 4 - size.height - arrow - margin
+    let above = anchor.maxY + 4 - margin
+    let x = min(
+      max(anchor.midX - windowSize.width / 2, visible.minX),
+      max(visible.minX, visible.maxX - windowSize.width))
+    let coversControl =
+      avoiding.map {
+        CGRect(x: x, y: below, width: windowSize.width, height: windowSize.height).intersects($0)
+      } ?? false
+    let pointsUp = below >= visible.minY && !coversControl
+    let y = min(
+      max(pointsUp ? below : above, visible.minY),
+      max(visible.minY, visible.maxY - windowSize.height))
+    let frame = CGRect(origin: CGPoint(x: x, y: y), size: windowSize)
+    let tipX = min(max(anchor.midX - x, margin + 19), windowSize.width - margin - 19)
+    return BubblePlacement(frame: frame, pointsUp: pointsUp, tipX: tipX)
+  }
+
   /// 变更工具或样式时取消未完成的笔迹；返回操作模式仍保留已经画好的标注。
   mutating func apply(_ action: Action) {
     cancelStroke()

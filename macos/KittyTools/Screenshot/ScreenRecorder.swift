@@ -322,7 +322,7 @@ final class ScreenRecorder: NSObject {
   var onMicrophoneLost: () -> Void = {}
   /// 这次真录不录麦克风（开关开着且有授权；开始写了之后才定）
   var capturesMicrophone: Bool { options.microphone }
-  /// 倒数期间临时注册 Esc 用（单测 / 实录自检里是 nil：没有 Esc，只能点 ✕）
+  /// 倒数、绘图和参数气泡使用临时 Esc（单测 / 实录自检可为 nil，以按钮完成操作）。
   private weak var hotKeys: HotKeyCenter?
   /// 快速保存目录；进行中的文件在和它同一个卷的 workFile
   private let directory: URL
@@ -824,7 +824,8 @@ final class ScreenRecorder: NSObject {
     canvas.onNotice = { [weak self] in self?.island?.show($0, tone: .warning) }
     canvas.excludedFrames = { [weak self] in
       guard let self else { return [] }
-      return [self.hud?.panel, self.toolsBar?.panel].compactMap { panel in
+      return [self.hud?.panel, self.toolsBar?.panel, self.toolsBar?.optionsPanel].compactMap {
+        panel in
         guard let panel, panel.isVisible else { return nil }
         return panel.frame
       }
@@ -843,9 +844,13 @@ final class ScreenRecorder: NSObject {
     if toolsBar == nil {
       let bar = RecordingToolsBar()
       bar.onAction = { [weak self] in self?.applyDrawingTool($0) }
+      bar.onDismissOptions = { [weak self] in
+        guard let self, let state = self.drawingCanvas?.state else { return }
+        self.drawingToolsChanged(state)
+      }
       toolsBar = bar
     }
-    toolsBar?.update(canvas.state, escapes: drawingEscapes)
+    drawingToolsChanged(canvas.state)
     placeToolsBar(show: true)
     hud?.setToolsAvailable(true, selected: true)
   }
@@ -859,12 +864,15 @@ final class ScreenRecorder: NSObject {
     }
   }
 
-  /// 画图期间复用临时 Esc；注册失败明确提示，并保持工具箱里的返回操作入口可用。
+  /// 绘图或参数气泡打开期间复用临时 Esc；注册失败提示使用工具箱里的返回操作入口。
   private func drawingToolsChanged(_ state: RecordingTools) {
-    if state.isDrawing, !drawingEscapeAttempted {
+    toolsBar?.update(state, escapes: drawingEscapes)
+    let needsEscape = state.isDrawing || toolsBar?.hasOptions == true
+    if needsEscape, !drawingEscapeAttempted {
       drawingEscapeAttempted = true
       drawingEscapes =
         hotKeys?.registerEscape { [weak self] in
+          self?.toolsBar?.dismissOptions()
           self?.applyDrawingTool(.mode(.pointer))
         } ?? false
       if !drawingEscapes {
@@ -872,7 +880,7 @@ final class ScreenRecorder: NSObject {
           "录屏画板 Esc 不可用 display=\(self.displayID) hotKeyCenter=\(self.hotKeys != nil)")
         island?.show("画板的 Esc 不可用", detail: "点工具箱左侧箭头返回操作窗口", tone: .warning)
       }
-    } else if !state.isDrawing, drawingEscapeAttempted {
+    } else if !needsEscape, drawingEscapeAttempted {
       hotKeys?.unregisterEscape()
       drawingEscapeAttempted = false
       drawingEscapes = false

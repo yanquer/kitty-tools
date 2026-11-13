@@ -240,8 +240,8 @@ struct RecordingToolsTests {
     #expect(bar.frame.width < 500 && bar.frame.height < 200)
   }
 
-  /// 工具箱共用一块表面，参数按需展开，鼠标效果再次点击即关闭，返回操作后收起无关参数。
-  @Test func toolsShareOneSurfaceAndRevealOptionsAsNeeded() throws {
+  /// 主行高度固定，参数使用独立气泡，重复点击工具可收起，鼠标效果再次点击即关闭。
+  @Test func toolsKeepOneRowAndRevealIndependentOptions() throws {
     let bar = RecordingToolsBar()
     defer { bar.close() }
     #expect(bar.subviews.count == 1 && bar.subviews.first is HUDBar)
@@ -253,16 +253,79 @@ struct RecordingToolsTests {
       bar.update(state, escapes: true)
     }
     try #require(bar.focusButton(for: .halo)).performClick(nil)
-    #expect(state.focus == .halo && bar.frame.height == 112)
+    #expect(state.focus == .halo && bar.hasOptions && bar.frame.height == 72)
     try #require(bar.focusButton(for: .halo)).performClick(nil)
-    #expect(state.focus == .off && bar.frame.height == 72)
+    #expect(state.focus == .off && !bar.hasOptions && bar.frame.height == 72)
     try #require(bar.button(for: .pen)).performClick(nil)
-    #expect(state.mode == .pen && bar.frame.height == 112)
+    #expect(state.mode == .pen && bar.hasOptions && bar.frame.height == 72)
     #expect(bar.accessibilityHelp()?.contains("Esc 返回操作窗口") == true)
     try #require(bar.button(for: .pointer)).performClick(nil)
     #expect(bar.frame.height == 72)
     try #require(bar.focusButton(for: .spotlight)).performClick(nil)
-    #expect(state.focus == .spotlight && bar.frame.height == 112)
+    #expect(state.focus == .spotlight && bar.hasOptions && bar.frame.height == 72)
+  }
+
+  /// 画图与鼠标效果同时开启时，参数气泡跟随最后点击的控件，收起后普通模型刷新不会重新弹出。
+  @Test func optionsTrackTheirTriggerAndStayDismissed() throws {
+    let bar = RecordingToolsBar()
+    defer { bar.close() }
+    var state = RecordingTools()
+    bar.onAction = { action in
+      state.apply(action)
+      bar.update(state, escapes: true)
+    }
+    let pen = try #require(bar.button(for: .pen))
+    let halo = try #require(bar.focusButton(for: .halo))
+    let visible = CGRect(x: 0, y: 0, width: 1400, height: 900)
+    let anchor = CGRect(x: 900, y: 350, width: 200, height: 40)
+    pen.performClick(nil)
+    bar.arrange(anchor: anchor, visible: visible)
+    let penFrame = bar.optionsPanel.frame
+    halo.performClick(nil)
+    bar.arrange(anchor: anchor, visible: visible)
+    #expect(state.mode == .pen && state.focus == .halo)
+    #expect(bar.optionsPanel.frame.midX > penFrame.midX)
+    #expect(!bar.optionsPanel.frame.intersects(anchor))
+    #expect(!bar.panel.isVisible && !bar.optionsPanel.isVisible)
+    #expect(!bar.optionsPanel.canBecomeKey && !bar.optionsPanel.canBecomeMain)
+    var dismissals = 0
+    bar.onDismissOptions = { dismissals += 1 }
+    bar.dismissOptionsIfOutside(
+      at: CGPoint(x: bar.optionsPanel.frame.midX, y: bar.optionsPanel.frame.midY))
+    #expect(bar.hasOptions)
+    bar.dismissOptionsIfOutside(at: CGPoint(x: bar.panel.frame.midX, y: bar.panel.frame.midY))
+    #expect(bar.hasOptions)
+    bar.dismissOptionsIfOutside(at: CGPoint(x: visible.maxX + 10, y: visible.maxY + 10))
+    #expect(!bar.hasOptions && dismissals == 1)
+    #expect(state.mode == .pen && state.focus == .halo)
+    bar.update(state, escapes: true)
+    #expect(!bar.hasOptions)
+    pen.performClick(nil)
+    #expect(bar.hasOptions)
+    pen.performClick(nil)
+    #expect(!bar.hasOptions && state.mode == .pen)
+  }
+
+  /// 气泡在上下边缘自动翻向，负坐标屏幕与横向夹边时箭头仍位于可用直边内。
+  @Test(arguments: [
+    CGRect(x: 0, y: 0, width: 800, height: 600),
+    CGRect(x: -1920, y: -200, width: 1920, height: 1056),
+  ])
+  func bubblePointsToItsTriggerAndStaysVisible(_ visible: CGRect) {
+    for width: CGFloat in [96, 326] {
+      for x in [visible.minX + 20, visible.midX, visible.maxX - 52] {
+        for y in [visible.minY + 20, visible.midY, visible.maxY - 52] {
+          let anchor = CGRect(x: x, y: y, width: 32, height: 32)
+          let placement = RecordingTools.bubble(
+            size: CGSize(width: width, height: 34), anchor: anchor, visible: visible)
+          #expect(visible.contains(placement.frame))
+          #expect(placement.tipX >= RecordingTools.bubbleMargin + 19)
+          #expect(placement.tipX <= placement.frame.width - RecordingTools.bubbleMargin - 19)
+          if y == visible.minY + 20 { #expect(!placement.pointsUp) }
+          if y == visible.maxY - 52 { #expect(placement.pointsUp) }
+        }
+      }
+    }
   }
 
   /// 小屏、负坐标副屏和控制条贴边时工具箱仍保持在可见区内。
