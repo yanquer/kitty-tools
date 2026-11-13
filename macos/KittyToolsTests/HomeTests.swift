@@ -10,7 +10,7 @@ import Testing
 struct HomeTests {
   private let all = Set(Feature.allCases)
 
-  /// 全开：节名和菜单同名同序（「打开主界面」不列它自己）；每节末尾接那一节的开关；提醒、状态屏、启动台、刘海岛几个单格的节
+  /// 全开：节名和菜单同名同序（「打开主界面」「钉住剪贴板内容」不列）；每节末尾接那一节的开关；提醒、状态屏、启动台、刘海岛几个单格的节
   /// 不画标题，连续的单格并在一行，窗口切换单独成节；快捷键是传进来的那份，没设的空着
   @Test func sectionsFollowTheMenu() {
     var state = LauncherItem.ActionState(statusPresets: StatusPreset.builtIn)
@@ -18,7 +18,7 @@ struct HomeTests {
     let sections = Home.sections(state: state, keys: [.screenshot: "⌥A"])
     #expect(sections.map(\.title) == ["剪贴板与启动器", "翻译", "截图与录制", "便签", nil, "窗口切换", nil])
     let tiles = sections.flatMap(\.tiles)
-    #expect(!tiles.contains { $0.target == .action(.home) })
+    #expect(!tiles.contains { $0.target == .action(.home) || $0.target == .action(.pinClipboard) })
     #expect(
       sections[0].tiles.map(\.target) == [
         .action(.clipboard), .action(.launcher), .extra(.pauseClipboard),
@@ -107,8 +107,8 @@ struct HomeTests {
     state.features = all
     let sections = Home.sections(state: state, keys: [:])
     // 截图与录制折成两行；窗口切换四格成一节，前后的单格各自并行。
-    #expect(Home.rows(sections).map(\.count) == [3, 5, 5, 3, 3, 3, 4, 3])
-    #expect(Home.rows(sections).flatMap { $0 } == Array(0..<29))
+    #expect(Home.rows(sections).map(\.count) == [3, 5, 5, 2, 3, 3, 4, 3])
+    #expect(Home.rows(sections).flatMap { $0 } == Array(0..<28))
     let rows: CGFloat = 8
     let expected =
       Home.top + Home.bottom + 5 * Home.titleHeight + 2 * Home.untitledGap + rows * Home.tile.height
