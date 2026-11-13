@@ -19,7 +19,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
   // 便签、提醒、状态屏一组，启动台、程序坞预览一组（启动台原来在便签后面）
   // 2026-11-13 起便签之后都是插件（Feature.plugins），刘海岛（2026-11-12 PR #17 加的页）也成了插件、挪到最后
   case general, clipboard, launcher, translate, screenshot, record, notes, reminders, statusScreen,
-    launchpad, dockPreview, windowSwitcher, windowLayout, finderMenu, keepAwake, island, hotkeys, about
+    launchpad, dockPreview, windowSwitcher, windowLayout, finderMenu, island, hotkeys, about
 
   var id: String { rawValue }
 
@@ -31,10 +31,8 @@ enum SettingsPage: String, CaseIterable, Identifiable {
   /// 见 SettingsRoot），按这里的先后排、不按添加的先后
   static let groups: [[SettingsPage]] = [
     [.general], [.clipboard, .launcher, .translate], [.screenshot, .record],
-    [
-      .notes, .reminders, .statusScreen,
-    .launchpad, .dockPreview, .windowSwitcher, .windowLayout, .finderMenu, .keepAwake, .island,
-    ],
+    [.notes, .reminders, .statusScreen,
+    .launchpad, .dockPreview, .windowSwitcher, .windowLayout, .finderMenu, .island],
     [.hotkeys, .about],
   ]
 
@@ -64,8 +62,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     switch self {
     case .clipboard, .launcher, .translate: "文字与搜索"
     case .screenshot, .record: "截图与录制"
-    case .notes, .reminders, .statusScreen, .launchpad, .dockPreview, .windowSwitcher, .windowLayout, .finderMenu, .keepAwake,
-      .island:
+    case .notes, .reminders, .statusScreen, .launchpad, .dockPreview, .windowSwitcher, .windowLayout, .finderMenu, .island:
       "插件"
     case .general, .hotkeys, .about: nil
     }
@@ -100,7 +97,6 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     case .windowLayout: "窗口管理"
     case .dockPreview: "程序坞预览"
     case .finderMenu: "访达右键"
-    case .keepAwake: "保持唤醒"
     case .translate: "翻译"
     case .hotkeys: "快捷键"
     case .about: "关于"
@@ -124,7 +120,6 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     case .windowLayout: "rectangle.split.2x2"
     case .dockPreview: "kitty.dock.preview"
     case .finderMenu: "kitty.finder.menu"
-    case .keepAwake: "kitty.keep.awake"
     case .translate: "kitty.translate"
     case .hotkeys: "kitty.hotkeys"
     case .about: "kitty.about"  // 品牌页：猫头
@@ -147,7 +142,6 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     case .windowLayout: Style.Family.dockPreview
     case .dockPreview: Style.Family.dockPreview
     case .finderMenu: Style.Family.finderMenu
-    case .keepAwake: Style.Family.keepAwake
     case .translate: Style.Family.translate
     case .hotkeys: Style.Family.keyboard
     case .about: Color(nsColor: AccentPalette.brandPink)  // 关于是品牌页，不随强调色变
@@ -171,7 +165,6 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     case .windowLayout: "窗口分屏、细分网格、拖拽吸附、跨屏移动与平铺"
     case .dockPreview: "停在程序坞图标上时弹出的窗口缩略图：开关和要给的授权"
     case .finderMenu: "在访达里右键：新建文件、拷贝路径、移动复制、压缩解压"
-    case .keepAwake: "插件 · 不让电脑睡、不让屏幕熄：手动开一段，或按时段自动开"
     case .translate: "语言、翻译服务与密钥、历史"
     case .hotkeys: "所有全局快捷键"
     case .about: "版本与更新内容"
@@ -263,11 +256,6 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         "编辑器", "打开方式", "用 App 打开", "在 App 中打开", "改名", "扩展", "登录项与扩展", "新建文件", "新建", "模板", "后缀",
         "Word",
         "Excel", "PPT", "Markdown", "文本",
-      ]
-    case .keepAwake:
-      [
-        "插件", "保持唤醒", "唤醒", "防息屏", "息屏", "熄屏", "防止睡眠", "睡眠", "不睡眠", "屏幕常亮", "常亮", "定时", "工作日",
-        "时段", "awake", "caffeinate", "咖啡因", "下载", "后台任务",
       ]
     case .translate:
       [

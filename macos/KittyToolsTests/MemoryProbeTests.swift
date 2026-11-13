@@ -813,7 +813,6 @@ private final class Probe {
         case .windowSwitcher: AnyView(WindowSwitcherTab())
         case .windowLayout: AnyView(WindowLayoutTab(center: hotKeys))
         case .finderMenu: AnyView(FinderMenuTab(extensionEnabled: false))
-        case .keepAwake: AnyView(EmptyView())
         case .translate:
           AnyView(TranslateTab(services: services, history: history, speaker: speaker))
         case .hotkeys: AnyView(HotkeysTab(center: hotKeys))

@@ -212,7 +212,7 @@ struct FeatureTests {
   @Test func switchesAreExportedSettings() {
     #expect(
       Feature.allCases.filter { !$0.defaultOn } == [
-        .dockPreview, .windowSwitcher, .windowLayout, .finderMenu, .keepAwake,
+        .dockPreview, .windowSwitcher, .windowLayout, .finderMenu,
       ])
     #expect(
       [Feature.notes, .reminders, .statusScreen, .launchpad, .island].allSatisfy {
@@ -247,12 +247,10 @@ struct FeatureTests {
         .clipboard, .launcher, .translate, .screenshot, .record,
       ])
     // 搜插件的名字：没添加时落到通用页（「功能 ›」下面就是它的卡），添加了停在它自己那页
-    #expect(SettingsPage.page(for: "保持唤醒", current: .about, hidden: [.keepAwake]) == .general)
-    #expect(SettingsPage.page(for: "防息屏", current: .about, hidden: [.keepAwake]) == .general)
-    #expect(SettingsPage.page(for: "保持唤醒", current: .about) == .keepAwake)
+    #expect(SettingsPage.page(for: "访达右键", current: .about, hidden: [.finderMenu]) == .general)
+    #expect(SettingsPage.page(for: "访达右键", current: .about) == .finderMenu)
     // 添加了之后搜它的词停在它自己那页，不落到通用页
-    #expect(SettingsPage.page(for: "防息屏", current: .about) == .keepAwake)
-    #expect(SettingsPage.matching("防息屏", hidden: []) == [.keepAwake])
-    #expect(SettingsPage.keepAwake.groupTitle == "插件")
+    #expect(SettingsPage.matching("访达右键", hidden: []) == [.finderMenu])
+    #expect(SettingsPage.finderMenu.groupTitle == "插件")
   }
 }
