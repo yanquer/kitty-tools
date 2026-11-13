@@ -135,7 +135,7 @@ struct ShortcutsTests {
     #expect(
       ShortcutsSheet.sections(groups) == [
         .clipboard, .launcher, .translate, .screenshot, .record, .notes, .reminders, .statusScreen,
-        .launchpad, .windowSwitcher, .windowLayout, .general,
+        .launchpad, .windowSwitcher, .windowLayout, .keepAwake, .general,
       ])
     #expect(groups.first { $0.title == "提醒" }?.page == .reminders)
     func page(_ title: String) -> SettingsPage? { groups.first { $0.title == title }?.page }

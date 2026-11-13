@@ -91,6 +91,8 @@ struct HomeTests {
     #expect(
       Home.offCount(enabled: all.subtracting([.dockPreview, .finderMenu]), available: all) == 0)
     #expect(Home.offCount(enabled: all.subtracting([.notes, .record]), available: all) == 2)
+    // 没添加的插件不算「关着的功能」（2026-11-12 拍板 A1）
+    #expect(Home.offCount(enabled: all.subtracting([.keepAwake]), available: all) == 0)
     let noLaunchpad = all.subtracting([.launchpad])
     #expect(Home.offCount(enabled: noLaunchpad, available: noLaunchpad) == 0)
   }
@@ -101,8 +103,8 @@ struct HomeTests {
     state.features = all
     let sections = Home.sections(state: state, keys: [:])
     // 截图与录制折成两行；窗口切换四格成一节，前后的单格各自并行。
-    #expect(Home.rows(sections).map(\.count) == [3, 5, 5, 3, 3, 3, 4, 2])
-    #expect(Home.rows(sections).flatMap { $0 } == Array(0..<28))
+    #expect(Home.rows(sections).map(\.count) == [3, 5, 5, 3, 3, 3, 4, 3])
+    #expect(Home.rows(sections).flatMap { $0 } == Array(0..<29))
     let rows: CGFloat = 8
     let expected =
       Home.top + Home.bottom + 5 * Home.titleHeight + 2 * Home.untitledGap + rows * Home.tile.height

@@ -113,6 +113,7 @@
 | `Screenshot/` | `ScreenCapture.swift`（逐屏冻结帧 + 同一刻的窗口 Z 序快照）、`RegionSelector.swift`（框选会话、每屏一个遮罩、选区几何纯函数）、`SelectionView.swift`（遮罩画面与交互：图层绘制、窗口悬停、手柄、放大镜、工具栏）、`Redaction.swift`（一键打码：一行字里认手机号、邮箱、卡号、身份证号，识字框换成打码框，2026-11-12）、`ElementFinder.swift`（悬停认窗口里的元素：问指针下那扇窗口的主人这一点上是什么、往上取框；裁剪 / 过滤 / 去重、换层是纯函数，2026-11-08）、`ScreenshotOutput.swift`（PNG、快速保存、另存为）、`PinPanel.swift`（钉图；第二轮体检 F1 起还有「钉住剪贴板里的图」的取图、解码、找位置）、`Annotation.swift`（标注模型，显示与导出共用 draw，M10）、`EditorToolbar.swift`（HUD 主工具栏 + 样式托盘，M10，Whisker 重做）、`TranslationCard.swift`（截图翻译盖回截图上时放不下的段：选区外的译文卡片，2026-11-08）、`FlyCard.swift`（截图飞入右下角 + 快门声，Whisker S1；录屏第 3 批起录屏的最后一帧也从这里飞，落地多播放符号和时长 `VideoMarks`）、`ScrollCapture.swift`（长截图会话：边框、侧边面板、抓帧循环、自动滚动）、`ScrollStitcher.swift`（长截图拼接，纯逻辑）、`ShotKeys.swift`（截图时能改的 21 个键，2026-11-06）、`AnnotateOverlay.swift`（标注遮罩：整屏压暗、图居中、滚动与缩放、工具栏和样式托盘、出图；长截图按 A 和截图历史里双击都用它，2026-10-26）、`ScrollCanvas.swift`（长图画布：只画看得见的那一段 + 标注交互，标注层复用 `AnnotationCanvas`）、`ShotHistory.swift`（截图历史：原图 + 标注 + 缩略图存 <数据目录>/shots/，记录在主库的 shots 表，按天数和总量清理，2026-10-26）、`ShotHistoryWindow.swift`（历史窗口和模型：筛选、按天分组、每条的操作、缩略图缓存）、`ShotHistoryView.swift`（历史窗口的界面：网格 + 预览 + 操作）、`Clothesline.swift`（晾衣绳：面板、什么时候滑下来 / 收起、挂上 / 取下、卡片上的动作，第十族 2026-10-26）、`ClotheslineLayout.swift`（晾衣绳的几何与时机：排法、垂度、菜单栏那一条、收不收，纯函数）、`ClotheslineRope.swift`（绳子的物理：verlet 质点 + 重力 + 阻尼 + 距离约束，纯值类型）、`ClotheslineView.swift`（晾衣绳的内容：绳子、卡片、夹子、悬停和鼠标 `CardMouse`）、`ShotShelf.swift`（CleanShot 式常驻缩略图，Whisker D；录屏第 3 批加视频卡 `ShelfCard.Kind.video`，右键菜单 / 旁白动作同一份 `ShelfCard.menu`）、`SizeField.swift`（遮罩里的尺寸胶囊：就地输入宽高、比例菜单）、`ScreenRecorder.swift`（录屏会话：SCRecordingOutput 先写到同卷、系统不清理的地方再挪进快速保存目录、白名单面板的例外过滤器、选区边框、菜单栏停止项、中断与闪退恢复，录屏第 1 批；第 2 批加倒数、放弃、帧率 / 倒数 / 光标设置；第 3 批挪好后取最后一帧 `poster`；第 4 批按录制条开关配声音 / 麦克风 / 点按（`Options`、`configure`）、开录前问麦克风授权、麦克风断开；录制条（四个开关：系统声音、麦克风、显示点按、显示按键） `RecordBar` 在 `EditorToolbar.swift`、框选是 `SelectionView` 的 `.record` 模式；手测反馈第 1 批起点按圈由 `InputOverlay` 画，`configure` 只管声音，过滤器例外多并一个它的窗口号 `exceptedOwnWindows`）、`InputOverlay.swift`（录屏里显示用户的输入，手测反馈第 1 批 2026-10-01：显示点按开着时盖在被录区域上的透明 NSPanel（普通实例、不接鼠标、层级 popUpMenu + 2），global / local 鼠标监听，按下圆盘 / 右键空心环 / 拖动跟随 / 松开涟漪都是 CALayer 动画；坐标换算、形状、哪些自家窗口上不画是纯函数；手测反馈第 2 批加按键提示：录制条「显示按键」开着时同一块窗口底部居中的 HUD 胶囊，global / local 的 keyDown 监听（global 要辅助功能授权），键名复用 `HotKey.display`，内容和停手清空是纯状态 `Keys`，位置是纯函数；显示点按 / 显示按键任一开着就建窗口）、`RecordingHUD.swift`（录制 HUD：倒数 / 录制中两态、红点呼吸、计时、放弃两下、停止，普通 NSPanel 状态栏层级、能拖，录屏第 2 批；第 4 批录制态加只读声音状态（系统声音 / 麦克风，开录时的麦克风断开变橙）；录音第 5 批加录音形态 `medium = .audio`：电平 `LevelMeter`、暂停 / 继续、「没听到声音」、底部居中从底边长出来；手测反馈第 3 批加录音的待录态 `State.ready`：[系统声音][麦克风] ｜ [✕][●]，来源开关读写 `Prefs.audioRecordSource`，开始后原地换成录制态）、`VideoExport.swift`（录屏转成 GIF，录屏录音第 7 批：15 fps、宽 ≤ 960、最长前 60 s，`AVAssetImageGenerator` 逐帧取、`CGImageDestination` 逐帧编（关全局调色板）、`@concurrent`；帧时刻 / 输出尺寸 / 存盘名是纯函数；常驻缩略图的 GIF 卡是 `ShelfCard.Kind.gif`，入口是视频卡的「转成 GIF」`ShelfCard.convertToGIF`）、`AudioRecorder.swift`（录音会话，录音第 5 批：AVAudioRecorder 录 m4a、授权、暂停续写、20 Hz 电平与 `Levels` 历史、「没听到声音」、中断（系统睡眠 / 输入设备断开 / 磁盘）、停止后画波形 poster；收尾挪文件、闪退恢复、结果岛、菜单栏停止项和录屏共用 `ScreenRecorder` 的 `settle` / `recover` / `summary` / `makeStopItem`（`ScreenRecorder.Medium`），常驻缩略图的录音卡是 `ShelfCard.Kind.audio`；第 6 批加来源 `Source`（麦克风 / 系统声音 / 两者），后两种用 `ScreenRecorder` 的只录声音模式 `audioOnly` 当引擎，电平由它的样本回调算好投过来；手测反馈第 3 批分成两个阶段：`open()` 待录只出控制条，`start()` 才读来源、问 `allowsStart`、开录） |
 | `StatusScreen/` | `StatusPreset.swift`（一个状态：标题、说明、图标、样式、电源、自动结束；自带的三个；偏好里的 JSON 和 `sanitized`）、`InputBlock.swift`（事件拦截，全仓库唯一碰 `CGEvent.tapCreate` 的地方；会话是不是锁着 `isSessionAway`）、`ExitHold.swift`（退出判断：按住 esc / 按住退出提示 2 秒，纯状态）、`Passcode.swift`（退出密码：4–8 位数字、钥匙串里的条目、密码框的输入状态，纯状态）、`StatusScreen.swift`（一次会话：进入、触碰、锁屏时让开、退出、退出后拦截的留守）、`StatusScreenView.swift`（每屏一张全屏面板 `StatusScreenPanel` 和画面）、`StatusEmoji.swift`（动画表情：16 个可选 + 眼睛的清单、静止画面、解帧、按帧换图层内容的播放；素材 `Resources/status-emoji-<id>.heics` 由 `macos/status-emoji.swift` 从 Microsoft Fluent Emoji Animated 转来）、`StatusPicker.swift`（按全局快捷键时先出的选状态面板：一排预览卡片、键盘选择、把选中卡片的位置交给会话让画面从它长到整屏）；规矩见 mac-overlay-panel §11、`StatusPresetSync.swift`（状态屏的状态接进全局同步：一个一条 + 顺序一条；2026-10-24） |
 | `StatusScreen/`（2026-11-05 补） | `EmojiPack.swift`（动画表情包：挑的系统表情有 Fluent 动画版时按对照表 `Resources/emoji-pack.json` 从本仓库 release `emoji-pack-<版本>` 下载、缓存在数据目录 `emoji-pack/`（上限 50 MB，删最久没用的），开关 `Prefs.emojiPackDownloads`；表情包由 `macos/emoji-pack.swift` 生成） |
+| `KeepAwake/` | （保持唤醒，第一个插件，2026-11-12；拍板和做法在 §10「插件与保持唤醒」）`KeepAwakePlan.swift`（纯函数：定时的时段、跨午夜、下一次要变的时刻、启动器「awake …」的解析、剩多久的说法）、`KeepAwake.swift`（执行层：手动的一段和定时，`ProcessInfo.beginActivity`、到点 / 醒来 / 改时间重新算、岛上说一声） |
 | `Reminders/` | `ReminderSound.swift`（提示音：系统的、个人「声音」文件夹里的、自己选的文件（拷进数据目录 `reminder-sounds/`），播放最多 30 秒、处理了就停；编号的校验，2026-11-04 用户反馈）、`ReminderPhrase.swift`（启动器一句话建提醒的解析，纯函数）、`ReminderSync.swift`（提醒列表接进全局同步）、`ReminderScreen.swift`（全屏提醒，面板 `ReminderScreenPanel`）、`ReminderGlow.swift`（边框：每屏四条贴边窄窗口）、`Reminder.swift`（一条提醒：标题、说明、表情、开关、时间规则 `Schedule`、提醒方式、全屏多久、声音、催促；三条示例；偏好里的 JSON、逐字段兜底的解码和 `sanitized`；设置页的列表纯函数和摘要）、`ReminderSchedule.swift`（纯函数：一次 / 每周 / 每月的下一次、间隔按锚点和时段、`ReminderCheck.check` 此刻哪几条响 / 算错过 / 下次几点看、`reconciled`；这台电脑的状态 `ReminderState`）、`ReminderCenter.swift`（执行层：一个睡到下一刻的计时任务、锁屏 / 解锁 / 醒来 / 改时钟的监听、间隔提醒的空闲检查、挂在刘海岛上的那一条、知道了 / 稍后）；2026-11-04，§10「提醒」 |
 | `Notes/` | （便签，§10「便签」；2026-10-12 立项、2026-10-18 八批全部做完）**数据**：`Note.swift`（模型、标题 / 摘要、清洗和上限）、`NoteStore.swift`（单独的库、排序搜索、最近删除 30 天、落盘重试）、`NotesBackup.swift`（每日备份留 7 份、打不开时的恢复，和剪贴板的平行）、`NoteSample.swift`（空库首次放一条示例）。**入口和窗口**：`NoteCapture.swift` + `NoteCaptureView.swift`（⌥N 快速记一条）、`NotesWindow.swift` + `NotesWindowView.swift`（全部便签窗口的列表 / 搜索 / 工具栏 / 右键）、`NoteWall.swift` + `NotesWallView.swift`（便签墙的纯函数和视图）。**屏幕边缘**：`NoteEdge.swift`（开关、叫停、面板生命周期）、`NoteDeck.swift` / `NoteDeckModel.swift` / `NoteDeckState.swift` / `NoteDeckOptions.swift` / `NoteDeckLayout.swift` / `NoteDeckPill.swift` / `NoteDeckPanel.swift` / `NoteDeckView.swift`（药丸、标签列、状态机、几何、设置、面板）。**打开的便签**：`NoteSheet.swift` + `NoteSheetModel.swift` + `NotePanel.swift`（那叠和浮动共用）、`NoteFloat.swift` / `NoteFloatModel.swift` / `NoteFloatState.swift` / `NoteFloatLayout.swift` / `NoteFloatPanel.swift`（拖出来、拉大小、固定后回原位；一张一个）、`NoteFloats.swift`（同时浮几张：上限、最久没碰、几张一起记位置，2026-10-22）、`NoteFields.swift`（标题 / 正文输入框）、`NoteColorPicker.swift`（颜色菜单的「其他颜色…」：系统取色面板、最近用过，2026-10-22）。**正文**：`NoteTextView.swift` + `NoteTextView+Images.swift`（显式搭的 TextKit 1；样式只改属性；组字期间不重排不落盘）、`NoteStyles.swift`（行距、五种任务方框、代码块、文字颜色）、`NoteMarkdown.swift`（不用正则的扫描器、标记藏 / 露）、`NoteTasks.swift`（任务和列表的纯函数）、`NoteTaskBox.swift`（任务方框自己画的圆角方框：几何、五种画法、记号取色；2026-10-18）、`NotePaper.swift`（8 种纸色、6 种文字颜色）、`NoteImages.swift` + `NoteImageStore.swift` + `NoteImageAttachment.swift`（令牌、图片目录、附件字符）、`NoteImageCrop.swift`（图片的裁切层：几何纯函数 + 盖在正文滚动区上的视图，2026-10-22）、`NoteMarkdownFiles.swift`（整个 / 单条的导出导入）、`NoteSync.swift`（同步的合并规则：版本钟、状态后改的赢、墓碑，纯函数；2026-10-22）、`NoteSyncFolder.swift`（同步文件夹的写法、一轮该合什么、刹车、该写出去什么，纯函数；2026-10-22）、`NoteSyncDisk.swift`（读写同步文件夹：协调读写、没下载完的文件、缓存，主线程外；2026-10-23）、`NoteSyncer.swift`（同步的执行层：什么时候合、一轮怎么走、刹车、正在编辑的先不换、认出库被退回去了；2026-10-23）。规矩：编辑器、Markdown、任务、颜色、图片、导出导入在 mac-overlay-panel §3 §5，那叠和浮动在 §12，长相在 `mac-whisker/notes.md`，备份在 mac-clipboard §1，划词在 mac-translate §5。 |
 
@@ -941,7 +942,7 @@ CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO
   只存改过的（`launcherCommandAliases` / `launcherCommandsOff`，注册默认值 ""，跟着设置导出、同步——E1）；内置命令不改各自的
   解析，搜索一开头把别名换回原关键词、原关键词改掉 / 关掉的挡掉（`LauncherCommands.canonical`）；撞词（含网页搜索关键词）描橙框。
 - 自带 9 个（D1 D2）：Unix 时间戳 time、JSON 格式化 json、UUID 生成器 uuid、进制转换 bcvt、URL 编码 & 解码 url、Base64 编码 &
-  解码 b64、正则表达式测试 regt、切换深色模式 dark、防止睡眠 awake，`Resources/scripts/script-*.sh`（打进包里平铺），只用 zsh 和
+  解码 b64、正则表达式测试 regt、切换深色模式 dark、防止睡眠 awake（2026-11-12 删掉，换成保持唤醒插件），`Resources/scripts/script-*.sh`（打进包里平铺），只用 zsh 和
   osascript（JavaScript）——python3 / swift 在没装开发者工具的 Mac 上一跑就弹安装框，jq 在 15.0 上有没有没核实。随 App 只读、
   跟着更新，「命令」表里右键「复制一份到我的脚本」（同时关掉自带那条）。flomo、简悦要账号，不自带。搜索菜单栏（D3）另立一项。
 - 不做：每个脚本的全局快捷键、定时刷新的 inline、按内容自动出现、只跑一次的本地过滤列表、选中文字交给脚本、脚本商店、
@@ -1285,6 +1286,47 @@ Alfred 的 Related Apps、BetterTouchTool 按 App 停用，调研和测开销的
 - 没做 / ponytail：本 App 的浮层开在名单 App 上面时前台还是它，按快捷键收不回浮层（Esc、点外面照常）；整张名单在同步里算一项，
   两台同时各加一个 App 会丢一个（同剪贴板「不记录」的 App）；切到名单 App 到收到通知之间那几毫秒按下的还归本 App（推断，没测）。
 
+### 插件与保持唤醒（2026-11-12 立项）
+
+- 用户 2026-11-12：「#3 和 #14 的功能如果做进来就考虑做成插件化的功能了，后续大模块的新功能基本都会以插件的形式存在了」。
+  拍板页 https://claude.ai/artifact/UDBE97XGLMnZT9HobHz1mk （源文件在工作树 `issues-plugins-463c97` 的
+  `macos/build/research/plugins-2026-11-12/decisions.html`，同目录 `demo.html` 是网页模拟的演示），10 项，用户「全部按推荐」。
+  在分支 `plugins-wip`（从 macos `632e5c4e`）做。对标只写在这里和注释里。
+- **插件 = 内置插件**（A1）：代码编进 App，就是一个 `Feature`（`Feature.plugins`，`isPlugin`），同样一个开关——「添加」= 打开、
+  「移除」= 关掉（设置和数据留着）。和功能的区别只在露不露面：**新装、升级都默认不添加**（`defaultOn` false）；没添加的不进设置侧栏
+  （也不进「已关闭」那组，`SettingsPage.absentPlugins`、`SettingsRoot.absent`）、设置里的搜索（落到通用页，「功能 ›」下面就是它）、
+  欢迎引导、「功能」列表和主界面的「N 个功能关着」（`Feature.listed` 不含插件）；添加了才进侧栏「插件」一组（排在功能后面）、菜单栏、
+  主界面、快捷键页、速查表、启动器。正看着的插件页被移除时回到「功能」页。不做：能下载的进程内插件包（同团队签名载得进来，但没有
+  稳定的模块接口、卸不掉、崩了一起崩）、别人写的原生插件（要关库验证）、独立插件 App（等第一个真要隔离的模块再搭）。
+- **在哪添加**（A2）：设置 › 通用 › 功能 下面一组「插件」，每个一张卡（40 pt 色块、名字、一句话、要的授权、后台做什么，
+  `Feature.pluginFacts`）+「添加」/「移除」（`FeaturesPage.PluginCard`）。已有的十个功能不挪（A3）。
+- **启动器里的「添加…插件」**（A4，`LauncherModel.pluginOffers`）：没添加的插件，打到它的名字或关键词（`Feature.pluginWords`；整个词打全、
+  英文至少 4 个字母、中文至少 2 个字）时，本地结果后面、兜底前面一行，↩ 打开 设置 › 通用 › 功能、滚到那张卡、描一圈强调色两秒
+  （`SettingsNavigation.focusedPlugin`）——不直接添加，先看清要什么授权。这是「关着的功能入口全藏」（mac-native §1）的唯一例外。
+- **保持唤醒**（#3，B1–B4；照 2026-11-08 那份的 A2）：`KeepAwake/`，设置页 `Settings/KeepAwakeTab.swift`，家族色靛紫
+  （`Style.Family.keepAwake`），图标 `kitty.keep.awake`（咖啡杯，`icons/feature/`，mac 已生成；Windows 那份在 windows 分支上跑）。
+  - 手动开一段：无限期 / 30 分钟 / 1 / 2 / 5 小时 / 到某一刻；默认屏幕也不熄（`Prefs.keepAwakeDisplay`，能改成只防系统睡眠）。
+    做法同状态屏的「电源」：`ProcessInfo.beginActivity`（`StatusScreen.activityOptions`），不起 caffeinate、不要授权，退出时系统收回；
+    不跨重启。到点、醒来、改系统时间、换时区、偏好变了重新算（一个等到「下一次要变」的 Task，没开时什么都不跑）。
+  - 定时一条（`Prefs.keepAwakeSchedule`，`KeepAwakePlan.Schedule` 的 JSON，默认关、工作日 9:00–18:00）：结束早于开始 = 跨午夜、
+    算在开始那天，「全天」单独一个开关（开始等于结束不当全天：拨时间时两边会短暂相等）；下一次要变只算真的进出（连着的两天全天之间的半夜不算）；手动开的优先。跟着设置导出，**不同步**（`SettingsSync.localKeys`，B4）。
+  - 入口：全局动作 `HotKeyAction.keepAwake`（加在末尾、不设默认键：按一下开无限期、再按停，开着时叫「停止保持唤醒」，
+    `ActionState.awake` / `isRunning`）；菜单栏「保持唤醒」带子菜单（开着时项名后写还剩多久、「停止保持唤醒」；没开时「开始（无限期）」
+    和几档；定时的时段里一行灰字；「保持唤醒设置…」，`AppDelegate.addKeepAwakeMenu`）；主界面一格；启动器「awake 2小时」
+    「保持唤醒 到18点」「防息屏 无限期」（`KeepAwakePlan.query` / `parse`，借提醒的 `ReminderPhrase.duration` / `moment`，时间以外只许
+    剩连接词；`LauncherModel.keepAwakeItems`，行是 `.prompt` + `awake-` 前缀；只打关键词的是内置动作那一行，搜得到 awake）；
+    开始 / 停止 / 到点 / 进出时段刘海岛说一声。关键词进网页搜索保留词；**不进「命令和别名」表**（插件自己能移除，没添加时表里不该有它）。
+  - 0.8.0 自带的「防止睡眠 awake」脚本删掉（B3），awake 这个词给插件，插件没添加时打 awake 出「添加…插件」那一行。
+  - 做不到写进设置页：合上盖子照样睡（接着电源和外接显示器时除外）。
+- 独立评审（一个没看过改法的 agent，9 处，都修了）：时段里手动那段到点时岛上说成「照常睡」、和「时段结束」连弹两条（并成一句）；
+  偏好变化碰巧赶上到点时不提示（到点总要说，只有定时被改引起的进出不说）；每天全天写成「到 明天 0:00」（只算真的进出）；
+  开始等于结束自动当全天（改成单独的开关）；添加了插件搜 awake 落到通用页（`SettingsPage.matching`：只有没添加的插件的词才算
+  通用页对上）；卡片滚动太早；读屏听不到授权 / 后台两行；移除插件时手动那段悄悄停（说一声）；中文关键词不带空格不认。
+- 单测 `KeepAwakeTests`（时段、跨午夜、全天、读写、解析、启动器那几行、添加插件那一行）；截图自检 `SnapshotProbeTests/plugins()`
+  （图以 plugins- 开头）。待手测 HANDTEST「插件与保持唤醒」。
+- **#14 平滑滚动**排在后面另发（C1 C2）：第一版只做鼠标平滑 + 鼠标单独反向 + 按 App 停用 + 修饰键；拦截放在 Kitty 里单独一条线程
+  （要改 mac-native §3、mac-overlay-panel §11 两条红线），先做探针。Mos 是 CC BY-NC 4.0，不拷代码。
+
 ## 11½. Whisker 设计语言改造（2026-09-25 起）
 
 已归档到 `docs/archive/PLAN-12.md` §11½（A–E 各阶段的内容、状态和 2026-09-26 的交接）。现状：A 基础与招牌时刻、B 界面重做、C 品牌、E 截图重设计都已完成（待手测）；D 深度只剩「macOS 26 玻璃 + `.icon`」——玻璃分支第 11 批已写好，等 26 测试机按 `HANDTEST.md`「macOS 26 手测」实测，`.icon` 也等 26。规范正文在 `.claude/skills/mac-whisker/rule.md`（核心）和各 `mac-whisker/<界面>.md`。
@@ -1294,6 +1336,10 @@ Alfred 的 Related Apps、BetterTouchTool 按 App 停用，调研和测开销的
 > 2026-10-03 瘦身：原来的完成记录和整段的「下一步」「暂不发版」「发布」「接手须知」原样挪到 `docs/archive/PLAN-12.md`；**手测清单**（原「待用户手测」那一大段）原样挪到 `HANDTEST.md`，条目和编号不变——代码注释里的「PLAN §12 第 N 条」「§12「录屏 / 录音手测」N」「§12「macOS 26 手测」第 1 条」都去那里按小节名找。新的手测条目加在 `HANDTEST.md` 里。2026-11-01（第四轮体检 W1）起这些旧条目连同「发版冒烟清单」又原样挪进了 `docs/archive/HANDTEST-2026-10.md`（编号不变，上面这些引用和下文的「`HANDTEST.md`「X 手测」N」都去那里找）；`HANDTEST.md` 现在是「真机回归清单」+ 正在验收的那一轮。
 
 > 2026-10-28（第三轮体检第 7 批）：2026-10-22 及更早的进度记录、做完的「已知的小毛病」、旧的「现状」「下一步」原样挪到 `docs/archive/PLAN-batches-2026-10.md` §12；AGENTS.md「项目概述」原来的长段原样挪到本节末尾「各族进度摘要（原 AGENTS 项目概述）」。
+
+**2026-11-12：插件与保持唤醒**（§10 同名一节）：拍板页「全部按推荐」；分支 `plugins-wip`（从 macos `632e5c4e`），
+插件页 + 保持唤醒做完，全量单测过；没并回 macos、没 push、没写更新日志（下一版发版时写，`WhatsNew` 也那时挑）。
+待手测 HANDTEST「插件与保持唤醒」。#14 平滑滚动还没开始。
 
 **2026-11-10：按 App 停用快捷键**（§10 同名一节）：检出 `kitty-tools-macos-hotkeyblock`（分支 `hotkey-block-wip`，从 macos
 `80e01660`）一个提交，写了 0.8.1 的更新日志；没并回 macos、没 push。待手测 HANDTEST「按 App 停用快捷键」1–9。Windows 那一半是

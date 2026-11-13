@@ -170,6 +170,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
     screenshotLastRegion, recognizeText, translateReplace, screenRecord, audioRecord, pinClipboard,
     statusScreen, noteCapture, noteNew, noteAll, launchpad, shotHistory, island, clothesline, home,
     reminderNew, windowSwitch, windowSwitchPrevious, appWindowSwitch, appWindowSwitchPrevious
+  case keepAwake
   case windowLayoutPicker
   case windowLayout(WindowLayoutAction)
 
@@ -183,11 +184,12 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
       .home, .reminderNew, .windowSwitch, .windowSwitchPrevious, .appWindowSwitch,
       .appWindowSwitchPrevious,
       .windowLayoutPicker,
-    ] + WindowLayoutAction.allCases.map(Self.windowLayout)
+    ] + WindowLayoutAction.allCases.map(Self.windowLayout) + [.keepAwake]
 
   /// 稳定存储名兼容已有快捷键、命令别名和设置文件。
   var rawValue: String {
     switch self {
+    case .keepAwake: "keepAwake"
     case .clipboard: "clipboard"
     case .selectionTranslate: "selectionTranslate"
     case .inputTranslate: "inputTranslate"
@@ -266,16 +268,18 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
     case .appWindowSwitchPrevious: "反向切换当前 App 的窗口"
     case .windowLayoutPicker: "窗口管理"
     case .windowLayout(let action): action.displayTitle
+    case .keepAwake: "保持唤醒"
     }
   }
 
   /// 菜单栏、启动器里的标题：recording 是这一项正在录（录屏 / 录音录着时叫「停止录屏」/「停止录音」，再按一次快捷键也是停止；
-  /// 录音控制条待录时不算在录，仍叫「录音」，点它 / 再按一次是开始）
+  /// 录音控制条待录时不算在录，仍叫「录音」，点它 / 再按一次是开始）。保持唤醒手动开着一段时也算（再按一次是停止）
   func title(recording: Bool) -> String {
     guard recording else { return title }
     return switch self {
     case .screenRecord: "停止录屏"
     case .audioRecord: "停止录音"
+    case .keepAwake: "停止保持唤醒"
     default: title
     }
   }
@@ -333,6 +337,8 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
     case .launchpad: nil
     // 新建提醒（2026-11-04，提醒 D5）不设默认键：打开启动器、填好「提醒 」，要快捷键到 设置 › 快捷键 里自己设
     case .reminderNew: nil
+    // 保持唤醒（第一个插件，2026-11-12 拍板 B2）不设默认键：按一下开（无限期）、再按一下停
+    case .keepAwake: nil
     // 刘海岛（2026-10-26）：刘海屏点刘海就能打开，键给没有刘海的屏用，到 设置 › 快捷键 里自己设
     case .island: nil
     // 主界面（2026-10-29）：主入口是点菜单栏图标，键给把图标藏起来的人自己设
@@ -416,6 +422,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
     case .windowSwitch, .windowSwitchPrevious, .appWindowSwitch, .appWindowSwitchPrevious:
       .windowSwitcher
     case .windowLayoutPicker, .windowLayout: .windowLayout
+    case .keepAwake: .keepAwake
     case .island, .home: nil
     }
   }
@@ -450,6 +457,8 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
     ("启动台", [.launchpad]),
     ("窗口切换", [.windowSwitch, .windowSwitchPrevious, .appWindowSwitch, .appWindowSwitchPrevious]),
     ("窗口管理", [.windowLayoutPicker] + WindowLayoutAction.allCases.map(Self.windowLayout)),
+    // 插件排在功能后面（同设置侧栏）。保持唤醒：菜单栏里同提醒，只有一项带子菜单（AppDelegate.addKeepAwakeMenu）
+    ("保持唤醒", [.keepAwake]),
     // 刘海岛（2026-10-26）：不属于哪个功能、一直在
     ("刘海岛", [.island]),
     // 主界面（2026-10-29）：同刘海岛，一直在；菜单栏菜单里不列（菜单就是图标的另一半），主界面里也不列它自己
@@ -514,6 +523,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
       "rectangle.on.rectangle"
     case .windowLayoutPicker, .windowLayout: "rectangle.split.2x2"
     case .reminderNew: SettingsPage.reminders.symbol
+    case .keepAwake: SettingsPage.keepAwake.symbol
     }
   }
 
@@ -534,6 +544,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
       Style.Family.dockPreview
     case .reminderNew: Style.Family.reminders
     case .windowLayoutPicker, .windowLayout: Style.Family.dockPreview
+    case .keepAwake: Style.Family.keepAwake
     case .island, .home: Style.Family.general
     }
   }
