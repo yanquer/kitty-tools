@@ -237,7 +237,7 @@ struct RecordingToolsTests {
     state.apply(.mode(.pen))
     bar.update(state, escapes: true)
     #expect(bar.button(for: .pen)?.accessibilityValue() as? String == "已选择")
-    #expect(bar.frame.width < 500 && bar.frame.height < 200)
+    #expect(bar.frame.width < 560 && bar.frame.height < 200)
   }
 
   /// 主行高度固定，参数使用独立气泡，重复点击工具可收起，鼠标效果再次点击即关闭。
@@ -372,13 +372,61 @@ struct RecordingToolsTests {
     let bar = RecordingToolsBar()
     defer { bar.close() }
     let hud = try #require(bar.subviews.first as? HUDBar)
-    let handle = try #require(hud.stack.arrangedSubviews.first as? NSImageView)
-    #expect(handle.image != nil && handle.toolTip == "拖动工具栏")
+    let handle = try #require(hud.stack.arrangedSubviews.first)
+    #expect(handle.layer?.sublayers?.count == 6 && handle.toolTip == "拖动工具栏")
     bar.layoutSubtreeIfNeeded()
     #expect(bar.hitTest(CGPoint(x: 28, y: 36)) === bar)
     let pen = try #require(bar.button(for: .pen))
     let point = pen.convert(CGPoint(x: pen.bounds.midX, y: pen.bounds.midY), to: bar.superview)
     #expect(bar.hitTest(point) === pen)
+  }
+
+  /// 折叠后只保留六点把手与展开按钮，参数关闭，当前画图工具可继续使用。
+  @Test func collapsedToolbarKeepsDragAndExpandControls() throws {
+    let bar = RecordingToolsBar()
+    defer { bar.close(animated: false) }
+    let hud = try #require(bar.subviews.first as? HUDBar)
+    let fold = try #require(hud.stack.arrangedSubviews.dropFirst().first as? NSButton)
+    let expanded = bar.frame.size
+    var state = RecordingTools()
+    state.apply(.mode(.pen))
+    bar.update(state, escapes: true)
+    var dismissed = 0
+    bar.onDismissOptions = { dismissed += 1 }
+    fold.performClick(nil)
+    #expect(bar.isCollapsed && !bar.hasOptions && dismissed == 1)
+    #expect(hud.stack.arrangedSubviews.count == 2)
+    #expect(bar.frame.width < 130 && bar.frame.height == expanded.height)
+    #expect(fold.accessibilityLabel() == "展开工具栏" && fold.image != nil)
+    state.apply(.focus(.halo))
+    bar.update(state, escapes: true)
+    #expect(!bar.hasOptions && bar.accessibilityHelp()?.contains("画笔") == true)
+    #expect(bar.hitTest(CGPoint(x: 28, y: 36)) === bar)
+    fold.performClick(nil)
+    #expect(!bar.isCollapsed && bar.frame.size == expanded)
+    #expect(bar.button(for: .pen)?.accessibilityValue() as? String == "已选择")
+    #expect(fold.accessibilityLabel() == "折叠工具栏")
+  }
+
+  /// 折叠与展开保持左边缘，紧凑状态仍可移动，参数刷新不会恢复旧位置。
+  @Test func collapsedToolbarCanMoveAndExpandAtItsNewPosition() {
+    let bar = RecordingToolsBar()
+    defer { bar.close(animated: false) }
+    let visible = CGRect(x: -20000, y: -20000, width: 1400, height: 1000)
+    let anchor = CGRect(x: -19300, y: -19700, width: 200, height: 40)
+    bar.arrange(anchor: anchor, visible: visible)
+    let original = bar.panel.frame.origin
+    bar.setCollapsed(true)
+    #expect(bar.panel.frame.origin == original)
+    let dragged = CGPoint(x: -19800, y: -19500)
+    bar.panel.setFrameOrigin(dragged)
+    bar.windowDidMove(Notification(name: NSWindow.didMoveNotification, object: bar.panel))
+    bar.arrange(anchor: anchor.offsetBy(dx: 200, dy: 100), visible: visible)
+    #expect(bar.panel.frame.origin == dragged && bar.isCollapsed)
+    bar.setCollapsed(false)
+    #expect(bar.panel.frame.origin == dragged && !bar.isCollapsed)
+    #expect(visible.contains(bar.panel.frame))
+    #expect(!bar.panel.isVisible && !bar.panel.isKeyWindow)
   }
 
   /// 指示尾末端保留圆弧宽度，朝上与朝下使用同一条对称曲线，避免回到尖 V 形。

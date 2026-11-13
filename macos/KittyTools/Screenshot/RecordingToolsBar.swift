@@ -13,7 +13,10 @@ final class RecordingToolsBar: NSView, NSWindowDelegate {
   private let parameterBar = HUDBar(radius: Style.Radius.card, height: 34, blending: .behindWindow)
   private let parameterRoot = NSView()
   private let tip = CAShapeLayer()
-  private let dragHandle = NSImageView()
+  private let dragHandle = NSView()
+  private var foldButton: BarButton!
+  private var expandedControls: [NSView] = []
+  private(set) var isCollapsed = false
   private var options: NSStackView { parameterBar.stack }
   private var modes: [RecordingTools.Mode: ToggleButton] = [:]
   private var focuses: [RecordingTools.Focus: ToggleButton] = [:]
@@ -81,14 +84,25 @@ final class RecordingToolsBar: NSView, NSWindowDelegate {
 
   /// 主行按操作、画图、鼠标效果、撤销清空与关闭分组，焦点按钮再次点击即关闭效果。
   private func makeTools() {
-    dragHandle.image = NSImage(
-      systemSymbolName: "line.3.horizontal", accessibilityDescription: "拖动工具栏")
-    dragHandle.imageScaling = .scaleNone
-    dragHandle.symbolConfiguration = .init(pointSize: 10, weight: .medium)
-    dragHandle.contentTintColor = Style.HUD.secondaryText
+    dragHandle.wantsLayer = true
     dragHandle.toolTip = "拖动工具栏"
+    dragHandle.setAccessibilityElement(true)
+    dragHandle.setAccessibilityRole(.image)
+    dragHandle.setAccessibilityLabel("拖动工具栏")
     dragHandle.widthAnchor.constraint(equalToConstant: 16).isActive = true
     dragHandle.heightAnchor.constraint(equalToConstant: 32).isActive = true
+    for row in 0..<3 {
+      for column in 0..<2 {
+        let dot = CALayer()
+        dot.frame = CGRect(x: 5 + column * 4, y: 10 + row * 5, width: 2, height: 2)
+        dot.cornerRadius = 1
+        dot.backgroundColor = Style.HUD.secondaryText.cgColor
+        dragHandle.layer?.addSublayer(dot)
+      }
+    }
+    foldButton = barButton(
+      NSImage(systemSymbolName: "chevron.left", accessibilityDescription: nil)!,
+      tip: "折叠工具栏", action: #selector(foldClicked))
     var views: [NSView] = RecordingTools.Mode.allCases.map { mode in
       let button = ToggleButton()
       button.tag = mode.rawValue
@@ -117,8 +131,44 @@ final class RecordingToolsBar: NSView, NSWindowDelegate {
       NSImage(systemSymbolName: "xmark", accessibilityDescription: nil)!,
       tip: "收起工具箱并返回操作窗口，保留标注", action: #selector(closeClicked))
     views += [barSeparator(), undo, clear, barSeparator(), close]
-    body.install([dragHandle] + views)
+    expandedControls = views
+    rebuildToolbar()
   }
+
+  /// 两种布局共享拖动把手和折叠按钮，普通工具在展开状态挂回同一套控件。
+  private func rebuildToolbar() {
+    for view in body.stack.arrangedSubviews { view.removeFromSuperview() }
+    body.install([dragHandle, foldButton] + (isCollapsed ? [] : expandedControls))
+    updateFoldButton()
+    arrange()
+  }
+
+  /// 折叠按钮以同一位置切换方向，紧凑状态的提示包含当前工具。
+  private func updateFoldButton() {
+    foldButton.image = NSImage(
+      systemSymbolName: isCollapsed ? "chevron.right" : "chevron.left",
+      accessibilityDescription: nil)
+    foldButton.toolTip = isCollapsed ? "展开工具栏（当前\(currentMode.title)）" : "折叠工具栏"
+    foldButton.setAccessibilityLabel(isCollapsed ? "展开工具栏" : "折叠工具栏")
+    foldButton.setAccessibilityValue(isCollapsed ? "已折叠，当前\(currentMode.title)" : "已展开")
+  }
+
+  /// 折叠只调整工具栏占用，当前工具可继续使用，位置按本次交互的左边缘保持。
+  func setCollapsed(_ collapsed: Bool) {
+    guard !closesAfterHide, collapsed != isCollapsed else { return }
+    let origin = panel.frame.origin
+    isCollapsed = collapsed
+    if controlFrame != nil { draggedOrigin = origin }
+    if collapsed { dismissOptions() }
+    rebuildToolbar()
+    if let anchor = controlFrame, let visible = panel.screen?.visibleFrame ?? visibleFrame {
+      arrange(anchor: anchor, visible: visible)
+    }
+    if isShown { setSurfaceShown(true, parameters: false, replay: true) }
+  }
+
+  /// 点击折叠或展开，复用已有显隐弹出动效。
+  @objc private func foldClicked() { setCollapsed(!isCollapsed) }
 
   /// 参数复用截图的颜色、线宽色点和空心范围圆，由气泡按触发工具组合。
   private func makeOptions() {
@@ -181,6 +231,8 @@ final class RecordingToolsBar: NSView, NSWindowDelegate {
     }
     currentMode = state.mode
     currentFocus = state.focus
+    if isCollapsed { optionsTarget = nil }
+    updateFoldButton()
     if case .tool(let tool) = optionsTarget, state.mode != tool { optionsTarget = nil }
     if case .focus(let focus) = optionsTarget, state.focus != focus { optionsTarget = nil }
     let exitHint = escapes ? "Esc 返回操作窗口" : "点箭头返回操作窗口"

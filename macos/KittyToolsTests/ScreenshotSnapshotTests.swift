@@ -549,6 +549,8 @@ struct ScreenshotSnapshotTests {
     let desktop = try Self.desktop()
     for (name, focus, mode) in [
       ("idle", RecordingTools.Focus.off, RecordingTools.Mode.pointer),
+      ("collapsed", .off, .pointer),
+      ("collapsed-drawing", .off, .pen),
       ("halo", RecordingTools.Focus.halo, RecordingTools.Mode.pointer),
       ("spotlight", .spotlight, .pointer),
       ("drawing", .off, .pen),
@@ -629,6 +631,7 @@ struct ScreenshotSnapshotTests {
           bar.focusButton(for: .halo)?.performClick(nil)
         }
         bar.arrange(anchor: hud.frame, visible: bounds)
+        if name.hasPrefix("collapsed") { bar.setCollapsed(true) }
         bar.frame.origin = bar.panel.frame.origin
         if bar.hasOptions, let bubble = bar.optionsPanel.contentView {
           bubble.removeFromSuperview()
