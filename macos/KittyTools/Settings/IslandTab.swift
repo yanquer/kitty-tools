@@ -45,7 +45,7 @@ struct IslandTab: View {
         }
         .disabled(!nowPlaying)
       } header: {
-        Text("正在播放")
+        NewTitle("正在播放", page: .island, fresh: navigation?.fresh ?? [])
       } footer: {
         SectionFootnote(
           "读系统的「正在播放」要另起一个小进程（约 4 MB，没在放时不耗电），关掉就退出。暂停 30 秒后刘海两边收起；想接着放，点刘海再两指往下滑一次还找得到它。")
@@ -186,7 +186,7 @@ struct IslandTab: View {
           Text("断了或者好了 3 秒以上才说，醒来时闪一下不算")
         }
       } header: {
-        NewTitle("系统提示", page: .island, fresh: navigation?.fresh ?? [])
+        Text("系统提示")
       } footer: {
         SectionFootnote("有变化时在刘海岛上弹一下，同别的提示。没打开的不监听，也不要任何授权。")
       }
@@ -202,10 +202,8 @@ struct IslandTab: View {
         nextEvent = true
       }
     }
-    // 0.9.0 的「新」挂在「系统提示」（WhatsNew 的 island-notices）：拨过其中一个开关才算看过
-    .onChange(of: [noticePower, noticeBattery, noticeHeadphones, noticeNetwork]) {
-      WhatsNew.touch(section: "系统提示", of: .island)
-    }
+    // 0.9.0 的「新」挂在「正在播放」（WhatsNew 的 island-now-playing）：拨过那个开关才算看过
+    .onChange(of: nowPlaying) { WhatsNew.touch(section: "正在播放", of: .island) }
   }
 
   /// 问「日历」授权（系统框只弹一次）：给了才把开关打开；没给留在关着、橙字说怎么开
