@@ -49,7 +49,7 @@ nonisolated enum Feature: String, CaseIterable {
     case .windowLayout: "分屏布局、拖拽吸附、跨屏移动和多窗口平铺"
     case .finderMenu: "在访达里右键：新建文件、拷贝路径、移动复制、压缩解压"
     case .keepAwake: "不让电脑睡、不让屏幕熄：手动开一段，或按时段自动开"
-    case .island: "点刘海叫出快捷动作和最近的提示，录屏计时、提醒倒数、正在播放挂在刘海两边"
+    case .island: "点刘海叫出快捷动作，录屏计时、提醒倒数、正在播放挂在刘海两边、点开是卡片"
     }
   }
 
