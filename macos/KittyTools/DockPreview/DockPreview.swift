@@ -28,6 +28,8 @@
 // 截图那样的后台、截图开两三路并发。
 
 import AppKit
+import ApplicationServices
+import OSLog
 import SwiftUI
 
 @MainActor final class DockPreview {
@@ -66,8 +68,8 @@ import SwiftUI
   /// 弹着时盯着切桌面（收着时不盯）
   private var spaceObserver: NSObjectProtocol?
   /// 点了程序坞图标（或别处）收起之后，程序坞可能对着同一个图标再报一次选中：鼠标离开那个图标之前不再弹
-  private var dismissedURL: URL?
-  /// 图标的 URL → bundle id（路径经过符号链接时按它配进程；读一次 Info.plist 就记下）
+  private var dismissedIcon: AXUIElement?
+  /// 图标的 URL → bundle id（路径配不上时才用；读一次 Info.plist 就记下）
   private var bundleIDs: [URL: String] = [:]
   /// App 的路径 → 包里的名字（⌘Tab 切换器按标题配 App 用；读一次 Info.plist 就记下）
   private var appNames: [URL: [String]] = [:]
@@ -148,13 +150,12 @@ import SwiftUI
     // 收着时为上一个图标备好的截图还没用上就换走了：别截了
     if shown == nil { capturing?.cancel() }
     guard let item else {
-      dismissedURL = nil
+      dismissedIcon = nil
       return
     }
-    if item.bundleURL != dismissedURL { dismissedURL = nil }
-    // 按着鼠标（拖东西经过程序坞）不弹；没开着的 App 不弹
-    guard dismissedURL == nil, NSEvent.pressedMouseButtons == 0,
-      let target = runningApp(at: item.bundleURL)
+    if item.element != dismissedIcon { dismissedIcon = nil }
+    // 按着鼠标（拖东西经过程序坞）不弹；停稳后才配进程、列窗口
+    guard dismissedIcon == nil, NSEvent.pressedMouseButtons == 0, item.bundleURL != nil
     else { return }
     // 收着时停 0.4 秒（设置里能改）才弹；弹着时停稳 80 毫秒才换：快速划过去的图标一个都不列、不画
     pendingItem = item
@@ -175,10 +176,10 @@ import SwiftUI
         guard !Task.isCancelled, let self else { return }
         guard !clicked() else {
           self.pendingItem = nil
-          self.dismissedURL = item.bundleURL
+          self.dismissedIcon = item.element
           return
         }
-        prepared = self.prepare(target, at: item)
+        prepared = self.prepare(at: item)
         if let prepared, prepared.showsThumbnails { self.capture(prepared) }
         try? await Task.sleep(for: delay / 2)
       } else {
@@ -199,10 +200,10 @@ import SwiftUI
       self.pendingItem = nil
       if clicked() {
         if self.shown == nil { self.capturing?.cancel() }
-        self.dismissedURL = item.bundleURL
+        self.dismissedIcon = item.element
         return
       }
-      guard let prepared = opening ? prepared : self.prepare(target, at: item) else {
+      guard let prepared = opening ? prepared : self.prepare(at: item) else {
         return self.hide(animated: true)
       }
       self.present(prepared)
@@ -219,9 +220,13 @@ import SwiftUI
       return
     }
     // 有 AXURL 按它配（旧系统），没有按标题配（macOS 27：切换器的项只有标题）
-    guard
-      let target = runningApp(at: selection.bundleURL) ?? runningApp(titled: selection.title)
-    else {
+    let target =
+      if let url = selection.bundleURL {
+        runningApp(at: url)
+      } else {
+        runningApp(titled: selection.title)
+      }
+    guard let target else {
       if fromSwitcher { hide(animated: true) }
       return
     }
@@ -232,7 +237,7 @@ import SwiftUI
     pendingShow = Task { [weak self] in
       try? await Task.sleep(for: Self.switchDelay)
       guard !Task.isCancelled, let self else { return }
-      guard let prepared = self.prepare(target, at: item, edge: .bottom) else {
+      guard let prepared = self.prepare(at: item, target: target, edge: .bottom) else {
         return self.hide(animated: true)
       }
       self.fromSwitcher = true
@@ -245,8 +250,8 @@ import SwiftUI
   /// 包里的 CFBundleDisplayName / CFBundleName、.app 的文件名哪个对上都算；包里的名字按 App 的路径记下
   private func runningApp(titled title: String) -> NSRunningApplication? {
     guard !title.isEmpty else { return nil }
-    return NSWorkspace.shared.runningApplications.first { app in
-      guard app.activationPolicy == .regular else { return false }
+    let matches = NSWorkspace.shared.runningApplications.filter { app in
+      guard app.activationPolicy == .regular, !app.isTerminated else { return false }
       let url = app.bundleURL
       if let url, appNames[url] == nil {
         appNames[url] = Self.names(
@@ -255,6 +260,10 @@ import SwiftUI
       let names = [app.localizedName].compactMap(\.self) + (url.flatMap { appNames[$0] } ?? [])
       return names.contains(title)
     }
+    if matches.count > 1 {
+      Log.windows.notice("switcher app match skipped candidates=\(matches.count) source=title")
+    }
+    return matches.count == 1 ? matches[0] : nil
   }
 
   /// 一个 App 能被切换器叫成什么（纯函数，配单测）：显示名、CFBundleDisplayName、CFBundleName、.app 的文件名
@@ -276,18 +285,59 @@ import SwiftUI
     }.min() ?? .infinity
   }
 
-  /// 程序坞图标指向的那个开着的 App：先按路径配（不碰磁盘），配不上再按 bundle id（/Applications/Safari.app 是指向别处的
-  /// 链接，两边路径不一样；bundle id 读一次 Info.plist 就记下）。每路过一个图标都要配一次，所以不逐个解开所有 App 的链接
-  private func runningApp(at url: URL?) -> NSRunningApplication? {
-    guard let url else { return nil }
-    let path = url.standardizedFileURL
-    let apps = NSWorkspace.shared.runningApplications
-    if let match = apps.first(where: { $0.bundleURL?.standardizedFileURL == path }) {
-      return match
+  /// 将应用路径匹配到运行进程。多个图标共用同一路径时，按程序坞列表顺位分别取进程。
+  func runningApp(at url: URL?, dockItem: AXUIElement? = nil) -> NSRunningApplication? {
+    guard let url, url.isFileURL else { return nil }
+    if let dockItem,
+      DockWatcher.value(dockItem, "AXIsApplicationRunning", logFailure: true) as? Bool == false
+    {
+      return nil
     }
-    if bundleIDs[url] == nil { bundleIDs[url] = Bundle(url: url)?.bundleIdentifier }
-    guard let id = bundleIDs[url] else { return nil }
-    return apps.first { $0.bundleIdentifier == id }
+    let path = url.resolvingSymlinksInPath().standardizedFileURL
+    if bundleIDs[path] == nil { bundleIDs[path] = Bundle(url: path)?.bundleIdentifier }
+    let id = bundleIDs[path]
+    let apps = NSWorkspace.shared.runningApplications.filter {
+      !$0.isTerminated && $0.processIdentifier > 0
+    }
+    let sameID = apps.filter { id != nil && $0.bundleIdentifier == id }
+    let samePath = apps.filter { app in
+      guard let appURL = app.bundleURL else { return false }
+      if appURL.standardizedFileURL.path == path.path { return true }
+      return (id == nil || app.bundleIdentifier == id)
+        && appURL.resolvingSymlinksInPath().standardizedFileURL.path == path.path
+    }
+    if samePath.count == 1 { return samePath[0] }
+    if samePath.isEmpty, sameID.count == 1 { return sameID[0] }
+    guard samePath.count > 1 else {
+      if sameID.count > 1 {
+        Log.windows.notice("dock app match skipped candidates=\(sameID.count) source=bundleID")
+      }
+      return nil
+    }
+
+    let began = CACurrentMediaTime()
+    let icons = dockItem.flatMap { DockWatcher.runningIconOrder(of: $0, at: path) }
+    // ponytail: 程序坞不给出图标对应的 PID。本机验证了固定的 Chrome 和后来直接启动的实例与系统进程列表顺序一致；
+    // Apple 只保证进程列表的相对顺序稳定。只有图标和进程数量一致才按顺位配，取不到顺位则不显示预览。
+    guard let index = Self.sharedPathAppIndex(appCount: samePath.count, icons: icons) else {
+      Log.windows.notice(
+        "dock app match skipped candidates=\(samePath.count) icons=\(icons?.count ?? -1) index=\(icons?.index ?? -1) elapsed=\(CACurrentMediaTime() - began)"
+      )
+      return nil
+    }
+    let match = samePath[index]
+    Log.windows.debug(
+      "dock app matched pid=\(match.processIdentifier) candidates=\(samePath.count) index=\(index) elapsed=\(CACurrentMediaTime() - began)"
+    )
+    return match
+  }
+
+  /// 只有图标与进程能按顺位一一对应时，返回当前图标对应的进程下标。
+  static func sharedPathAppIndex(appCount: Int, icons: (index: Int?, count: Int)?) -> Int? {
+    guard let icons, let index = icons.index, icons.count == appCount,
+      (0..<appCount).contains(index)
+    else { return nil }
+    return index
   }
 
   // MARK: 弹出、换、收
@@ -295,9 +345,12 @@ import SwiftUI
   /// 列窗口（主线程，中位约 20 ms）、排好。没窗口、找不到屏、别的功能占着屏幕时是 nil
   /// edge：程序坞在哪一边（nil = 照系统设置读）；⌘Tab 切换器的面板一律按「在下面」摆
   private func prepare(
-    _ target: NSRunningApplication, at item: DockWatcher.Item, edge: DockPreviewLayout.Edge? = nil
+    at item: DockWatcher.Item, target: NSRunningApplication? = nil,
+    edge: DockPreviewLayout.Edge? = nil
   ) -> Prepared? {
-    guard !isSuppressed() else { return nil }
+    guard !isSuppressed(),
+      let target = target ?? runningApp(at: item.bundleURL, dockItem: item.element)
+    else { return nil }
     // 停稳了，放大、自动隐藏滑出的动画大多走完了：图标的位置重读一次
     var item = item
     if let frame = DockWatcher.currentFrame(of: item) { item.frame = frame }
@@ -542,7 +595,7 @@ import SwiftUI
   }
 
   private func clickedOutside() {
-    dismissedURL = shown?.item.bundleURL
+    dismissedIcon = shown?.item.element
     hide(animated: false)
   }
 

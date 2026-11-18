@@ -20,6 +20,41 @@ struct DockPreviewProbeTests {
 
   private func say(_ line: String) { print("dock-probe \(line)") }
 
+  /// 双 Chrome 实机回归：只读程序坞、进程和窗口表，不切窗口、不截图。开跑时保留常用 Chrome 与 Playwright 实例。
+  @Test(.enabled(if: ProcessInfo.processInfo.environment["KITTY_DOCK_DUPLICATE_PROBE"] == "1"))
+  func duplicateChromeInstances() throws {
+    let dock = try #require(DockWatcher.dockElement(), "需要测试宿主的辅助功能授权")
+    let browser = try #require(
+      NSRunningApplication.runningApplications(withBundleIdentifier: "com.google.Chrome")
+        .first { $0.launchDate != nil })
+    let path = try #require(browser.bundleURL).resolvingSymlinksInPath().path
+    let icons = DockWatcher.lists(of: dock).flatMap { list in
+      (DockWatcher.value(list, kAXChildrenAttribute) as? [AXUIElement] ?? []).filter {
+        DockWatcher.value($0, "AXIsApplicationRunning") as? Bool == true
+          && (DockWatcher.value($0, kAXURLAttribute) as? URL)?.resolvingSymlinksInPath().path
+            == path
+      }
+    }
+    try #require(icons.count == 2, "需要常用 Chrome 和 Playwright 的两个运行图标")
+    let preview = DockPreview()
+    let first = try #require(preview.runningApp(at: browser.bundleURL, dockItem: icons[0]))
+    let second = try #require(preview.runningApp(at: browser.bundleURL, dockItem: icons[1]))
+    #expect(first.processIdentifier == browser.processIdentifier)
+    #expect(second.processIdentifier != first.processIdentifier)
+    #expect(second.launchDate == nil)
+    #expect(preview.runningApp(at: browser.bundleURL) == nil)
+
+    WindowServer.prepare()
+    let lister = DockWindows()
+    let firstWindows = Set(lister.list(first).map(\.id))
+    let secondWindows = Set(lister.list(second).map(\.id))
+    try #require(!firstWindows.isEmpty && !secondWindows.isEmpty, "两个实例都需要至少一扇窗口")
+    #expect(firstWindows.isDisjoint(with: secondWindows))
+    say(
+      "双 Chrome：图标 0 → PID \(first.processIdentifier)，窗口 \(firstWindows.sorted())；图标 1 → PID \(second.processIdentifier)，窗口 \(secondWindows.sorted())"
+    )
+  }
+
   /// ⌘Tab 切换器读不读得到（2026-11-06 拍板 C；同日用户报 27 上没生效）：要人在场——开跑后三分钟内按住 ⌘ 按几下 Tab、
   /// 停在切换器上一两秒再松开。只读：按着 ⌘ 时每 0.1 秒看一次——程序坞顶层子元素的角色 / 子角色（变了才打）、按
   /// SwitcherWatcher 的找法找 AXProcessSwitcherList、找到了打选中那项的标题 / AXURL / 全部属性名、那一排的位置，

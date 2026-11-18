@@ -64,13 +64,13 @@ Dock Preview；开源的 DockDoor、AltTab 是 GPL，**只借做法、一行代�
 - **压住程序坞的名字提示**：提示画在程序坞自己那块窗口里（层级 20，面板 25 在它上面），面板往图标框里压 6 点（`gap = -6`）、
   至少和提示一样宽（`labelWidth`）。离图标框留缝的话提示的三角和气泡下沿会从缝里露出来（2026-10-23 手测报的）。数是程序坞在下面、
   没开放大时屏上量的，左右两边和开着放大的要手测。
-- 程序坞的 AXURL 和进程的 bundleURL **都解开链接再比**（/Applications/Safari.app 是链接），比不上按 bundle id。
+- 程序坞的 AXURL 和进程的 bundleURL **都解开链接再比**（/Applications/Safari.app 是链接），比不上时只接受唯一的 bundle id 匹配。同一路径可同时启动多个进程（如 Chrome 和 Playwright 启动的 Chrome）。程序坞不给出图标对应的 PID，只有同路径的运行图标与进程数量一致时才按两份列表的顺位配对；Apple 未保证两个列表的排序一致。图标的点击取消按辅助功能对象区分。
 
 ## 5½. ⌘Tab 切换时（2026-11-06 拍板 C1–C5，`SwitcherWatcher.swift`）
 - **系统的 ⌘Tab 照旧**，不拦截、不换掉（拦截只许状态屏建，mac-native §3）。系统切换器是程序坞进程画的，辅助功能里是子角色
   `AXProcessSwitcherList` 的列表、只在切换器开着时有（DockDoor 同样这么读）。**macOS 27 上切换器的项没有 AXURL**（2026-11-06
   本机探针：列表是程序坞顶层的第二个 AXList，项只有 AXTitle、AXPosition、AXSize 这些，标题是「DingTalk」「WeChat」这种包名、
-  不是界面上的钉钉、微信；切换器窗口在程序坞的层 20）：有 AXURL 按它配，没有按标题配（`DockPreview.runningApp(titled:)`：
+  不是界面上的钉钉、微信；切换器窗口在程序坞的层 20）：有 AXURL 按它配，没有按标题配，匹配多个进程时不弹（`DockPreview.runningApp(titled:)`：
   普通 App 的显示名、CFBundleDisplayName、CFBundleName、.app 文件名哪个对上都算，包里的名字按路径记下）。第一版只认 AXURL，
   27 上一直不弹。
 - **只在按着 ⌘ 时找**：全局 + 本地监听修饰键变化（只听不拦），按下 ⌘ 才每 0.1 秒在程序坞的辅助功能树里找那个列表（只往不是列表的

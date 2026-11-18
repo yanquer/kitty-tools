@@ -98,6 +98,15 @@ struct DockPreviewTests {
     #expect(frame == CGRect(x: 100, y: -3, width: 60, height: 70))
   }
 
+  /// 同一路径的两个运行图标分别取第一个和第二个进程；顺位缺失或数量不一致时不能猜。
+  @Test func sharedPathAppsUseDistinctIconSlots() {
+    #expect(DockPreview.sharedPathAppIndex(appCount: 2, icons: (0, 2)) == 0)
+    #expect(DockPreview.sharedPathAppIndex(appCount: 2, icons: (1, 2)) == 1)
+    #expect(DockPreview.sharedPathAppIndex(appCount: 2, icons: (0, 1)) == nil)
+    #expect(DockPreview.sharedPathAppIndex(appCount: 2, icons: (nil, 2)) == nil)
+    #expect(DockPreview.sharedPathAppIndex(appCount: 2, icons: nil) == nil)
+  }
+
   @Test func fittedNeverUpscalesAndKeepsRatio() {
     let box = CGSize(width: 520, height: 280)
     #expect(

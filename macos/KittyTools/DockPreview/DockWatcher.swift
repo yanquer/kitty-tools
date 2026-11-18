@@ -9,6 +9,7 @@
 
 import AppKit
 import ApplicationServices
+import OSLog
 
 @MainActor final class DockWatcher {
   /// 鼠标停着的那个 App 图标
@@ -19,11 +20,13 @@ import ApplicationServices
     /// 图标在屏幕上的位置（AppKit 全局坐标，原点在主屏左下）；开着放大时是放大后的。收到通知那一刻读的：
     /// 放大、自动隐藏滑出的动画可能还没走完，真用之前拿 currentFrame 重读一次
     var frame: CGRect
-    /// 图标的辅助功能对象（重读位置用；不参与相等）
+    /// 图标的辅助功能对象（区分同路径的图标，并在弹出前重读位置）。
     let element: AXUIElement?
 
+    /// 两次通知是否仍指向同一个图标及位置。
     static func == (lhs: Item, rhs: Item) -> Bool {
-      lhs.title == rhs.title && lhs.bundleURL == rhs.bundleURL && lhs.frame == rhs.frame
+      lhs.element == rhs.element && lhs.title == rhs.title && lhs.bundleURL == rhs.bundleURL
+        && lhs.frame == rhs.frame
     }
   }
 
@@ -167,6 +170,23 @@ import ApplicationServices
       element: selected)
   }
 
+  /// 读取同一程序坞列表里正在运行的同路径图标，返回当前图标的顺位和总数。
+  static func runningIconOrder(of item: AXUIElement, at url: URL) -> (index: Int?, count: Int)? {
+    guard let parent = value(item, kAXParentAttribute, logFailure: true),
+      CFGetTypeID(parent) == AXUIElementGetTypeID(),
+      let siblings = value(parent as! AXUIElement, kAXChildrenAttribute, logFailure: true)
+        as? [AXUIElement]
+    else { return nil }
+    let matches = siblings.filter { sibling in
+      guard let siblingURL = value(sibling, kAXURLAttribute, logFailure: true) as? URL,
+        siblingURL.isFileURL,
+        siblingURL.resolvingSymlinksInPath().standardizedFileURL.path == url.path
+      else { return false }
+      return value(sibling, "AXIsApplicationRunning", logFailure: true) as? Bool == true
+    }
+    return (matches.firstIndex(of: item), matches.count)
+  }
+
   /// 辅助功能的坐标（原点主屏左上、y 向下）→ AppKit 全局坐标（原点主屏左下）。纯函数，配单测
   nonisolated static func appKitFrame(origin: CGPoint, size: CGSize, primaryHeight: CGFloat)
     -> CGRect
@@ -183,11 +203,18 @@ import ApplicationServices
 
   /// 读一个属性。先给这个对象设超时：超时只管设了的那一个对象（取回来的子对象照样默认等 6 秒），所以每次读都设，
   /// 卡住的程序坞 / App 最多把主线程拖住这么久
-  static func value(_ element: AXUIElement, _ attribute: String) -> AnyObject? {
+  static func value(
+    _ element: AXUIElement, _ attribute: String, logFailure: Bool = false
+  ) -> AnyObject? {
     AXUIElementSetMessagingTimeout(element, messagingTimeout)
     var value: AnyObject?
-    return AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success
-      ? value : nil
+    let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+    if logFailure, status != .success, status != .noValue, status != .attributeUnsupported {
+      Log.windows.error(
+        "dock icon attribute failed attribute=\(attribute, privacy: .public) AXError=\(status.rawValue)"
+      )
+    }
+    return status == .success ? value : nil
   }
 
   static func point(_ element: AXUIElement, _ attribute: String) -> CGPoint? {
