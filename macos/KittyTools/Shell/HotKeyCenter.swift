@@ -173,6 +173,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
   case windowLayoutPicker
   case windowLayout(WindowLayoutAction)
   case presentation
+  case quickScreenshot(QuickScreenshot.Action)
 
   /// 保留旧动作的 Carbon 编号，新窗口动作只追加在末尾。
   static let allCases: [Self] =
@@ -185,6 +186,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
       .appWindowSwitchPrevious,
       .windowLayoutPicker,
     ] + WindowLayoutAction.allCases.map(Self.windowLayout) + [.presentation]
+    + QuickScreenshot.Action.allCases.map(Self.quickScreenshot)
 
   /// 稳定存储名兼容已有快捷键、命令别名和设置文件。
   var rawValue: String {
@@ -211,6 +213,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
     case .clothesline: "clothesline"
     case .home: "home"
     case .presentation: "presentation"
+    case .quickScreenshot(let action): "quickScreenshot." + action.rawValue
     case .reminderNew: "reminderNew"
     case .windowSwitch: "windowSwitch"
     case .windowSwitchPrevious: "windowSwitchPrevious"
@@ -262,6 +265,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
     case .island: "打开刘海岛"
     case .home: "打开主界面"
     case .presentation: "演示画布"
+    case .quickScreenshot(let action): action.title
     case .reminderNew: "新建提醒"
     case .windowSwitch: "切换窗口"
     case .windowSwitchPrevious: "反向切换窗口"
@@ -340,7 +344,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
     case .island: nil
     // 主界面（2026-10-29）：主入口是点菜单栏图标，键给把图标藏起来的人自己设
     case .home: nil
-    case .presentation: nil
+    case .presentation, .quickScreenshot: nil
     case .windowSwitch: HotKey(keyCode: kVK_Tab, modifiers: optionKey)
     case .windowSwitchPrevious: HotKey(keyCode: kVK_Tab, modifiers: optionKey | shiftKey)
     case .appWindowSwitch: HotKey(keyCode: kVK_ANSI_Grave, modifiers: optionKey)
@@ -424,6 +428,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
     case .island: .island
     case .home: nil
     case .presentation: .presentation
+    case .quickScreenshot: .screenshot
     }
   }
 
@@ -445,6 +450,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
         .pinClipboard, .shotHistory, .clothesline,
       ]
     ),
+    ("快捷截图", QuickScreenshot.Action.allCases.map(Self.quickScreenshot)),
     // 便签（PLAN §10「便签」F②）：菜单栏、启动器、快捷键页、速查表各一节，三项同名同序
     ("便签", [.noteCapture, .noteNew, .noteAll]),
     // 提醒（2026-11-04）：菜单栏里这一节同状态屏，只有一项「提醒」带子菜单（AppDelegate.addReminderMenu）。
@@ -519,6 +525,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
     // 从菜单栏垂下来的那一块
     case .home: "kitty.home"
     case .presentation: "pencil.and.outline"
+    case .quickScreenshot(let action): action.saves ? "square.and.arrow.down" : "camera"
     case .windowSwitch, .windowSwitchPrevious, .appWindowSwitch, .appWindowSwitchPrevious:
       "rectangle.on.rectangle"
     case .windowLayoutPicker, .windowLayout: "rectangle.split.2x2"
@@ -544,7 +551,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
     case .reminderNew: Style.Family.reminders
     case .windowLayoutPicker, .windowLayout: Style.Family.dockPreview
     case .island, .home: Style.Family.general
-    case .presentation: Style.Family.screenshot
+    case .presentation, .quickScreenshot: Style.Family.screenshot
     }
   }
 }

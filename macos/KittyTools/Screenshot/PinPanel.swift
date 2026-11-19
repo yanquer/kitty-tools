@@ -14,6 +14,7 @@
 import AppKit
 import Carbon.HIToolbox
 import ImageIO
+import OSLog
 import Observation
 import SwiftUI
 import UniformTypeIdentifiers
@@ -21,6 +22,7 @@ import UniformTypeIdentifiers
 @Observable final class PinBoard {
   private(set) var panels: [PinPanel] = []
   private(set) var isHidden = false
+  private(set) var focused: PinPanel?
   /// 拷贝 / 快速保存 / 另存为 / 识字并拷贝 / 翻译（动作、图、像素 / 点；.pin 不会来），由 AppDelegate 接到截图的输出上
   @ObservationIgnored var output: @MainActor (RegionSelector.Action, CGImage, CGFloat) -> Void = {
     _, _, _ in
@@ -36,7 +38,9 @@ import UniformTypeIdentifiers
   ) {
     // 钉图归截图这个功能（Feature）：关着时哪条路过来（剪贴板、角落的缩略图…）都不钉，入口那边也藏了
     guard Feature.screenshot.isOn else { return }
-    if isHidden { toggleHidden() }
+    if isHidden { isHidden = false }
+    focused = nil
+    syncVisibility()
     let panel = PinPanel(
       image: image, frame: frame, board: self, original: original,
       annotations: annotations, scale: scale)
@@ -58,22 +62,52 @@ import UniformTypeIdentifiers
 
   func close(_ panel: PinPanel) {
     panels.removeAll { $0 === panel }
+    if focused === panel { focused = nil }
     if panels.isEmpty { isHidden = false }
     panel.fadeOut()
+    syncVisibility()
   }
 
   func closeAll() {
     for panel in panels { panel.fadeOut() }
     panels = []
+    focused = nil
     isHidden = false
   }
 
+  /// 隐藏全部优先于专注，恢复时仍保持用户选择的专注对象。
   func toggleHidden() {
     isHidden.toggle()
+    syncVisibility()
+  }
+
+  /// 专注只隐藏其他钉图；关闭或退出专注后恢复仍存在的图片。
+  func toggleFocus(_ panel: PinPanel) {
+    guard panels.contains(where: { $0 === panel }) else { return }
+    focused = focused === panel ? nil : panel
+    Log.capture.notice("钉图专注变化 focused=\(self.focused?.windowNumber ?? -1) hidden=\(self.isHidden)")
+    syncVisibility()
+  }
+
+  /// 编辑状态与收纳、专注统一协调，编辑关闭不能重新显示本应隐藏的图片。
+  func setEditing(_ panel: PinPanel, _ editing: Bool) {
+    guard panels.contains(where: { $0 === panel }) else { return }
+    panel.isEditing = editing
+    syncVisibility()
+  }
+
+  /// 只调整可见性，不激活应用或改变图片内容。
+  private func syncVisibility() {
     for panel in panels {
-      if isHidden { panel.orderOut(nil) } else { panel.orderFrontRegardless() }
+      let show = !isHidden && !panel.isEditing && (focused == nil || focused === panel)
+      if show, !panel.isVisible {
+        panel.orderFrontRegardless()
+      } else if !show, panel.isVisible {
+        panel.orderOut(nil)
+      }
     }
   }
+
 }
 
 // MARK: 钉住剪贴板里的图（第二轮体检 F1）
@@ -262,6 +296,9 @@ final class PinPanel: NSPanel {
   /// 输出沿用钉上时的显示倍率，与查看取景和编辑坐标倍率分别保存。
   let outputScale: CGFloat
   private(set) var annotations: [Annotation]
+  private(set) var isMiniature = false
+  var isEditing = false
+  private var expandedFrame: CGRect?
 
   /// 保留原图与可编辑标注，显示与输出仍使用合成图。
   init(
@@ -289,6 +326,40 @@ final class PinPanel: NSPanel {
     contentView = view
     initialFirstResponder = view
     setFrame(frame, display: false)
+  }
+
+  /// 小卡片固定为 96×64 点，展开时恢复先前大小，并以当前位置的左上角为锚点。
+  func setMiniature(_ miniature: Bool) {
+    guard miniature != isMiniature else { return }
+    finishPopIn()
+    isMiniature = miniature
+    if miniature {
+      expandedFrame = frame
+      setFrame(CGRect(x: frame.minX, y: frame.maxY - 64, width: 96, height: 64), display: true)
+    } else if let expandedFrame {
+      let visible = NSScreen.screens.first { $0.frame.intersects(frame) }?.visibleFrame
+      setFrame(
+        Self.restoredMiniature(frame, size: expandedFrame.size, within: visible), display: true)
+      self.expandedFrame = nil
+    }
+    contentView?.needsDisplay = true
+    invalidateShadow()
+    Log.capture.notice("钉图收纳变化 window=\(self.windowNumber) miniature=\(miniature)")
+  }
+
+  /// 展开时夹回所在屏幕，屏外测试没有匹配屏幕时保持屏外位置。
+  static func restoredMiniature(_ miniature: CGRect, size: CGSize, within visible: CGRect?)
+    -> CGRect
+  {
+    var result = CGRect(
+      x: miniature.minX, y: miniature.maxY - size.height, width: size.width, height: size.height)
+    if let visible {
+      result.origin.x = min(
+        max(result.minX, visible.minX), max(visible.minX, visible.maxX - result.width))
+      result.origin.y = min(
+        max(result.minY, visible.minY), max(visible.minY, visible.maxY - result.height))
+    }
+    return result
   }
 
   /// 应用标注时只更新当前钉图，不新建副本，也不改动当前窗口位置。
@@ -535,7 +606,10 @@ private final class PinView: NSView {
       localZoom.viewport,
       viewSize: CGSize(width: 1, height: 1),
       imageSize: CGSize(width: image.width, height: image.height))
-    layer?.contents = localZoom.isEnabled ? image.cropping(to: crop) : image
+    let miniature = panel?.isMiniature == true
+    layer?.contents = localZoom.isEnabled && !miniature ? image.cropping(to: crop) : image
+    layer?.contentsGravity = miniature ? .resizeAspect : .resize
+    layer?.backgroundColor = miniature ? Style.HUD.solidFill.cgColor : nil
     layer?.cornerRadius = Style.Radius.card
     layer?.cornerCurve = .continuous
     layer?.masksToBounds = true
@@ -547,13 +621,14 @@ private final class PinView: NSView {
   override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
   private var panel: PinPanel? { window as? PinPanel }
+  private var isFocused: Bool { panel.map { board.focused === $0 } ?? false }
   private var scale: CGFloat { CGFloat(image.width) / originalSize.width }
 
   override func mouseDown(with event: NSEvent) {
     if event.clickCount == 2 { return close() }
     panel?.finishPopIn()
     window?.makeKey()  // 点过之后 Esc、⌘C 才归它
-    if localZoom.isEnabled, !event.modifierFlags.contains(.option) {
+    if localZoom.isEnabled, panel?.isMiniature != true, !event.modifierFlags.contains(.option) {
       panStart = (convert(event.locationInWindow, from: nil), localZoom.center)
       return
     }
@@ -590,7 +665,7 @@ private final class PinView: NSView {
 
   /// 以鼠标为锚点缩放，保持宽高比：最小到原大的 10%、且宽高都不小于 24 点（原图本来更小就是原大），最大 5 倍
   private func zoom(by factor: CGFloat) {
-    guard let window, factor.isFinite, factor > 0 else { return }
+    guard panel?.isMiniature != true, let window, factor.isFinite, factor > 0 else { return }
     panel?.finishPopIn()
     if localZoom.isEnabled {
       let point = convert(NSEvent.mouseLocation, from: nil)
@@ -696,6 +771,13 @@ private final class PinView: NSView {
         modifiers: .command,
         action: #selector(toggleLocalZoom)),
       Command(
+        title: panel?.isMiniature == true ? "展开钉图" : "收起为小卡片", key: "m", keyCode: kVK_ANSI_M,
+        modifiers: .command,
+        action: #selector(toggleMiniature)),
+      Command(
+        title: isFocused ? "退出专注" : "专注这张钉图", key: "f", keyCode: kVK_ANSI_F, modifiers: .command,
+        action: #selector(toggleFocus)),
+      Command(
         title: "原始大小", key: "0", keyCode: kVK_ANSI_0, modifiers: .command,
         action: #selector(actualSize)),
       Command(
@@ -719,13 +801,19 @@ private final class PinView: NSView {
     let opacity = NSMenuItem(title: "透明度", action: nil, keyEquivalent: "")
     opacity.submenu = opacityMenu()
     menu.addItem(opacity)
-    for item in items[6..<9] { menu.addItem(item) }
+    for item in items[6..<11] { menu.addItem(item) }
     if let zoomItem = menu.items.first(where: { $0.action == #selector(toggleLocalZoom) }) {
       zoomItem.state = localZoom.isEnabled ? .on : .off
       zoomItem.toolTip = "固定窗口大小，滚轮放大、拖动查看；⌥ 拖动移动窗口。复制与保存保留完整图片。"
     }
+    for item in menu.items {
+      if item.action == #selector(toggleFocus) { item.state = isFocused ? .on : .off }
+      if item.action == #selector(toggleMiniature) {
+        item.state = panel?.isMiniature == true ? .on : .off
+      }
+    }
     menu.addItem(.separator())
-    menu.addItem(items[9])
+    menu.addItem(items[11])
     return menu
   }
 
@@ -740,6 +828,8 @@ private final class PinView: NSView {
     let percent = Int(((panel?.opacity ?? 1) * 100).rounded())
     return "\(Int(size.width.rounded())) × \(Int(size.height.rounded())) 点，透明度 \(percent)%"
       + (localZoom.isEnabled ? "，局部放大 \(Int(localZoom.magnification * 100))%" : "")
+      + (panel?.isMiniature == true ? "，已收纳" : "")
+      + (isFocused ? "，专注" : "")
   }
 
   override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
@@ -752,11 +842,18 @@ private final class PinView: NSView {
     }
   }
 
+  /// 收纳仅改变查看方式，原始图片和编辑标注保留在同一对象中。
+  @objc private func toggleMiniature() { if let panel { panel.setMiniature(!panel.isMiniature) } }
+
+  /// 专注由钉图集合统一控制，菜单、快捷键和旁白共用此动作。
+  @objc private func toggleFocus() { if let panel { board.toggleFocus(panel) } }
+
   /// 打开现有标注遮罩；是否应用由用户在遮罩中确认。
   @objc private func editImage() { if let panel { board.edit(panel) } }
 
   /// 查看模式只改变取景，不改变复制、识字和保存所用的完整图像。
   @objc private func toggleLocalZoom() {
+    panel?.setMiniature(false)
     localZoom.toggle()
     panStart = nil
     needsDisplay = true
@@ -790,6 +887,7 @@ private final class PinView: NSView {
 
   /// 回到钉上时的大小，左上角不动
   @objc private func actualSize() {
+    panel?.setMiniature(false)
     localZoom = PinZoom()
     needsDisplay = true
     guard let window else { return }

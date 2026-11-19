@@ -1371,7 +1371,7 @@ struct ScreenshotSnapshotTests {
     let desktop = try Self.desktop()
     let recognition = RecognitionModel()
     recognition.image = desktop
-    recognition.text = "项目进度\n第一阶段：识字结果与原图对照\n第二阶段：多张截图拼接与 PDF 导出\n\n请选择需要的文字，按 ⌘C 复制。"
+    recognition.accept("项目进度\n第一阶段：识字结果与原图对照\n第二阶段：多张截图拼接与 PDF 导出\n\n请选择需要的文字，按 ⌘C 复制。")
     for dark in [false, true] {
       try enhancement(
         RecognitionResultView(model: recognition), size: NSSize(width: 780, height: 540),
@@ -1380,7 +1380,7 @@ struct ScreenshotSnapshotTests {
     try enhancement(
       ShortcutsSheet(page: .screenshot),
       size: NSSize(width: ShortcutsSheet.width, height: 1200), name: "recognition-shortcuts")
-    recognition.text = ""
+    recognition.accept("")
     try enhancement(
       RecognitionResultView(model: recognition), size: NSSize(width: 780, height: 540),
       name: "recognition-empty")
@@ -1511,6 +1511,41 @@ struct ScreenshotSnapshotTests {
     }
   }
 
+  /// 纠错后的工具栏、小卡片与恢复后的钉图使用真实编辑器和原钉图窗口屏外渲染。
+  @Test(.enabled(if: directory != nil)) func renderScreenshotWorkflow() throws {
+    let desktop = try Self.desktop()
+    for dark in [false, true] {
+      let model = RecognitionModel()
+      model.image = desktop
+      model.accept("会议时间：周三 14:O0\n请核对文字后再复制。")
+      try enhancement(
+        RecognitionResultView(model: model), size: NSSize(width: 780, height: 540),
+        name: "recognition-edited", dark: dark
+      ) { host in
+        if let text = self.recognitionEditor(in: host) {
+          text.insertText("0", replacementRange: NSRange(location: 11, length: 1))
+          text.breakUndoCoalescing()
+          text.setSelectedRange(NSRange(location: 6, length: 6))
+        }
+      }
+      #expect(model.isEdited && model.canUndo)
+    }
+    let board = PinBoard()
+    let pin = PinPanel(
+      image: desktop, frame: CGRect(x: -20000, y: -20000, width: 600, height: 400), board: board)
+    defer { pin.orderOut(nil) }
+    pin.setMiniature(true)
+    try shoot(pin, "pin-miniature")
+    pin.setMiniature(false)
+    try shoot(pin, "pin-expanded")
+  }
+
+  /// 查找桥接出的原生编辑器，只改变本次假文字，不发送系统键鼠。
+  private func recognitionEditor(in view: NSView) -> RecognitionText? {
+    if let editor = view as? RecognitionText { return editor }
+    return view.subviews.lazy.compactMap { recognitionEditor(in: $0) }.first
+  }
+
   /// 玻璃在屏外可能不呈现内容，单独收集 HUD 内容层以核对按钮和文字布局。
   private func referenceBars(in view: NSView) -> [HUDBar] {
     if let bar = view as? HUDBar { return [bar] }
@@ -1518,8 +1553,10 @@ struct ScreenshotSnapshotTests {
   }
 
   /// 只在不可成为 key 的屏外窗口中检查布局，背景使用当前系统窗口色。
-  private func enhancement(_ view: some View, size: NSSize, name: String, dark: Bool = false) throws
-  {
+  private func enhancement(
+    _ view: some View, size: NSSize, name: String, dark: Bool = false,
+    prepare: ((NSView) -> Void)? = nil
+  ) throws {
     let window = NSWindow(
       contentRect: NSRect(origin: NSPoint(x: -20000, y: -20000), size: size),
       styleMask: .borderless, backing: .buffered, defer: false)
@@ -1532,6 +1569,8 @@ struct ScreenshotSnapshotTests {
     window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
     window.orderFront(nil)
     for _ in 0..<5 { RunLoop.main.run(until: Date.now.addingTimeInterval(0.1)) }
+    prepare?(host)
+    RunLoop.main.run(until: Date.now.addingTimeInterval(0.1))
     let bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
     host.cacheDisplay(in: host.bounds, to: bitmap)
     let out = try #require(Self.directory)

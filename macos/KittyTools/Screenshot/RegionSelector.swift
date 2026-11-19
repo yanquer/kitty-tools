@@ -35,6 +35,9 @@ enum RegionSelector {
     var original: CGImage?
     /// 画了哪些标注，坐标已经挪成「相对这张图的左下角」（历史和标注窗口按它摆）
     var annotations: [Annotation] = []
+    /// 快捷截图固定动作发生时的来源，名字不可用时不冒充后来的前台应用。
+    var sourceAppName: String?
+    var sourceWasCaptured = false
 
     /// 像素 / 点
     var scale: CGFloat { frame.width > 0 ? CGFloat(image.width) / frame.width : 1 }

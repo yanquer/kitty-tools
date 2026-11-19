@@ -6,6 +6,7 @@
 // 本 App 开着的窗口（浮层、设置窗、引导、钉图）照常截进去、能悬停选中；截图自己的装饰排除（keptOwnWindows）。
 
 import AppKit
+import OSLog
 import ScreenCaptureKit
 
 enum ScreenCapture {
@@ -112,6 +113,114 @@ enum ScreenCapture {
         windows: here.map { $0.frame.offsetBy(dx: -origin.x, dy: -origin.y) },
         owners: here.map(\.pids))
     }
+  }
+
+  /// 免框选采集只读取目标屏幕或窗口；所有系统异常继续向调用方传递。
+  static func quick(_ request: QuickScreenshot.Request, operation: String) async throws
+    -> RegionSelector.Capture
+  {
+    let began = ContinuousClock.now
+    Log.capture.notice(
+      "快捷截图开始 operation=\(operation, privacy: .public) action=\(request.action.rawValue, privacy: .public)"
+    )
+    do {
+      let cursor = request.includesCursor ? try ScreenshotCursor.capture() : nil
+      let screens = NSScreen.screens
+      var windowID: CGWindowID?
+      var chosen: (index: Int, region: CGRect)?
+      if request.action.area == .window {
+        guard let pid = request.foregroundPID else {
+          throw QuickScreenshot.Failure(message: "无法确定前台应用，请重新选择窗口")
+        }
+        guard
+          let windows = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+        else {
+          throw QuickScreenshot.Failure(message: "读取窗口列表失败，请重试")
+        }
+        guard let found = QuickScreenshot.windowID(in: windows, pid: pid) else {
+          throw QuickScreenshot.Failure(message: "前台应用没有可截取的普通窗口")
+        }
+        windowID = found
+      } else {
+        chosen = try QuickScreenshot.region(for: request, screens: screens.map(\.frame))
+      }
+      let content = try await SCShareableContent.excludingDesktopWindows(
+        false, onScreenWindowsOnly: true)
+      let filter: SCContentFilter
+      let region: CGRect
+      let source: CGRect?
+      if let windowID {
+        guard let window = content.windows.first(where: { $0.windowID == windowID }),
+          QuickScreenshot.valid(window.frame)
+        else {
+          throw QuickScreenshot.Failure(message: "目标窗口无法采集，请重新选择窗口")
+        }
+        filter = SCContentFilter(desktopIndependentWindow: window)
+        let height = screens.first?.frame.height ?? 0
+        region = CGRect(
+          x: window.frame.minX, y: height - window.frame.maxY, width: window.frame.width,
+          height: window.frame.height)
+        source = nil
+      } else if let chosen {
+        let screen = screens[chosen.index]
+        guard let display = content.displays.first(where: { $0.displayID == screen.displayID })
+        else {
+          throw QuickScreenshot.Failure(message: "目标屏幕无法采集，请重试")
+        }
+        let own = ownWindows()
+        let kept = keptOwnWindows(own)
+        let known = Set(own.map(\.id))
+        let excluded = content.windows.filter {
+          $0.owningApplication?.processID == getpid() && !kept.contains($0.windowID)
+            && (known.contains($0.windowID) || $0.windowLayer != NSWindow.Level.statusBar.rawValue)
+        }
+        filter = SCContentFilter(display: display, excludingWindows: excluded)
+        let aligned = RegionSelector.captureRect(
+          chosen.region, in: screen.frame, scale: CGFloat(filter.pointPixelScale))
+        region = aligned.region
+        source = aligned.source
+      } else {
+        throw QuickScreenshot.Failure(message: "没有有效的截图目标")
+      }
+      let image = try await quickImage(filter: filter, region: region, source: source)
+      let composed = try await cursor?.render(over: image, screen: region) ?? image
+      var capture = RegionSelector.Capture(
+        image: composed, frame: region, action: request.action.saves ? .save : .copy)
+      capture.sourceWasCaptured = true
+      capture.sourceAppName = request.sourceName
+      Log.capture.notice(
+        "快捷截图采集完成 operation=\(operation, privacy: .public) elapsed=\(String(describing: began.duration(to: .now)), privacy: .public)"
+      )
+      return capture
+    } catch {
+      Log.capture.error(
+        "快捷截图失败 operation=\(operation, privacy: .public) cause=\(String(reflecting: error), privacy: .public)"
+      )
+      throw error
+    }
+  }
+
+  /// 窗口不带额外阴影，区域按点采集；限制像素预算以避免连续快捷截图分配超大画布。
+  private static func quickImage(filter: SCContentFilter, region: CGRect, source: CGRect?)
+    async throws -> CGImage
+  {
+    let scale = CGFloat(filter.pointPixelScale)
+    let width = region.width * scale
+    let height = region.height * scale
+    guard width.isFinite, height.isFinite, width >= 1, height >= 1,
+      width * height <= CGFloat(ImageStore.maxPixels)
+    else {
+      throw QuickScreenshot.Failure(message: "截图尺寸过大，请使用普通框选截图")
+    }
+    let configuration = SCStreamConfiguration()
+    configuration.width = Int(width.rounded())
+    configuration.height = Int(height.rounded())
+    configuration.showsCursor = false
+    configuration.ignoreShadowsSingleWindow = true
+    if let source { configuration.sourceRect = source }
+    return try await SCScreenshotManager.captureImage(
+      contentFilter: filter, configuration: configuration)
   }
 
   /// 冻结这一步最多等多久（第四轮体检 E22）：截屏的系统服务偶尔不返回，一直等下去 isCapturing 就一直为真、

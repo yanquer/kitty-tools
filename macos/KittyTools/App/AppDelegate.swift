@@ -1799,6 +1799,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       windowLayout.run(layout, cycle: byKey ? hotKeys.layoutCycle(for: layout) : [])
     case .windowLayoutPicker: windowLayout.showPicker()
     case .presentation: presentation.toggle()
+    case .quickScreenshot(let action): quickScreenshot(action)
     case .windowSwitch, .windowSwitchPrevious, .appWindowSwitch, .appWindowSwitchPrevious:
       if builtWindowSwitcher?.isOpen != true {
         builtClipboardPanel?.hide()
@@ -1858,6 +1859,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       "提醒建好了", detail: reminder.summary() + " · " + reminder.title, tone: .success,
       symbol: "checkmark.circle.fill",
       actions: [Island.Action("编辑", opens: true) { [unowned self] in openReminder(reminder.id) }])
+  }
+
+  /// 复制与存储分开列出，免框选动作收在一个子菜单中，避免撑长菜单栏菜单。
+  private func addQuickScreenshotMenu(to menu: NSMenu) {
+    let item = menu.addAction("快捷截图", symbol: "camera", color: NSColor(Style.Family.screenshot)) {}
+    let submenu = NSMenu()
+    for action in QuickScreenshot.Action.allCases {
+      let global = HotKeyAction.quickScreenshot(action)
+      let key = hotKeys.bindings[global]
+      submenu.addAction(
+        action.title, symbol: global.symbol, color: NSColor(global.color),
+        key: key?.menuKeyEquivalent ?? "", modifiers: key?.modifierFlags ?? []
+      ) { [unowned self] in run(global) }
+    }
+    item.submenu = submenu
   }
 
   /// 窗口布局按类型分组，动作仍经全局分发共享权限和功能开关。
@@ -2360,6 +2376,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       feature: "截图", hidingPanels: false, repeatingLastRegion: repeatingLastRegion)
   }
 
+  /// 免框选入口：目标与输出方式在触发时固定，采集成功后复用同一条复制、存储和历史链路。
+  private func quickScreenshot(_ action: QuickScreenshot.Action) {
+    guard !isCapturing, !isReadingSelection else {
+      Log.capture.notice("快捷截图跳过 action=\(action.rawValue, privacy: .public) stage=busy")
+      return island.show("当前工具仍在处理", detail: "请稍后再截图", tone: .warning)
+    }
+    let app = NSWorkspace.shared.frontmostApplication
+    let request = QuickScreenshot.Request(
+      action: action, pointer: NSEvent.mouseLocation,
+      foregroundPID: app?.processIdentifier, sourceName: app?.localizedName,
+      lastRegion: UserDefaults.standard.string(forKey: Prefs.screenshotLastRegion).map(
+        NSRectFromString),
+      includesCursor: UserDefaults.standard.bool(forKey: Prefs.screenshotShowsCursor))
+    let operation = UUID().uuidString
+    beginCapture(hidingPanels: false) { [self] in
+      guard screenRecordingAllowed(for: "快捷截图") else {
+        Log.capture.notice("快捷截图未执行 operation=\(operation, privacy: .public) stage=permission")
+        return
+      }
+      do {
+        guard
+          let capture = try await ScreenCapture.within(
+            ScreenCapture.freezeTimeout,
+            { try await ScreenCapture.quick(request, operation: operation) })
+        else {
+          Log.capture.error(
+            "快捷截图结果未确认 operation=\(operation, privacy: .public) stage=timeout；系统请求晚到的结果将丢弃")
+          return island.show("快捷截图没有响应", detail: "本次没有输出图片，请稍后重试", tone: .warning)
+        }
+        await handleCapture(.capture(capture))
+      } catch {
+        island.show("快捷截图失败", detail: error.localizedDescription, tone: .error)
+      }
+    }
+  }
+
   /// 截图家族共用的后半段（截图、截图翻译）：冻结各屏 → 框选 → 按交回的动作出图。
   /// hint 非空时换掉遮罩顶上的提示；autoTranslate = 框完松手就自动翻译（⌥S）
   private func captureShots(
@@ -2751,7 +2803,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   ) -> Task<UUID?, Never> {
     let original = capture.original ?? capture.image
     let shared = original === capture.image ? png : nil
-    let source = frontmostAppName()
+    let source = capture.sourceWasCaptured ? capture.sourceAppName : frontmostAppName()
     return Task {
       await shotHistory.record(
         original, png: shared, composed: capture.image, scale: capture.scale, kind: .shot,
@@ -2961,8 +3013,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private func editPin(_ pin: PinPanel) {
     guard Feature.screenshot.isOn, pins.panels.contains(where: { $0 === pin }) else { return }
     annotateOverlay?.close()
+    pin.setMiniature(false)
     pin.finishPopIn()
-    pin.orderOut(nil)
+    pins.setEditing(pin, true)
     var applied = false
     let editor = AnnotateOverlay(
       image: pin.original, scale: pin.editingScale,
@@ -2982,11 +3035,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       guard let self else { return }
       Log.capture.notice("钉图编辑结束 applied=\(applied)")
       annotateOverlay = nil
-      if let pin, Feature.screenshot.isOn, !pins.isHidden,
-        pins.panels.contains(where: { $0 === pin })
-      {
-        pin.orderFrontRegardless()
-      }
+      if let pin { pins.setEditing(pin, false) }
     }
     annotateOverlay = editor
     Log.capture.notice("钉图编辑开始 annotations=\(pin.annotations.count)")
@@ -3631,6 +3680,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // 「打开主界面」不进菜单：菜单和主界面是同一个图标的两半（右键 / 左键）
     for (index, section) in HotKeyAction.sections.filter({ $0.actions != [.home] }).enumerated() {
       if index > 0 { menu.addItem(.separator()) }
+      if let first = section.actions.first, case .quickScreenshot = first {
+        addQuickScreenshotMenu(to: menu)
+        continue
+      }
       if section.actions.first == .windowLayoutPicker {
         addWindowLayoutMenu(to: menu)
         continue

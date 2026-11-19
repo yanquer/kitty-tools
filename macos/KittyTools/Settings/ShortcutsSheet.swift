@@ -436,6 +436,13 @@ struct ShortcutsSheet: View {
           Entry("⇧", text: "放大镜可见时单按，切换 HEX / RGB 色值"),
           Entry("Esc", text: "逐级退出，最后取消截图"),
         ]),
+      Group(
+        title: "快捷截图", symbol: "camera", color: Style.Family.screenshot,
+        globals: QuickScreenshot.Action.allCases.map(HotKeyAction.quickScreenshot),
+        entries: [
+          Entry(text: "直接复制或存储前台窗口、鼠标所在屏幕、上次区域，不进入框选和调整界面"),
+          Entry(text: "前台窗口指前台应用最前面的普通窗口；上次区域失效时需要重新框选"),
+        ]),
       // mac-whisker §6 截图「工具」「标注编辑」
       Group(
         title: "截图 · 标注", symbol: "pencil.tip.crop.circle", color: Style.Family.screenshot,
@@ -567,6 +574,8 @@ struct ShortcutsSheet: View {
           Entry("⇧O", text: "查看识字结果"),
           Entry("⌘E", text: "继续标注，应用后更新当前钉图"),
           Entry("⌘Z", text: "进入或退出局部放大"),
+          Entry("⌘M", text: "收起为小卡片 / 展开钉图"),
+          Entry("⌘F", text: "专注当前钉图 / 恢复其他钉图"),
           Entry("拖动", "⌥ 拖动", text: "局部放大时：查看细节 / 移动钉图；复制与保存保留完整图片"),
           Entry("⌘S", text: "快速保存"),
           Entry("⇧⌘S", text: "另存为…"),

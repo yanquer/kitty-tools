@@ -62,6 +62,13 @@ struct ScreenshotTab: View {
           .onChange(of: copyAs) { WhatsNew.touch(section: "截图拷贝为", of: .screenshot) }
         }
         Section {
+          ShortcutsButton()
+        } header: {
+          Text("快捷截图")
+        } footer: {
+          SectionFootnote("从菜单栏「快捷截图」、主界面或启动器直接复制/存储前台窗口、当前屏幕和上次区域；各动作可单独设置全局快捷键，默认不占用按键。")
+        }
+        Section {
           Toggle("截图中显示鼠标指针", isOn: $showsCursor)
         } footer: {
           SectionFootnote("记录开始截图时的指针位置，适合讲解操作位置；快捷识字、截图翻译和录屏使用各自的采集方式。")
