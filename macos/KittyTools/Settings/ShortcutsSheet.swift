@@ -462,6 +462,7 @@ struct ShortcutsSheet: View {
           Entry(key(.scroll), text: "长截图"),
           Entry(key(.record), text: "录屏（选区不变；有标注时不切）", needs: .record),
           Entry(key(.recognize), text: "识字并拷贝"),
+          Entry(key(.inspect), text: "查看识字结果"),
         ]),
       // mac-overlay-panel §10 长截图；代码在 ScrollCapturePanel.keyDown
       Group(
@@ -527,6 +528,7 @@ struct ShortcutsSheet: View {
           Entry(key(.save), text: "快速保存"),
           Entry(key(.saveAs), text: "另存为…"),
           Entry(key(.recognize), text: "识字并拷贝"),
+          Entry(key(.inspect), text: "查看识字结果"),
           Entry("Esc", text: "收起工具 / 退出（画过要按两下）"),
         ]),
       // mac-whisker §6 截图「录屏」（录屏第 1、2 批）；框选、拖边、方向键同「截图 · 框选」，代码在 SelectionView.keyDown，
@@ -562,6 +564,7 @@ struct ShortcutsSheet: View {
         entries: [
           Entry("⌘C", text: "拷贝"),
           Entry("O", text: "识字并拷贝（翻译在右键菜单里）"),
+          Entry("⇧O", text: "查看识字结果"),
           Entry("⌘S", text: "快速保存"),
           Entry("⇧⌘S", text: "另存为…"),
           Entry("⌘0", text: "原始大小（滚轮、捏合缩放）"),

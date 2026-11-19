@@ -25,6 +25,10 @@ import UniformTypeIdentifiers
   var saveAs: @MainActor (ShotHistory.Item) -> Void = { _ in }
   var pin: @MainActor (ShotHistory.Item) -> Void = { _ in }
   var recognize: @MainActor (ShotHistory.Item) -> Void = { _ in }
+  /// 查看识字结果，历史、晾衣绳共用同一入口。
+  var inspect: @MainActor (ShotHistory.Item) -> Void = { _ in }
+  /// 多张截图合成 PNG 或逐页导出 PDF。
+  var compose: @MainActor ([ShotHistory.Item]) -> Void = { _ in }
   var edit: @MainActor (ShotHistory.Item) -> Void = { _ in }
   /// 录屏转成 GIF / 压缩（第四轮体检 U1：原来只有角落的视频卡上有，卡片滑走就找不到了；VideoJob.available 给哪几件）
   var convert: @MainActor (ShotHistory.Item, VideoJob) -> Void = { _, _ in }

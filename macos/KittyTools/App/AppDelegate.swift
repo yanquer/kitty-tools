@@ -309,6 +309,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   var annotateOverlay: AnnotateOverlay?
   /// 截图历史窗口（菜单栏 / 启动器打开，关掉就放掉）
   private var shotHistoryWindow: ShotHistoryWindow?
+  /// 用时建立的识字结果与拼图面板，截图功能关闭时一并收起。
+  private var recognitionPanel: RecognitionPanel?
+  private var compositionPanel: ShotCompositionPanel?
   /// 钉图（菜单栏显示「隐藏 / 关闭全部钉图」）
   lazy var pins: PinBoard = {
     let board = PinBoard()
@@ -327,6 +330,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             leading: Island.thumbnail(of: image), actions: .file(saved.url))
         case .saveAs: await saveImageAs(image, scale: scale)
         case .recognize: await copyRecognizedText(in: image)
+        case .inspect: showRecognition(image)
         case .translate: await translateInPanel(image)
         case .pin: break
         }
@@ -1255,6 +1259,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       replaceTask = nil
     }
     if turnedOff.contains(.screenshot) {
+      recognitionPanel?.hide()
+      compositionPanel?.hide()
       if !pins.panels.isEmpty { pins.closeAll() }
       clothesline.stop()
       // 截图历史窗口、长图标注也收（R10：原来关掉截图它们还开着、还能出图）；历史窗口走自己的 onClose 清缓存
@@ -2414,6 +2420,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           markSaved(remembered, at: saved)
         }
       case .recognize: await copyRecognizedText(in: capture.image)
+      case .inspect: showRecognition(capture.image)
       // 「把译文直接盖回截图上」关着时：工具栏的翻译交出来，走翻译浮窗（开着时在截图页里就地翻，不交回这个动作）
       case .translate: await translateInPanel(capture.image)
       }
@@ -2861,6 +2868,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         await copyRecognizedText(in: image)
       }
     }
+    actions.inspect = { [unowned self] item in
+      Task {
+        guard let image = await shotHistory.composed(item) else { return missingShot() }
+        showRecognition(image)
+      }
+    }
+    actions.compose = { [unowned self] items in
+      guard Feature.screenshot.isOn else { return }
+      if compositionPanel == nil { compositionPanel = ShotCompositionPanel(history: shotHistory) }
+      compositionPanel?.show(items)
+    }
     actions.notice = { [unowned self] text, warning in
       island.show(text, tone: warning ? .warning : .info)
     }
@@ -2946,6 +2964,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             markSaved(remembered, at: saved)
           }
         case .recognize: await copyRecognizedText(in: image)
+        case .inspect: showRecognition(image)
         case .translate, .pin: break  // 长图的工具栏里没有这两样
         }
       }
@@ -3237,6 +3256,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       ticker.cancel()
     }
     return await island.showIfSlow(Self.recognizingTitle, work)
+  }
+
+  /// 查看结果使用独立面板，快捷识字保持直接复制。
+  private func showRecognition(_ image: CGImage) {
+    guard Feature.screenshot.isOn else { return }
+    if recognitionPanel == nil { recognitionPanel = RecognitionPanel() }
+    recognitionPanel?.show(image)
   }
 
   /// 有二维码 / 条码就复制它的内容，否则复制识别出的文字（设置里开了就把换行合成一段）；记进剪贴板历史

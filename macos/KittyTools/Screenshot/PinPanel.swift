@@ -608,6 +608,9 @@ private final class PinView: NSView {
         title: "识字并拷贝", key: "o", keyCode: kVK_ANSI_O, modifiers: [],
         action: #selector(recognizeText)),
       Command(
+        title: "查看识字结果", key: "o", keyCode: kVK_ANSI_O, modifiers: .shift,
+        action: #selector(inspectText)),
+      Command(
         title: "翻译", key: "", keyCode: nil, modifiers: [], action: #selector(translateImage)),
       Command(
         title: ScreenshotOutput.saveTitle, key: "s", keyCode: kVK_ANSI_S, modifiers: .command,
@@ -634,14 +637,14 @@ private final class PinView: NSView {
       item.isHidden = command.action == #selector(translateImage) && !Feature.translate.isOn
       return item
     }
-    items[0..<5].forEach(menu.addItem)
+    items[0..<6].forEach(menu.addItem)
     menu.addItem(.separator())
     let opacity = NSMenuItem(title: "透明度", action: nil, keyEquivalent: "")
     opacity.submenu = opacityMenu()
     menu.addItem(opacity)
-    menu.addItem(items[5])
-    menu.addItem(.separator())
     menu.addItem(items[6])
+    menu.addItem(.separator())
+    menu.addItem(items[7])
     return menu
   }
 
@@ -670,6 +673,9 @@ private final class PinView: NSView {
   @objc private func copyImage() { board.output(.copy, image, scale) }
   @objc private func saveImage() { board.output(.save, image, scale) }
   @objc private func saveImageAs() { board.output(.saveAs, image, scale) }
+  /// 查看钉图的识字结果，不改变当前钉图。
+  @objc private func inspectText() { board.output(.inspect, image, scale) }
+
   @objc private func recognizeText() { board.output(.recognize, image, scale) }
   @objc private func translateImage() { board.output(.translate, image, scale) }
 

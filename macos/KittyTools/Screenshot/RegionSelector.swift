@@ -18,6 +18,8 @@ enum RegionSelector {
     case copy, save, saveAs, pin
     /// 识字并复制（识别的是打码后的合成图）
     case recognize
+    /// 查看识字结果与原图，保留选字复制入口。
+    case inspect
     case translate
   }
 

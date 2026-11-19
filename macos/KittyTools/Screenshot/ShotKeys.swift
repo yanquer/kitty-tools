@@ -11,7 +11,8 @@ import Carbon.HIToolbox
 
 enum ShotKey: String, CaseIterable {
   case rectangle, ellipse, arrow, line, pen, highlighter, text, counter, mosaic, spotlight
-  case copy, save, saveAs, pin, recognize, scroll, record, undo, redo, lastRegion, pickColor
+  case copy, save, saveAs, pin, recognize, inspect, scroll, record, undo, redo, lastRegion,
+    pickColor
 
   /// 设置页的两组：十种标注工具，出图和别的
   static var tools: [ShotKey] { Annotation.Tool.allCases.map { ShotKey($0) } }
@@ -45,6 +46,7 @@ enum ShotKey: String, CaseIterable {
     case .saveAs: "另存为…"
     case .pin: "钉到屏幕"
     case .recognize: "识字并拷贝"
+    case .inspect: "查看识字结果"
     case .scroll: "长截图"
     case .record: "录屏"
     case .undo: "撤销"
@@ -64,6 +66,7 @@ enum ShotKey: String, CaseIterable {
     case .saveAs: "square.and.arrow.down.on.square"
     case .pin: "pin"
     case .recognize: "text.viewfinder"
+    case .inspect: "text.magnifyingglass"
     case .scroll: "rectangle.expand.vertical"
     case .record: "record.circle"
     case .undo: "arrow.uturn.backward"
@@ -88,6 +91,7 @@ enum ShotKey: String, CaseIterable {
       case .saveAs: (kVK_ANSI_S, cmdKey | shiftKey)
       case .pin: (kVK_ANSI_T, 0)
       case .recognize: (kVK_ANSI_O, 0)
+      case .inspect: (kVK_ANSI_O, shiftKey)
       case .scroll: (kVK_ANSI_S, 0)
       case .record: (kVK_ANSI_R, 0)
       case .undo: (kVK_ANSI_Z, cmdKey)

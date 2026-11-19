@@ -339,6 +339,8 @@ import SwiftUI
   var canCopy: Bool { !picked.isEmpty }
   /// 能不能存（选中的里面有图才行：录制的那几条本来就是文件）
   var canSave: Bool { chosen.contains { $0.filePath == nil } }
+  /// 拼图只接受 2–20 张截图；混选录制时明确禁用，不静默漏掉选中项。
+  var canCompose: Bool { ShotComposition.accepts(chosen) }
 
   func copySelection() {
     let items = chosen

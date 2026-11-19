@@ -56,6 +56,8 @@ final class SelectionView: NSView, NSTextViewDelegate {
   private var untranslated: (image: CGImage, selection: CGRect)?
   /// 就地翻译到字号下限也放不下的段：挂在选区外的译文卡片（2026-11-08 拍板 B1–B4）；选区一变、✕、Esc 收起
   private var translationCard: TranslationCard?
+  /// 仅真实截图会话建立自动扫码层，屏外测试不会自行运行 Vision。
+  private var codes: SelectionCodes?
   /// 贴了译文的那张冻结帧、现在图上是不是换回了原文在看（卡片上的「看原文」，第二轮 E1；不重新请求）
   private var translated: CGImage?
   private var showingOriginal = false
@@ -649,7 +651,10 @@ final class SelectionView: NSView, NSTextViewDelegate {
   /// 出场：蒙层 0.15 s 淡入；提示浮上来，3 s 后淡出。同时挂上跟手的显示链（见 followPointer）
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
-    guard window != nil else { return stopFollowing() }
+    guard window != nil else {
+      codes?.clear()
+      return stopFollowing()
+    }
     startFollowing()
     updateScale()
     let fade = CABasicAnimation(keyPath: "opacity")
@@ -803,6 +808,22 @@ final class SelectionView: NSView, NSTextViewDelegate {
     updateSizeField(for: selection ?? hovered)
     updateMagnifier()
     updateCrosshair()
+    updateCodes()
+  }
+
+  /// 只在稳定的截图选区中发现条码，工具和标注优先于自动识别。
+  private func updateCodes() {
+    guard window is SelectionOverlay else { return }
+    if codes == nil {
+      let codes = SelectionCodes(host: self)
+      codes.onFinish = { [weak self] in self?.session.finish(nil) }
+      self.codes = codes
+      if let toolbar { addSubview(codes.overlay, positioned: .below, relativeTo: toolbar) }
+    }
+    codes?.update(
+      image: image, selection: selection, viewSize: bounds.size,
+      enabled: annotates && isAdjusting && !movesSelection && !hasAnnotations
+        && tool == nil && draft == nil && !translating && !redacting && !autoTranslates)
   }
 
   /// 尺寸：选区（或悬停的窗口）旁边，见 sizeFieldOrigin；哪儿都放不下时放进里面、只读（不挡拖边和平移）。调整时可输入
@@ -1738,6 +1759,7 @@ final class SelectionView: NSView, NSTextViewDelegate {
 
   /// Esc 依次：HUD 菜单 → 译文卡片 → 尺寸输入 → 输入中的文字 → 选中的标注 → 工具 → 取消截图（免得一下把画好的标注全丢了）
   private func escape() {
+    if codes?.dismissCard() == true { return }
     if let hudMenu {
       hudMenu.dismiss()
     } else if pickingColor {
@@ -2285,6 +2307,7 @@ final class SelectionView: NSView, NSTextViewDelegate {
   /// 停掉就地翻译：Esc 收起截图、这块屏被清掉时都要调，不然还在排队的那几段会继续往翻译服务发请求。
   /// 任务的取消点在 TranslateSegments 的每段开头，取消后不会再发新请求
   func cancelTranslation() {
+    codes?.clear()
     translateTask?.cancel()
     translateTask = nil
     guard translating else { return }
@@ -2514,6 +2537,7 @@ final class SelectionView: NSView, NSTextViewDelegate {
   }
 
   override func mouseDown(with event: NSEvent) {
+    if codes?.dismissCard() == true { return }
     session.colorShiftArmed = false
     // 等着新的快捷键时点了一下：不改了（刚改完的那句提示也收掉）
     if rebinding != nil || !rebindTip.layer.isHidden { stopRebind() }
@@ -3007,6 +3031,7 @@ final class SelectionView: NSView, NSTextViewDelegate {
     case .pin: output(.pin)
     case .scroll: startScroll()
     case .recognize: output(.recognize)
+    case .inspect: output(.inspect)
     case .record: switchToRecording()
     case .copy: output(.copy)
     case .save: output(.save)

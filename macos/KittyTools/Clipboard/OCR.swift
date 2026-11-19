@@ -31,9 +31,19 @@ nonisolated enum OCR {
   @concurrent static func recognizeLines(in image: CGImage, droppingIcons: Bool = false) async
     -> [Line]?
   {
+    do { return try await inspectLines(in: image, droppingIcons: droppingIcons) } catch {
+      Log.clipboard.error("文字识别失败：\(String(reflecting: error), privacy: .public)")
+      return nil
+    }
+  }
+
+  /// 保留 Vision 原始错误的识别入口，供结果面板区分失败与有效空结果。
+  @concurrent static func inspectLines(in image: CGImage, droppingIcons: Bool = false) async throws
+    -> [Line]
+  {
     enter()
     defer { leave() }
-    guard let observations = try? await request().perform(on: image) else { return nil }
+    let observations = try await request().perform(on: image)
     let lines = observations.compactMap { observation -> Line? in
       guard let candidate = observation.topCandidates(1).first else { return nil }
       let text = candidate.string.trimmingCharacters(in: .whitespaces)
@@ -162,14 +172,40 @@ nonisolated enum OCR {
 
   /// 二维码 / 条码的内容（有几个返回几个，重复的去掉）。识字时有码优先用码
   @concurrent static func barcodes(in image: CGImage) async -> [String] {
-    enter()
-    defer { leave() }
-    guard let observations = try? await DetectBarcodesRequest().perform(on: image) else {
+    do { return try await scanCodes(in: image).map(\.text) } catch {
+      Log.clipboard.error("条码识别失败：\(String(reflecting: error), privacy: .public)")
       return []
     }
+  }
+
+  /// 一个码的内容与归一化位置；位置沿用 Vision 的左下角原点。
+  struct Code: Identifiable, Equatable, Sendable {
+    let text: String
+    let box: CGRect
+    var id: String { text }
+
+    /// 只有完整的 HTTP(S) 网址才提供打开入口，其余内容只预览和复制。
+    var url: URL? {
+      guard let url = URL(string: text),
+        ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+        let host = url.host, !host.isEmpty,
+        !text.contains(where: { $0.isWhitespace || $0.isNewline })
+      else { return nil }
+      return url
+    }
+  }
+
+  /// 带位置的二维码、条码识别；失败抛原始错误，空数组表示确实没有命中。
+  @concurrent static func scanCodes(in image: CGImage) async throws -> [Code] {
+    enter()
+    defer { leave() }
+    let observations = try await DetectBarcodesRequest().perform(on: image)
     var seen = Set<String>()
-    return observations.compactMap(\.payloadString).filter {
-      !$0.isEmpty && seen.insert($0).inserted
+    return observations.compactMap { observation in
+      guard let text = observation.payloadString, !text.isEmpty,
+        seen.insert(text).inserted
+      else { return nil }
+      return Code(text: text, box: observation.boundingBox.cgRect)
     }
   }
 

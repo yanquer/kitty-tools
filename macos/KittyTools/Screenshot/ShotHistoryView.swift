@@ -269,6 +269,8 @@ struct ShotHistoryView: View {
         row(ScreenshotOutput.saveTitle, "square.and.arrow.down", key: "⌘S") {
           model.saveSelection()
         }
+        row("拼图或合并 PDF…", "square.grid.2x2") { model.actions.compose(model.chosen) }
+          .disabled(!model.canCompose)
         row("在访达中显示", "folder", key: "⇧⌘R") { model.revealSelection() }
         row("删除", "trash", key: "⌫", danger: true) { model.deleteSelection() }
       }
@@ -292,6 +294,7 @@ struct ShotHistoryView: View {
         row("另存为…", "square.and.arrow.down.on.square", key: "⇧⌘S") { model.actions.saveAs(item) }
         row("钉到屏幕", "pin", key: "⌘P") { model.actions.pin(item) }
         row("识字并拷贝", "text.viewfinder", key: "⌘O") { model.actions.recognize(item) }
+        row("查看识字结果", "text.magnifyingglass") { model.actions.inspect(item) }
       } else {
         row("打开", "play.rectangle", key: "↩") { model.open(item) }
         // 录制的拷的是文件（第四轮体检 U1：原来只有 ⌘C，这里没有）；录屏另有转成 GIF、压缩（同视频卡）
@@ -333,6 +336,8 @@ struct ShotHistoryView: View {
       Button("存储 \(chosen.count) 项到「\(ScreenshotOutput.saveFolderName)」") {
         model.actions.saveMany(chosen)
       }
+      Button("拼图或合并 PDF…") { model.actions.compose(model.chosen) }
+        .disabled(!model.canCompose)
       Button("在访达中显示") { model.reveal(chosen) }
       Divider()
       Button("删除 \(chosen.count) 项", role: .destructive) {
@@ -345,6 +350,7 @@ struct ShotHistoryView: View {
       Button("另存为…") { model.actions.saveAs(item) }
       Button("钉到屏幕") { model.actions.pin(item) }
       Button("识字并拷贝") { model.actions.recognize(item) }
+      Button("查看识字结果") { model.actions.inspect(item) }
     } else {
       Button("打开") { model.open(item) }
       Button("拷贝") { model.actions.copy(item) }

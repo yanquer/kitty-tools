@@ -1366,6 +1366,84 @@ struct ScreenshotSnapshotTests {
     }
   }
 
+  /// 识字结果、拼图与条码卡片均在屏外渲染，不打开真实截图会话。
+  @Test(.enabled(if: directory != nil)) func renderScreenshotEnhancements() throws {
+    let desktop = try Self.desktop()
+    let recognition = RecognitionModel()
+    recognition.image = desktop
+    recognition.text = "项目进度\n第一阶段：识字结果与原图对照\n第二阶段：多张截图拼接与 PDF 导出\n\n请选择需要的文字，按 ⌘C 复制。"
+    for dark in [false, true] {
+      try enhancement(
+        RecognitionResultView(model: recognition), size: NSSize(width: 780, height: 540),
+        name: "recognition-result", dark: dark)
+    }
+    try enhancement(
+      ShortcutsSheet(page: .screenshot),
+      size: NSSize(width: ShortcutsSheet.width, height: 1200), name: "recognition-shortcuts")
+    recognition.text = ""
+    try enhancement(
+      RecognitionResultView(model: recognition), size: NSSize(width: 780, height: 540),
+      name: "recognition-empty")
+    recognition.error = "无法完成文字识别，请重新框选后再试"
+    try enhancement(
+      RecognitionResultView(model: recognition), size: NSSize(width: 780, height: 540),
+      name: "recognition-error")
+    let composition = ShotCompositionModel()
+    composition.preview = desktop
+    composition.sources = (1...3).map { index in
+      ShotComposition.Source(
+        id: UUID(), url: URL(filePath: "/tmp/fixture-\(index).png"),
+        size: CGSize(width: desktop.width, height: desktop.height),
+        label: "15:30 · 1200 × 800 · 测试窗口 \(index)", thumbnail: desktop)
+    }
+    for dark in [false, true] {
+      try enhancement(
+        ShotCompositionView(model: composition), size: NSSize(width: 820, height: 620),
+        name: "composition", dark: dark)
+    }
+    let window = NSWindow(
+      contentRect: CGRect(x: -20000, y: -20000, width: 480, height: 300), styleMask: .borderless,
+      backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    let host = NSView(frame: CGRect(x: 0, y: 0, width: 480, height: 300))
+    host.wantsLayer = true
+    host.layer?.backgroundColor = Style.HUD.solidFill.cgColor
+    window.contentView = host
+    let card = CodeResultCard(
+      code: OCR.Code(text: "https://example.com/docs/kitten?section=tools", box: .zero))
+    card.frame = CGRect(x: 60, y: 40, width: 360, height: 220)
+    host.addSubview(card)
+    card.applyGeometry()
+    card.placeContent()
+    #expect(card.effect.bounds.width >= 350 && card.effect.bounds.height >= 210)
+    card.grow(true)
+    try shoot(window, "code-result")
+    try shootContent(card, "code-result")
+    window.orderOut(nil)
+  }
+
+  /// 只在不可成为 key 的屏外窗口中检查布局，背景使用当前系统窗口色。
+  private func enhancement(_ view: some View, size: NSSize, name: String, dark: Bool = false) throws
+  {
+    let window = NSWindow(
+      contentRect: NSRect(origin: NSPoint(x: -20000, y: -20000), size: size),
+      styleMask: .borderless, backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    let host = NSHostingView(
+      rootView: view.frame(width: size.width, height: size.height).background(
+        Color(nsColor: .windowBackgroundColor)))
+    host.frame = CGRect(origin: .zero, size: size)
+    window.contentView = host
+    window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+    window.orderFront(nil)
+    for _ in 0..<5 { RunLoop.main.run(until: Date.now.addingTimeInterval(0.1)) }
+    let bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+    host.cacheDisplay(in: host.bounds, to: bitmap)
+    let out = try #require(Self.directory)
+    try write(try #require(bitmap.cgImage), to: "\(out)/shot-\(name)\(dark ? "-dark" : "").png")
+    window.orderOut(nil)
+  }
+
   private func write(_ image: CGImage, to path: String) throws {
     let data = try #require(
       NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]))

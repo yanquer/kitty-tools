@@ -254,13 +254,17 @@ final class EditorToolbar: PopView {
     let right: [[Spec]] = [
       ([
         (.output(.recognize), "text.viewfinder", "识字并拷贝", "识字并拷贝"),
+        (.output(.inspect), "text.magnifyingglass", "查看识字结果", "查看识字结果"),
         (.output(.translate), "translate", "翻译", "翻译"),
         (.scroll, "rectangle.expand.vertical", "长截图", "长截图"),
         (.record, "record.circle", "录屏", "录屏"),
         (.output(.pin), "pin", "钉到屏幕", "钉到屏幕"),
       ] as [Spec]).filter { spec in
         // 长图的标注窗口：这一组只留识字（翻译、长截图、录屏、钉图对一张长图没意义，拍板 C1）
-        guard mode == .capture || spec.0 == .output(.recognize) else { return false }
+        guard
+          mode == .capture || spec.0 == .output(.recognize)
+            || spec.0 == .output(.inspect)
+        else { return false }
         // 翻译、录制这两个功能关着（Feature）时没有它们的钮
         return (spec.0 != .output(.translate) || Feature.translate.isOn)
           && (spec.0 != .record || Feature.record.isOn)
@@ -352,6 +356,7 @@ final class EditorToolbar: PopView {
     case .undo: .undo
     case .redo: .redo
     case .output(.recognize): .recognize
+    case .output(.inspect): .inspect
     case .output(.pin): .pin
     case .output(.save): .save
     case .output(.copy): .copy

@@ -394,7 +394,7 @@ import Carbon.HIToolbox
     if panel.firstResponder is EditorField { return typing(event, flags: flags) }
     // 识字、拷贝、存储、另存为照截图时的快捷键（ShotKeys，能改）；工具、撤销归画布（ScrollCanvas）
     let outputs: [ShotKey: RegionSelector.Action] = [
-      .recognize: .recognize, .copy: .copy, .save: .save, .saveAs: .saveAs,
+      .recognize: .recognize, .inspect: .inspect, .copy: .copy, .save: .save, .saveAs: .saveAs,
     ]
     if let action = ShotKey.matching(event).flatMap({ outputs[$0] }) {
       emit(action)
