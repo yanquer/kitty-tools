@@ -9,6 +9,8 @@ nonisolated enum Log {
   static let clipboard = Logger(subsystem: subsystem, category: "clipboard")
   /// 系统翻译的模式选择、快捷指令执行、取消及失败原因，不记录翻译正文。
   static let translate = Logger(subsystem: subsystem, category: "translate")
+  /// 截图指针合成、钉图编辑及演示画布的状态与失败原因。
+  static let capture = Logger(subsystem: subsystem, category: "capture")
   static let record = Logger(subsystem: subsystem, category: "record")
   /// 访达右键（FinderLink）：交给别的 App 打开没成
   static let finder = Logger(subsystem: subsystem, category: "finder")

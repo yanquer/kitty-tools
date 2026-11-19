@@ -19,10 +19,13 @@ final class RecordingCanvas {
   private var previousLaserPoint: CGPoint?
   private var lastLaserTime: CFTimeInterval = 0
   private var isPresented = false
+  private var whiteboard = false
+  private let label: String
   private let sessionID = UUID().uuidString
 
   /// 只建透明窗口，不上屏、不安装监听；位图仅用于满足 AnnotationCanvas 的冻结帧参数，不采集屏幕。
-  init?(region: CGRect) {
+  init?(region: CGRect, label: String = "录屏画板") {
+    self.label = label
     guard
       let context = CGContext(
         data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
@@ -30,7 +33,7 @@ final class RecordingCanvas {
         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
       let image = context.makeImage()
     else {
-      Log.record.error("录屏画板初始化失败：无法分配透明占位图")
+      Log.record.error("画板初始化失败 context=\(label, privacy: .public)：无法分配透明占位图")
       return nil
     }
     view = RecordingDrawingView(image: image)
@@ -59,8 +62,8 @@ final class RecordingCanvas {
     view.layer?.addSublayer(focus)
     view.layer?.addSublayer(laser)
     view.onMouse = { [weak self] in self?.handle($0) }
-    view.setAccessibilityLabel("录屏画板")
-    view.setAccessibilityHelp("使用录屏工具箱切换画笔或返回操作窗口")
+    view.setAccessibilityLabel(label)
+    view.setAccessibilityHelp("使用工具栏切换画笔或返回操作窗口")
   }
 
   var windowID: CGWindowID? { ScreenCapture.windowID(panel.windowNumber) }
@@ -76,7 +79,8 @@ final class RecordingCanvas {
       panel.orderFrontRegardless()
     }
     Log.record.notice(
-      "录屏画板就绪 session=\(self.sessionID, privacy: .public) window=\(self.panel.windowNumber)")
+      "画板就绪 context=\(self.label, privacy: .public) session=\(self.sessionID, privacy: .public) window=\(self.panel.windowNumber)"
+    )
     syncMonitors()
   }
 
@@ -86,7 +90,7 @@ final class RecordingCanvas {
     state.apply(action)
     panel.ignoresMouseEvents = !state.isDrawing
     // 完全透明的像素会被窗口系统点穿，画图期间垫一个最低可见度的命中底。
-    view.layer?.backgroundColor = state.isDrawing ? CGColor(gray: 0, alpha: 1 / 255) : nil
+    syncBackground()
     view.drawingEnabled = state.isDrawing
     renderAnnotations()
     previousLaserPoint = nil
@@ -95,9 +99,24 @@ final class RecordingCanvas {
     if isPresented { updatePointer(at: NSEvent.mouseLocation, animated: true) }
     if wasDrawing != state.isDrawing {
       Log.record.notice(
-        "录屏画板交互变化 session=\(self.sessionID, privacy: .public) drawing=\(self.state.isDrawing)")
+        "画板交互变化 context=\(self.label, privacy: .public) session=\(self.sessionID, privacy: .public) drawing=\(self.state.isDrawing)"
+      )
     }
     onChange(state)
+  }
+
+  /// 独立演示可铺白板；录屏默认透明，不增加录制输出中的背景。
+  func setWhiteboard(_ enabled: Bool) {
+    whiteboard = enabled
+    syncBackground()
+  }
+
+  /// 绘图时保留最低命中底，白板只在演示会话中显式启用。
+  private func syncBackground() {
+    view.layer?.backgroundColor =
+      whiteboard
+      ? CGColor(gray: 1, alpha: 1)
+      : (state.isDrawing ? CGColor(gray: 0, alpha: 1 / 255) : nil)
   }
 
   /// 原子收尾：先停止监听、还原点穿，再收窗口并释放笔迹和图层，重复调用安全。
@@ -111,11 +130,14 @@ final class RecordingCanvas {
     onChange = { _ in }
     excludedFrames = { [] }
     state = RecordingTools()
+    whiteboard = false
+    syncBackground()
     renderAnnotations()
     focus.path = nil
     clearLaser()
     if isPresented {
-      Log.record.notice("录屏画板结束 session=\(self.sessionID, privacy: .public)")
+      Log.record.notice(
+        "画板结束 context=\(self.label, privacy: .public) session=\(self.sessionID, privacy: .public)")
     }
     isPresented = false
   }
@@ -138,7 +160,7 @@ final class RecordingCanvas {
     monitors = [global, local].compactMap { $0 }
     if monitors.count != 2 {
       Log.record.error(
-        "录屏画板鼠标监听未全部建立 session=\(self.sessionID, privacy: .public) installed=\(self.monitors.count)"
+        "画板鼠标监听未全部建立 context=\(self.label, privacy: .public) session=\(self.sessionID, privacy: .public) installed=\(self.monitors.count)"
       )
     }
   }
@@ -217,7 +239,7 @@ final class RecordingCanvas {
     case .leftMouseDown:
       guard state.begin(at: point) else {
         Log.record.notice(
-          "录屏画板拒绝新笔迹 session=\(self.sessionID, privacy: .public) count=\(self.state.annotations.count) limit=\(RecordingTools.maximumAnnotations)"
+          "画板拒绝新笔迹 context=\(self.label, privacy: .public) session=\(self.sessionID, privacy: .public) count=\(self.state.annotations.count) limit=\(RecordingTools.maximumAnnotations)"
         )
         onNotice("画板已达 256 条标注，请撤销或清空后继续")
         return

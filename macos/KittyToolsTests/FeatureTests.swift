@@ -212,7 +212,7 @@ struct FeatureTests {
   @Test func switchesAreExportedSettings() {
     #expect(
       Feature.allCases.filter { !$0.defaultOn } == [
-        .dockPreview, .windowSwitcher, .windowLayout, .finderMenu,
+        .dockPreview, .windowSwitcher, .windowLayout, .finderMenu, .presentation,
       ])
     #expect(
       [Feature.notes, .reminders, .statusScreen, .launchpad, .island].allSatisfy {

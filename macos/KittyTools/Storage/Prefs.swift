@@ -174,6 +174,8 @@ enum Prefs {
   static let scrollCaptureSpeed = "scrollCaptureSpeed"
   /// 框选时保持屏幕原色（2026-11-06 用户：截图时像蒙了一层粉色滤镜，取色不友好）：打开后不压暗、悬停的窗口只描边不染色、
   /// 放大镜的十字带只描边。默认关（照 Whisker 压暗 + 粉色高亮）；截图、截图翻译 / 识字、录屏的框选都管
+  /// 静态截图包含按热键时的鼠标指针，默认关闭。
+  static let screenshotShowsCursor = "screenshotShowsCursor"
   static let screenshotKeepsColors = "screenshotKeepsColors"
   /// 截图 / 录屏框选时悬停识别窗口里的元素（侧栏、列表、按钮，2026-11-08；拍板 D1 是默认开，同日用户改成默认关）：要辅助功能授权，
   /// 没授权时照旧只认窗口。关掉 = 只认窗口（原来的样子）。截图翻译 / 识字没有悬停，不管它
@@ -625,6 +627,7 @@ enum Prefs {
       screenshotCopyAs: "image",
       scrollCaptureSpeed: ScrollSpeed.normal.rawValue,
       screenshotKeepsColors: false,
+      screenshotShowsCursor: false,
       screenshotFindsElements: false,
       shotHistory: true,
       shotHistoryDays: 30,

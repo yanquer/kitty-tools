@@ -19,7 +19,8 @@ enum SettingsPage: String, CaseIterable, Identifiable {
   // 便签、提醒、状态屏一组，启动台、程序坞预览一组（启动台原来在便签后面）
   // 2026-11-13 起便签之后都是插件（Feature.plugins），刘海岛（2026-11-12 PR #17 加的页）也成了插件、挪到最后
   case general, clipboard, launcher, translate, screenshot, record, notes, reminders,
-    statusScreen, launchpad, dockPreview, windowSwitcher, windowLayout, finderMenu, island, hotkeys,
+    statusScreen, launchpad, dockPreview, windowSwitcher, windowLayout, finderMenu, island,
+    presentation, hotkeys,
     about
 
   var id: String { rawValue }
@@ -35,7 +36,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     [
       .notes, .reminders, .statusScreen, .launchpad, .dockPreview, .windowSwitcher, .windowLayout,
       .finderMenu,
-      .island,
+      .island, .presentation,
     ],
     [.hotkeys, .about],
   ]
@@ -68,7 +69,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     case .screenshot, .record: "截图与录制"
     case .notes, .reminders, .statusScreen, .launchpad, .dockPreview, .windowSwitcher,
       .windowLayout, .finderMenu,
-      .island:
+      .island, .presentation:
       "插件"
     case .general, .hotkeys, .about: nil
     }
@@ -101,6 +102,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     case .reminders: "提醒"
     case .windowSwitcher: "窗口切换"
     case .windowLayout: "窗口管理"
+    case .presentation: "演示画布"
     case .dockPreview: "程序坞预览"
     case .finderMenu: "访达右键"
     case .translate: "翻译"
@@ -124,6 +126,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     case .reminders: "kitty.reminders"
     case .windowSwitcher: "rectangle.on.rectangle"
     case .windowLayout: "rectangle.split.2x2"
+    case .presentation: "pencil.and.outline"
     case .dockPreview: "kitty.dock.preview"
     case .finderMenu: "kitty.finder.menu"
     case .translate: "kitty.translate"
@@ -146,6 +149,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     case .reminders: Style.Family.reminders
     case .windowSwitcher: Style.Family.dockPreview
     case .windowLayout: Style.Family.dockPreview
+    case .presentation: Style.Family.screenshot
     case .dockPreview: Style.Family.dockPreview
     case .finderMenu: Style.Family.finderMenu
     case .translate: Style.Family.translate
@@ -169,6 +173,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     case .reminders: "到点提醒你：什么时候响、用什么方式、点了「稍后」推多久"
     case .windowSwitcher: "按最近使用顺序切换窗口，搜索、关闭和最小化"
     case .windowLayout: "窗口分屏、细分网格、拖拽吸附、跨屏移动与平铺"
+    case .presentation: "桌面标注、激光笔、鼠标焦点与白板"
     case .dockPreview: "停在程序坞图标上时弹出的窗口缩略图：开关和要给的授权"
     case .finderMenu: "在访达里右键：新建文件、拷贝路径、移动复制、压缩解压"
     case .translate: "语言、翻译服务与密钥、历史"
@@ -222,7 +227,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
       [
         "保存", "存储", "目录", "文件夹", "快门", "声音", "缩略图", "识字", "换行", "二维码", "标注", "长截图", "钉图",
         "按键", "速查", "工具栏", "位置", "靠右", "居中", "录制条", "原色", "压暗", "遮罩", "滤镜", "取色", "颜色",
-        "拷贝", "复制", "文件", "PNG", "对拷线", "远程",
+        "拷贝", "复制", "文件", "PNG", "对拷线", "远程", "指针", "鼠标",
       ]
     case .record:
       [
@@ -248,6 +253,8 @@ enum SettingsPage: String, CaseIterable, Identifiable {
       ]
     case .windowLayout:
       ["窗口", "分屏", "布局", "平铺", "层叠", "网格", "吸附", "跨屏", "显示器", "还原", "居中", "间距", "待办", "鼠标"]
+    case .presentation:
+      ["演示", "画布", "白板", "画笔", "讲解", "激光笔", "圈重点", "presentation", "whiteboard"]
     case .windowSwitcher:
       ["窗口", "切换", "搜索", "最近使用", "最小化", "关闭", "桌面", "辅助功能", "屏幕录制", "Option Tab", "⌥Tab"]
     case .dockPreview:

@@ -11,6 +11,7 @@
 
 import AppKit
 import Carbon.HIToolbox
+import OSLog
 
 @MainActor final class AnnotateOverlay: NSObject {
   /// 出图：动作、合成好的图、像素 / 点、画了哪些标注（AppDelegate 接到截图那条路上，顺手把标注回写进历史）
@@ -37,13 +38,16 @@ import Carbon.HIToolbox
   private var armedEscape = false
   private let scrollView = NSScrollView()
   private let canvas: ScrollCanvas
-  private let bar = EditorToolbar(mode: .longShot)
+  private let bar: EditorToolbar
+  private let appliesToPin: Bool
   private let styleBar = StyleBar()
   /// 开着的 HUD 菜单（存储右边 ▾ 的、托盘上字号的；同时最多一个）：Esc、点外面先收它（同截图遮罩、长截图面板）
   private(set) var menu: HUDMenu?
   private let output: Output
   /// 关掉了（AppDelegate 放掉这个会话）
   var onClose: () -> Void = {}
+  /// 所属会话提供可见错误提示，不以读屏播报替代实际失败状态。
+  var onProblem: (String) -> Void = { Island.announce($0) }
 
   var isVisible: Bool { panel.isVisible }
 
@@ -51,11 +55,14 @@ import Carbon.HIToolbox
   /// 坐标是这张图的点坐标）
   init(
     image: CGImage, scale: CGFloat, annotations: [Annotation] = [], screen: NSScreen? = nil,
+    appliesToPin: Bool = false,
     output: @escaping Output
   ) {
     self.image = image
     self.scale = scale
     self.output = output
+    self.appliesToPin = appliesToPin
+    bar = EditorToolbar(mode: appliesToPin ? .pinShot : .longShot)
     canvas = ScrollCanvas(image: image, scale: scale)
     let target =
       screen
@@ -376,7 +383,16 @@ import Carbon.HIToolbox
       return Island.announce("正在打码，稍等再出图")
     }
     armedEscape = false
-    output(action, composed(), scale, canvas.annotations)
+    if appliesToPin {
+      guard let image = canvas.composedStrictly() else {
+        Log.capture.error("钉图编辑未应用：标注图像合成失败")
+        onProblem("标注合成失败，钉图保持原样，请重试")
+        return
+      }
+      output(action, image, scale, canvas.annotations)
+    } else {
+      output(action, composed(), scale, canvas.annotations)
+    }
     if action != .recognize { close() }
   }
 
@@ -402,7 +418,7 @@ import Carbon.HIToolbox
     }
     switch (Int(event.keyCode), flags) {
     case (kVK_Escape, []): dismiss()
-    case (kVK_Return, []), (kVK_ANSI_KeypadEnter, []): emit(.copy)
+    case (kVK_Return, []), (kVK_ANSI_KeypadEnter, []): emit(appliesToPin ? .pin : .copy)
     case (kVK_ANSI_0, .command): zoomToFit()
     case (kVK_ANSI_1, .command): setMagnification(1)
     case (kVK_ANSI_Equal, .command), (kVK_ANSI_Equal, [.command, .shift]),

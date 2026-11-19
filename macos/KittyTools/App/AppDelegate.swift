@@ -185,6 +185,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private lazy var statusPickerModel: StatusPickerModel = {
     let model = StatusPickerModel()
     model.onEnter = { [unowned self] preset, card in
+      builtPresentation?.stop()
       let panel = statusPicker.panel
       let origin = card.flatMap { panel?.screenRect(of: $0) }
       panel?.hide()
@@ -258,6 +259,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     return layout
   }()
   private weak var builtWindowLayout: WindowLayout?
+
+  /// 演示画布仅在用户添加插件后按需打开，后台不常驻窗口或输入监听。
+  private lazy var presentation: PresentationCanvas = {
+    let canvas = PresentationCanvas()
+    canvas.hotKeys = hotKeys
+    canvas.isSuppressed = { [unowned self] in
+      isCapturing || isReadingSelection || recorder != nil || audioRecorder != nil
+        || statusScreen.isActive || hotKeys.recording != nil
+        || OverlayPanel.isSelectingRegion(in: NSApp.windows)
+    }
+    canvas.onNotice = { [unowned self] in island.show("演示画布", detail: $0, tone: .warning) }
+    builtPresentation = canvas
+    return canvas
+  }()
+  private weak var builtPresentation: PresentationCanvas?
 
   /// 程序坞预览建过没有（空闲回收看它，别为了回收把关着的功能建出来，同 builtLauncherPanel）
   private weak var builtDockPreview: DockPreview?
@@ -336,6 +352,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
       }
     }
+    board.edit = { [unowned self] panel in editPin(panel) }
     return board
   }()
 
@@ -843,6 +860,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       case .dockPreview: AnyView(DockPreviewTab())
       case .windowSwitcher: AnyView(WindowSwitcherTab())
       case .windowLayout: AnyView(WindowLayoutTab(center: hotKeys))
+      case .presentation:
+        AnyView(
+          PresentationTab(canvas: presentation, toggle: { [unowned self] in run(.presentation) }))
       case .finderMenu: AnyView(FinderMenuTab())
       case .translate:
         AnyView(
@@ -1290,6 +1310,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     if turnedOff.contains(.dockPreview) { dockPreview.stop() }
     if turnedOff.contains(.windowSwitcher) { builtWindowSwitcher?.stop() }
     if turnedOff.contains(.windowLayout) { builtWindowLayout?.stop() }
+    if turnedOff.contains(.presentation) { builtPresentation?.stop() }
     if turnedOff.contains(.reminders) { reminders.stop() }
     idleReclaim.schedule()  // 关掉的功能占着的缓存跟着还
   }
@@ -1442,6 +1463,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   func applicationWillTerminate(_ notification: Notification) {
     builtWindowSwitcher?.stop()
     builtWindowLayout?.stop()
+    builtPresentation?.stop()
     guard isRunning else { return }
     FileMoves.forgetCut()  // 访达右键剪切的清单只在内存里：退出后扩展别再列「粘贴」
     statusScreen.exit(.quit)  // 在状态屏里被要求退出（远程、脚本）：拦截当场撤掉
@@ -1771,10 +1793,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     .contains(action)
     if !switching { builtWindowSwitcher?.hide() }
     if action != .windowLayoutPicker { builtWindowLayout?.hide() }
+    if action != .presentation { builtPresentation?.stop() }
     switch action {
     case .windowLayout(let layout):
       windowLayout.run(layout, cycle: byKey ? hotKeys.layoutCycle(for: layout) : [])
     case .windowLayoutPicker: windowLayout.showPicker()
+    case .presentation: presentation.toggle()
     case .windowSwitch, .windowSwitchPrevious, .appWindowSwitch, .appWindowSwitchPrevious:
       if builtWindowSwitcher?.isOpen != true {
         builtClipboardPanel?.hide()
@@ -2362,6 +2386,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       guard
         let outcome = await frozenSelection(
           feature,
+          includingCursor: !autoTranslate
+            && UserDefaults.standard.bool(forKey: Prefs.screenshotShowsCursor),
           {
             await RegionSelector.capture(
               $0, lastRegion: lastRegion, preselect: repeatingLastRegion,
@@ -2402,7 +2428,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         land(.copied, png, remembered)
       case .pin:
         FlyCard.playShutter()
-        pins.pin(capture.image, frame: capture.frame)
+        pins.pin(
+          capture.image, frame: capture.frame, original: capture.original,
+          annotations: capture.annotations, scale: capture.scale)
         remember(capture, pinned: true)
       case .save:
         let land = captured(capture.image, scale: capture.scale, frame: capture.frame)
@@ -2850,7 +2878,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     actions.pin = { [unowned self] item in
       Task {
-        guard let image = await shotHistory.composed(item) else { return missingShot() }
+        guard let original = await shotHistory.image(for: item.id) else { return missingShot() }
+        let image = ShotHistory.compose(original, annotations: item.annotations, scale: item.scale)
         // 钉回当初那一块（拍板 B2），大小按图的比例重算（长截图记的是选区，E3）；没记位置的（老条目）、那块屏已经拔掉的
         // 钉在可见区中央，同「钉住剪贴板里的图」
         let frame = PinBoard.historyFrame(
@@ -2858,7 +2887,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           source: item.frame, screens: NSScreen.screens.map { ($0.frame, $0.visibleFrame) },
           fallback: (NSScreen.main ?? NSScreen.screens[0]).visibleFrame,
           pinned: pins.panels.map(\.frame))
-        pins.pin(image, frame: frame)
+        pins.pin(
+          image, frame: frame, original: original, annotations: item.annotations, scale: item.scale)
         shotHistory.markPinned(item.id)
       }
     }
@@ -2927,6 +2957,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     island.show("这张图已经不在了", detail: "历史里的原图被清掉了", tone: .warning)
   }
 
+  /// 同一张钉图在现有遮罩中继续标注，明确应用后才回写，取消时恢复原钉图。
+  private func editPin(_ pin: PinPanel) {
+    guard Feature.screenshot.isOn, pins.panels.contains(where: { $0 === pin }) else { return }
+    annotateOverlay?.close()
+    pin.finishPopIn()
+    pin.orderOut(nil)
+    var applied = false
+    let editor = AnnotateOverlay(
+      image: pin.original, scale: pin.editingScale,
+      annotations: pin.annotations, appliesToPin: true
+    ) { [weak self, weak pin] action, image, _, annotations in
+      guard let self, let pin, pins.panels.contains(where: { $0 === pin }) else { return }
+      if action == .pin {
+        pin.applyEdits(image: image, annotations: annotations)
+        applied = true
+        Log.capture.notice("钉图编辑已应用 annotations=\(annotations.count)")
+      } else {
+        pins.output(action, image, pin.outputScale)
+      }
+    }
+    editor.onProblem = { [weak self] in self?.island.show("钉图编辑未应用", detail: $0, tone: .error) }
+    editor.onClose = { [weak self, weak pin] in
+      guard let self else { return }
+      Log.capture.notice("钉图编辑结束 applied=\(applied)")
+      annotateOverlay = nil
+      if let pin, Feature.screenshot.isOn, !pins.isHidden,
+        pins.panels.contains(where: { $0 === pin })
+      {
+        pin.orderFrontRegardless()
+      }
+    }
+    annotateOverlay = editor
+    Log.capture.notice("钉图编辑开始 annotations=\(pin.annotations.count)")
+    editor.show()
+  }
+
   /// 长图标注（2026-10-26 拍板）：拼好的长图在自己的窗口里标注，出图走截图那条路、用刘海说结果（同钉图，不飞卡片：
   /// 这时选区多半已经不在眼前了）。一次只开一扇，再开一次就把前一扇换掉。
   /// history：它在历史里是哪一条（刚拼好的长截图是并行记的，出图时等它记完拿编号，R6）
@@ -2980,6 +3046,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   /// 按 S 转长截图时才收起没固定的。截图翻译 / 识字（hidingPanels）照旧收起没固定的浮层；固定着的不收，照样截进去
   private func beginCapture(hidingPanels: Bool, _ work: @escaping () async -> Void) {
     guard !isCapturing, !isReadingSelection else { return }
+    builtPresentation?.stop()
     isCapturing = true
     builtWindowSwitcher?.hide()
     builtWindowLayout?.hide()
@@ -3020,7 +3087,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   /// key 窗口（还开着的话；只 makeKey，不激活本 App）。没授权 / 截屏失败时用刘海提示，返回 nil。
   /// 框选期间别的热键会弹出浮层抢走 key（遮罩就收不到 Esc）；设置里正在录快捷键时热键本来就停着，结束后不能替它恢复
   private func frozenSelection<T>(
-    _ feature: String, _ select: ([ScreenCapture.Shot]) async -> T?
+    _ feature: String, includingCursor: Bool = false, _ select: ([ScreenCapture.Shot]) async -> T?
   ) async -> T? {
     guard screenRecordingAllowed(for: feature) else { return nil }
     let shots: [ScreenCapture.Shot]
@@ -3028,13 +3095,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       // 截屏的系统服务不返回时最多等 5 秒（E22）：不然 isCapturing 一直为真，截图家族的热键全被静默忽略
       guard
         let frozen = try await ScreenCapture.within(
-          ScreenCapture.freezeTimeout, ScreenCapture.freeze)
+          ScreenCapture.freezeTimeout,
+          { try await ScreenCapture.freeze(includingCursor: includingCursor) })
       else {
         island.show("截屏没有响应", detail: "请再试一次", tone: .warning)
         return nil
       }
       shots = frozen
     } catch {
+      Log.capture.error(
+        "截屏失败 feature=\(feature, privacy: .public) cause=\(String(reflecting: error), privacy: .public)"
+      )
       island.show("截屏失败", detail: error.localizedDescription, tone: .error)
       return nil
     }
@@ -3515,6 +3586,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   /// 三块浮层、选状态的面板、快速记一条、主界面都收起，固定着的也收（打开设置、打开全部便签、进入状态屏）
   private func hidePanels() {
+    builtPresentation?.stop()
     builtWindowSwitcher?.hide()
     builtWindowLayout?.hide()
     launchpad.close(animated: false)

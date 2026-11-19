@@ -120,7 +120,8 @@ struct ShotAccessibilityTests {
     let actions = try #require(view.accessibilityCustomActions())
     #expect(
       actions.map(\.name) == [
-        "拷贝", "识字并拷贝", "查看识字结果", "翻译", ScreenshotOutput.saveTitle, "另存为…", "原始大小", "关闭",
+        "拷贝", "识字并拷贝", "查看识字结果", "翻译", ScreenshotOutput.saveTitle, "另存为…", "继续标注", "局部放大", "原始大小",
+        "关闭",
       ])
     for action in actions.prefix(6) { #expect(action.handler?() == true) }
     #expect(outputs == [.copy, .recognize, .inspect, .translate, .save, .saveAs])

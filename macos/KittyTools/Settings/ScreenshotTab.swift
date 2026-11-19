@@ -16,6 +16,7 @@ struct ScreenshotTab: View {
   /// 打开历史窗口（AppDelegate 给）
   var openHistory: () -> Void = {}
   @AppStorage(Prefs.ocrJoinLines) private var joinLines = false
+  @AppStorage(Prefs.screenshotShowsCursor) private var showsCursor = false
   @AppStorage(Prefs.screenshotShutterSound) private var shutterSound = true
   @AppStorage(Prefs.screenshotPlacement) private var placement = Prefs.ShotPlacement.corner
     .rawValue
@@ -59,6 +60,11 @@ struct ScreenshotTab: View {
           .pickerStyle(.segmented)
           // 拨过这一行，「新」就算看过了（光点进这一页不算；WhatsNew）
           .onChange(of: copyAs) { WhatsNew.touch(section: "截图拷贝为", of: .screenshot) }
+        }
+        Section {
+          Toggle("截图中显示鼠标指针", isOn: $showsCursor)
+        } footer: {
+          SectionFootnote("记录开始截图时的指针位置，适合讲解操作位置；快捷识字、截图翻译和录屏使用各自的采集方式。")
         }
         Section {
           Toggle(isOn: $shutterSound) {

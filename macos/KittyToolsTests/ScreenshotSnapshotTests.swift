@@ -1422,6 +1422,101 @@ struct ScreenshotSnapshotTests {
     window.orderOut(nil)
   }
 
+  /// 钉图继续标注的工具栏、演示白板与设置页均使用假桌面和屏外窗口。
+  @Test(.enabled(if: directory != nil)) func renderReferenceAndPresentation() throws {
+    let desktop = try Self.desktop()
+    let suite = "kitty-reference-snapshot-" + UUID().uuidString
+    let prefs = try #require(UserDefaults(suiteName: suite))
+    defer { prefs.removePersistentDomain(forName: suite) }
+    prefs.set(true, forKey: Prefs.screenshotShowsCursor)
+    prefs.set(false, forKey: Prefs.shotHistory)
+    for dark in [false, true] {
+      try enhancement(
+        ScreenshotTab(shots: nil).defaultAppStorage(prefs).environment(
+          SettingsNavigation(defaults: nil)),
+        size: NSSize(width: 780, height: 800), name: "screenshot-cursor-settings", dark: dark)
+    }
+    try enhancement(
+      PresentationTab(canvas: PresentationCanvas(), toggle: {}),
+      size: NSSize(width: 780, height: 580), name: "presentation-settings")
+    let root = NSView(frame: CGRect(x: 0, y: 0, width: 1100, height: 720))
+    root.wantsLayer = true
+    root.layer?.contents = desktop
+    let board = PinBoard()
+    let pin = PinPanel(
+      image: desktop, frame: CGRect(x: -20000, y: -20000, width: 600, height: 400), board: board)
+    let view = try #require(pin.contentView)
+    pin.contentView = nil
+    view.frame = CGRect(x: 250, y: 190, width: 600, height: 400)
+    root.addSubview(view)
+    let toolbar = EditorToolbar(mode: .pinShot)
+    toolbar.frame.origin = CGPoint(x: 230, y: 130)
+    root.addSubview(toolbar)
+    toolbar.grow(true)
+    try shoot(offscreen(root), "pin-edit-toolbar")
+    for (index, hud) in referenceBars(in: toolbar).enumerated() {
+      try shootContent(hud, "pin-edit-toolbar-\(index)")
+    }
+    let zoom = try #require(
+      NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: .command,
+        timestamp: 0, windowNumber: 0, context: nil, characters: "z",
+        charactersIgnoringModifiers: "z",
+        isARepeat: false, keyCode: UInt16(kVK_ANSI_Z)))
+    view.keyDown(with: zoom)
+    let wheel = try #require(
+      CGEvent(
+        scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: 60, wheel2: 0, wheel3: 0
+      ))
+    view.scrollWheel(with: try #require(NSEvent(cgEvent: wheel)))
+    try shoot(offscreen(root), "pin-local-zoom")
+    for whiteboard in [false, true] {
+      let bounds = CGRect(x: 0, y: 0, width: 1000, height: 640)
+      let scene = NSView(frame: bounds)
+      scene.wantsLayer = true
+      scene.layer?.contents = desktop
+      let canvas = try #require(RecordingCanvas(region: bounds, label: "演示画布"))
+      let bar = RecordingToolsBar(presentation: true)
+      defer {
+        canvas.close()
+        bar.close(animated: false)
+      }
+      canvas.panel.contentView = nil
+      canvas.view.frame = bounds
+      scene.addSubview(canvas.view)
+      let sceneWindow = offscreen(scene)
+      canvas.apply(.mode(.arrow))
+      canvas.apply(.color(.red))
+      canvas.setWhiteboard(whiteboard)
+      for (type, point) in [
+        (NSEvent.EventType.leftMouseDown, CGPoint(x: 180, y: 240)),
+        (.leftMouseDragged, CGPoint(x: 450, y: 360)), (.leftMouseUp, CGPoint(x: 450, y: 360)),
+      ] {
+        let event = try #require(
+          NSEvent.mouseEvent(
+            with: type, location: point, modifierFlags: [],
+            timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)
+        )
+        canvas.view.onMouse(event)
+      }
+      bar.removeFromSuperview()
+      bar.frame.origin = CGPoint(x: 100, y: 40)
+      scene.addSubview(bar)
+      bar.update(canvas.state, escapes: true)
+      bar.setWhiteboard(whiteboard)
+      try shoot(sceneWindow, whiteboard ? "presentation-whiteboard" : "presentation-desktop")
+      try shootContent(
+        try #require(bar.subviews.first as? HUDBar),
+        whiteboard ? "presentation-tools-whiteboard" : "presentation-tools-desktop")
+    }
+  }
+
+  /// 玻璃在屏外可能不呈现内容，单独收集 HUD 内容层以核对按钮和文字布局。
+  private func referenceBars(in view: NSView) -> [HUDBar] {
+    if let bar = view as? HUDBar { return [bar] }
+    return view.subviews.flatMap { referenceBars(in: $0) }
+  }
+
   /// 只在不可成为 key 的屏外窗口中检查布局，背景使用当前系统窗口色。
   private func enhancement(_ view: some View, size: NSSize, name: String, dark: Bool = false) throws
   {

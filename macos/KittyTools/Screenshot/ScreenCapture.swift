@@ -44,7 +44,8 @@ enum ScreenCapture {
 
   /// 截下所有屏幕。调用前先确认有「屏幕录制」授权（Permissions），否则每块屏幕会各弹一个系统框。
   /// 本 App 的窗口只留 keptOwnWindows 认下的，其余排除
-  static func freeze() async throws -> [Shot] {
+  static func freeze(includingCursor: Bool = false) async throws -> [Shot] {
+    let cursor = includingCursor ? try ScreenshotCursor.capture() : nil
     let content = try await SCShareableContent.excludingDesktopWindows(
       false, onScreenWindowsOnly: true)
     let own = ownWindows()
@@ -98,7 +99,10 @@ enum ScreenCapture {
     }
     defer { for task in tasks { task.cancel() } }
     var images: [CGImage] = []
-    for task in tasks { images.append(try await task.value) }
+    for (index, task) in tasks.enumerated() {
+      let image = try await task.value
+      images.append(try await cursor?.render(over: image, screen: jobs[index].0.frame) ?? image)
+    }
     return zip(jobs, images).map { job, image in
       let screen = job.0
       let origin = screen.frame.origin

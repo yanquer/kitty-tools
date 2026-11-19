@@ -41,7 +41,7 @@ struct SettingsListTests {
       pages == [
         .general, .clipboard, .launcher, .translate, .screenshot, .record, .notes, .reminders,
         .statusScreen, .launchpad, .dockPreview, .windowSwitcher, .windowLayout, .finderMenu,
-        .island, .hotkeys,
+        .island, .presentation, .hotkeys,
         .about,
       ])
     // 分组盖住每一页、和 allCases 同序
@@ -53,7 +53,7 @@ struct SettingsListTests {
           [.general], [.clipboard, .launcher, .translate], [.screenshot, .record],
           [
             .notes, .reminders, .statusScreen, .dockPreview, .windowSwitcher, .windowLayout,
-            .finderMenu, .island,
+            .finderMenu, .island, .presentation,
           ],
           [.hotkeys, .about],
         ])
@@ -68,7 +68,7 @@ struct SettingsListTests {
         [
           .notes, .reminders, .statusScreen, .launchpad, .dockPreview, .windowSwitcher,
           .windowLayout, .finderMenu,
-          .island,
+          .island, .presentation,
         ],
         [.hotkeys, .about], [.translate, .record],
       ])

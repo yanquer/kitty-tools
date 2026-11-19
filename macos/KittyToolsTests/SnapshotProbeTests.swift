@@ -625,6 +625,7 @@ struct SnapshotProbeTests {
       case .dockPreview: AnyView(DockPreviewTab(missing: []))
       case .windowSwitcher: AnyView(WindowSwitcherTab())
       case .windowLayout: AnyView(WindowLayoutTab(center: HotKeyCenter()))
+      case .presentation: AnyView(PresentationTab(canvas: PresentationCanvas(), toggle: {}))
       case .finderMenu: AnyView(FinderMenuTab(extensionEnabled: false))
       case .translate:
         AnyView(TranslateTab(services: services, history: history, speaker: speaker))

@@ -212,7 +212,7 @@ class HUDBar: PopView {
 
 final class EditorToolbar: PopView {
   /// 用在哪儿：截图框选的调整阶段（完整），或长截图的标注窗口（右段只有识字和出图，拍板 C1）
-  enum Mode { case capture, longShot }
+  enum Mode { case capture, longShot, pinShot }
 
   enum Item: Equatable {
     case tool(Annotation.Tool)
@@ -237,8 +237,10 @@ final class EditorToolbar: PopView {
   /// 当前工具的粉色底块（全 App 唯一一处强调色填满的块），在工具间滑动
   private let toolHighlight = CALayer()
   private var state: (tool: Annotation.Tool?, canUndo: Bool, canRedo: Bool)?
+  private let mode: Mode
 
   init(mode: Mode = .capture) {
+    self.mode = mode
     super.init(frame: .zero)
     wantsLayer = true
     // (item, 符号, 旁白名字, 悬停提示)
@@ -251,6 +253,10 @@ final class EditorToolbar: PopView {
         (.redo, "arrow.uturn.forward", "重做", "重做"),
       ],
     ]
+    let primary: Spec =
+      mode == .pinShot
+      ? (.output(.pin), "checkmark", "应用到钉图", "应用到钉图（↩）")
+      : (.output(.copy), "checkmark", "拷贝", "拷贝（↩）")
     let right: [[Spec]] = [
       ([
         (.output(.recognize), "text.viewfinder", "识字并拷贝", "识字并拷贝"),
@@ -273,7 +279,7 @@ final class EditorToolbar: PopView {
         (.output(.save), "square.and.arrow.down", "存储", "存储"),
         (.saveMenu, "chevron.down", "更多存储选项", "更多存储选项"),
       ],
-      [(.cancel, "xmark", "取消", "取消（Esc）"), (.output(.copy), "checkmark", "拷贝", "拷贝（↩）")],
+      [(.cancel, "xmark", "取消", "取消（Esc）"), primary],
     ]
     tools.install(makeButtons(left))
     outputs.install(makeButtons(right))
@@ -317,17 +323,19 @@ final class EditorToolbar: PopView {
         let size: CGSize =
           switch item {
           case .output(.copy): CGSize(width: 28, height: 28)
+          case .output(.pin) where mode == .pinShot: CGSize(width: 28, height: 28)
           case .output(.save): CGSize(width: 30, height: 32)
           case .saveMenu: CGSize(width: 14, height: 32)
           default: CGSize(width: 32, height: 32)
           }
         let button = barButton(
           NSImage(systemSymbolName: symbol, accessibilityDescription: label)!,
-          tip: Self.shotKey(for: item) == nil ? tip : Self.tip(for: item, name: label),
+          tip: mode == .pinShot && item == .output(.pin)
+            ? tip : (Self.shotKey(for: item) == nil ? tip : Self.tip(for: item, name: label)),
           label: label, action: #selector(clicked(_:)), size: size)
         button.tag = buttons.count
         switch item {
-        case .output(.copy):
+        case .output(.pin) where mode == .pinShot, .output(.copy):
           // 拷贝：28 pt 强调色实心圆 + 对勾（主按钮），不出悬停底
           button.showsHover = false
           button.layer?.backgroundColor = Style.Shot.accent.cgColor

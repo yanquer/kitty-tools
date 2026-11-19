@@ -378,6 +378,16 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
     recordUndo(from: before)
   }
 
+  /// 需要应用到既有钉图时保留合成失败，不用原图冒充编辑结果。
+  func composedStrictly() -> CGImage? {
+    endEditing()
+    guard !annotations.isEmpty else { return image }
+    return Annotation.render(
+      annotations, over: image,
+      pixelRect: CGRect(x: 0, y: 0, width: image.width, height: image.height), viewSize: bounds.size
+    )
+  }
+
   /// 合成好的长图：没画标注就是原图（拍板 C2，很长的图重渲一张峰值内存翻倍）
   func composed() -> CGImage {
     endEditing()

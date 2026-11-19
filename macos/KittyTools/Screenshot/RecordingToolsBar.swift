@@ -9,6 +9,9 @@ final class RecordingToolsBar: NSView, NSWindowDelegate {
   let optionsPanel: NSPanel
   var onDismissOptions: () -> Void = {}
   var onAction: (RecordingTools.Action) -> Void = { _ in }
+  private let isPresentation: Bool
+  private var boardButton: ToggleButton?
+  var onWhiteboard: () -> Void = {}
   private let body = HUDBar(radius: Style.Radius.panel, height: 40, blending: .behindWindow)
   private let parameterBar = HUDBar(radius: Style.Radius.card, height: 34, blending: .behindWindow)
   private let parameterRoot = NSView()
@@ -49,7 +52,8 @@ final class RecordingToolsBar: NSView, NSWindowDelegate {
   private static let margin: CGFloat = 16
 
   /// 只构建工具窗口，present 才上屏；所有按钮不拿第一响应者。
-  init() {
+  init(presentation: Bool = false) {
+    isPresentation = presentation
     panel = NSPanel(
       contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered,
       defer: true)
@@ -76,7 +80,7 @@ final class RecordingToolsBar: NSView, NSWindowDelegate {
     update(RecordingTools(), escapes: false)
     setAccessibilityElement(true)
     setAccessibilityRole(.group)
-    setAccessibilityLabel("录屏讲解工具")
+    setAccessibilityLabel(isPresentation ? "演示画布工具" : "录屏讲解工具")
     panel.delegate = self
   }
 
@@ -111,6 +115,7 @@ final class RecordingToolsBar: NSView, NSWindowDelegate {
       modes[mode] = button
       return button
     }
+    if isPresentation { views.append(makeWhiteboardButton()) }
     views.append(barSeparator())
     for mode in [RecordingTools.Focus.halo, .spotlight] {
       let button = ToggleButton()
@@ -129,11 +134,31 @@ final class RecordingToolsBar: NSView, NSWindowDelegate {
     clear.contentTintColor = Style.HUD.danger
     let close = barButton(
       NSImage(systemSymbolName: "xmark", accessibilityDescription: nil)!,
-      tip: "收起工具箱并返回操作窗口，保留标注", action: #selector(closeClicked))
+      tip: isPresentation ? "结束演示" : "收起工具箱并返回操作窗口，保留标注", action: #selector(closeClicked))
     views += [barSeparator(), undo, clear, barSeparator(), close]
     expandedControls = views
     rebuildToolbar()
   }
+
+  /// 白板入口只出现在独立演示，录屏工具栏的布局与行为保持原样。
+  private func makeWhiteboardButton() -> NSView {
+    let button = ToggleButton()
+    button.target = self
+    button.action = #selector(whiteboardClicked)
+    boardButton = button
+    setWhiteboard(false)
+    return button
+  }
+
+  /// 同步白板选择状态与可访问性文案。
+  func setWhiteboard(_ enabled: Bool) {
+    boardButton?.show("rectangle.inset.filled", on: enabled, animated: false)
+    boardButton?.describe = { enabled ? "关闭白板，返回桌面标注" : "白板" }
+    boardButton?.setAccessibilityValue(enabled ? "已开启" : "已关闭")
+  }
+
+  /// 白板状态由所属演示会话统一管理。
+  @objc private func whiteboardClicked() { onWhiteboard() }
 
   /// 两种布局共享拖动把手和折叠按钮，普通工具在展开状态挂回同一套控件。
   private func rebuildToolbar() {
@@ -219,7 +244,7 @@ final class RecordingToolsBar: NSView, NSWindowDelegate {
     optionsPanel.contentView = parameterRoot
     parameterRoot.setAccessibilityElement(true)
     parameterRoot.setAccessibilityRole(.group)
-    parameterRoot.setAccessibilityLabel("录屏工具参数")
+    parameterRoot.setAccessibilityLabel(isPresentation ? "演示工具参数" : "录屏工具参数")
   }
 
   /// 同步选择状态，操作说明保留在工具提示和无障碍帮助中。
@@ -269,7 +294,10 @@ final class RecordingToolsBar: NSView, NSWindowDelegate {
     }
     undo.isEnabled = state.canUndo
     clear.isEnabled = state.canUndo
-    setAccessibilityHelp(state.isDrawing ? "\(state.mode.title)，\(exitHint)" : "操作窗口，标注会录入视频")
+    setAccessibilityHelp(
+      state.isDrawing
+        ? "\(state.mode.title)，\(exitHint)"
+        : (isPresentation ? "操作窗口，使用关闭按钮结束演示" : "操作窗口，标注会录入视频"))
     arrangeOptions()
     arrange()
   }
@@ -474,6 +502,7 @@ final class RecordingToolsBar: NSView, NSWindowDelegate {
     if closesAfterHide, animated { return }
     closesAfterHide = true
     onDismissOptions = {}
+    onWhiteboard = {}
     onAction = { _ in }
     let fading =
       animated && (isShown || layer?.animation(forKey: Self.visibilityAnimationKey) != nil)
@@ -586,6 +615,9 @@ final class RecordingToolsBar: NSView, NSWindowDelegate {
 
   /// 返回画图工具按钮供屏外测试核对选择和回调。
   func button(for mode: RecordingTools.Mode) -> NSButton? { modes[mode] }
+  /// 返回演示专用白板按钮，录屏模式没有此入口。
+  func whiteboardButton() -> NSButton? { boardButton }
+
   /// 返回鼠标效果按钮，关闭状态由再次点击当前效果表达。
   func focusButton(for focus: RecordingTools.Focus) -> NSButton? { focuses[focus] }
   /// 选择画图工具或操作窗口。

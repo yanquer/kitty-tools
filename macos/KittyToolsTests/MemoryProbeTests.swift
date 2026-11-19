@@ -812,6 +812,7 @@ private final class Probe {
         case .dockPreview: AnyView(DockPreviewTab())
         case .windowSwitcher: AnyView(WindowSwitcherTab())
         case .windowLayout: AnyView(WindowLayoutTab(center: hotKeys))
+        case .presentation: AnyView(PresentationTab(canvas: PresentationCanvas(), toggle: {}))
         case .finderMenu: AnyView(FinderMenuTab(extensionEnabled: false))
         case .translate:
           AnyView(TranslateTab(services: services, history: history, speaker: speaker))

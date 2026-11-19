@@ -565,6 +565,9 @@ struct ShortcutsSheet: View {
           Entry("⌘C", text: "拷贝"),
           Entry("O", text: "识字并拷贝（翻译在右键菜单里）"),
           Entry("⇧O", text: "查看识字结果"),
+          Entry("⌘E", text: "继续标注，应用后更新当前钉图"),
+          Entry("⌘Z", text: "进入或退出局部放大"),
+          Entry("拖动", "⌥ 拖动", text: "局部放大时：查看细节 / 移动钉图；复制与保存保留完整图片"),
           Entry("⌘S", text: "快速保存"),
           Entry("⇧⌘S", text: "另存为…"),
           Entry("⌘0", text: "原始大小（滚轮、捏合缩放）"),
@@ -730,6 +733,14 @@ struct ShortcutsSheet: View {
             text: "点刘海或在刘海上两指往下滑：打开——刘海两边挂着东西时是它的卡片，再往下滑一次轮到下一个，最后是快捷动作",
             needs: .island),
           Entry(text: "鼠标挪到弹出的提示上：停住、展开看全文和按钮；在岛上双指往上滑收起"),
+        ]),
+      Group(
+        title: "演示画布", symbol: "pencil.and.outline", color: Style.Family.screenshot,
+        globals: [.presentation],
+        entries: [
+          Entry("Esc", text: "绘图时返回操作窗口，已有标注保留"),
+          Entry(text: "工具栏白板按钮切换背景，选择操作窗口会收起白板"),
+          Entry(text: "关闭按钮或再次执行演示画布：结束演示并清除本次标注"),
         ]),
       // 主界面（2026-10-29，Shell/HomePanel.swift 的 Home.key / Home.command）：不属于哪个功能，一直列
       Group(

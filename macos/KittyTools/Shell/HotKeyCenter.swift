@@ -172,6 +172,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
     reminderNew, windowSwitch, windowSwitchPrevious, appWindowSwitch, appWindowSwitchPrevious
   case windowLayoutPicker
   case windowLayout(WindowLayoutAction)
+  case presentation
 
   /// 保留旧动作的 Carbon 编号，新窗口动作只追加在末尾。
   static let allCases: [Self] =
@@ -183,7 +184,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
       .home, .reminderNew, .windowSwitch, .windowSwitchPrevious, .appWindowSwitch,
       .appWindowSwitchPrevious,
       .windowLayoutPicker,
-    ] + WindowLayoutAction.allCases.map(Self.windowLayout)
+    ] + WindowLayoutAction.allCases.map(Self.windowLayout) + [.presentation]
 
   /// 稳定存储名兼容已有快捷键、命令别名和设置文件。
   var rawValue: String {
@@ -209,6 +210,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
     case .island: "island"
     case .clothesline: "clothesline"
     case .home: "home"
+    case .presentation: "presentation"
     case .reminderNew: "reminderNew"
     case .windowSwitch: "windowSwitch"
     case .windowSwitchPrevious: "windowSwitchPrevious"
@@ -259,6 +261,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
     case .launchpad: "启动台"
     case .island: "打开刘海岛"
     case .home: "打开主界面"
+    case .presentation: "演示画布"
     case .reminderNew: "新建提醒"
     case .windowSwitch: "切换窗口"
     case .windowSwitchPrevious: "反向切换窗口"
@@ -337,6 +340,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
     case .island: nil
     // 主界面（2026-10-29）：主入口是点菜单栏图标，键给把图标藏起来的人自己设
     case .home: nil
+    case .presentation: nil
     case .windowSwitch: HotKey(keyCode: kVK_Tab, modifiers: optionKey)
     case .windowSwitchPrevious: HotKey(keyCode: kVK_Tab, modifiers: optionKey | shiftKey)
     case .appWindowSwitch: HotKey(keyCode: kVK_ANSI_Grave, modifiers: optionKey)
@@ -419,6 +423,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
     // 「打开刘海岛」2026-11-13 起归刘海岛插件（原来 nil、一直在）；岛上的提示不归它
     case .island: .island
     case .home: nil
+    case .presentation: .presentation
     }
   }
 
@@ -454,6 +459,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
     ("窗口管理", [.windowLayoutPicker] + WindowLayoutAction.allCases.map(Self.windowLayout)),
     // 刘海岛（2026-10-26）：2026-11-13 起归刘海岛插件，没添加时不列
     ("刘海岛", [.island]),
+    ("演示画布", [.presentation]),
     // 主界面（2026-10-29）：不属于哪个功能、一直在；菜单栏菜单里不列（菜单就是图标的另一半），主界面里也不列它自己
     ("主界面", [.home]),
   ]
@@ -512,6 +518,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
     case .island: "kitty.island"
     // 从菜单栏垂下来的那一块
     case .home: "kitty.home"
+    case .presentation: "pencil.and.outline"
     case .windowSwitch, .windowSwitchPrevious, .appWindowSwitch, .appWindowSwitchPrevious:
       "rectangle.on.rectangle"
     case .windowLayoutPicker, .windowLayout: "rectangle.split.2x2"
@@ -537,6 +544,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
     case .reminderNew: Style.Family.reminders
     case .windowLayoutPicker, .windowLayout: Style.Family.dockPreview
     case .island, .home: Style.Family.general
+    case .presentation: Style.Family.screenshot
     }
   }
 }
@@ -820,11 +828,15 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
     failures[action] == Self.needsAccessibility
   }
 
+  /// 演示绘图独占临时 Esc；其他会话优先转发给自家浮层。
+  private var escapeForwardsToPanels = true
+
   /// 录屏倒数期间临时抢一个不带修饰键的 Esc（mac-overlay-panel §4）：录制 HUD 永不当 key，按键到不了它。只在倒数那几秒
   /// 挂着，倒数结束 / 取消 / 开录立刻 unregisterEscape（挂着时别的 App 都收不到 Esc）。本 App 自己的面板拿着键盘时
   /// 这一下交给它、不回调（escapePressed）。返回 false = 没注册上（记一条日志，只能用录屏快捷键或 HUD 的 ✕ 取消）
+  /// 演示画布可优先接收 Esc，其他调用继续先转发给自家浮层。
   @discardableResult
-  func registerEscape(_ handler: @escaping () -> Void) -> Bool {
+  func registerEscape(forwardingToPanels: Bool = true, _ handler: @escaping () -> Void) -> Bool {
     unregisterEscape()
     installHandlerIfNeeded()
     var ref: EventHotKeyRef?
@@ -836,6 +848,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
       return false
     }
     escapeRef = ref
+    escapeForwardsToPanels = forwardingToPanels
     onEscape = handler
     return true
   }
@@ -843,6 +856,7 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
   func unregisterEscape() {
     if let escapeRef { UnregisterEventHotKey(escapeRef) }
     escapeRef = nil
+    escapeForwardsToPanels = true
     onEscape = nil
   }
 
@@ -885,6 +899,10 @@ enum HotKeyAction: Hashable, CaseIterable, RawRepresentable {
   /// 照常派发（和真按键同一条路：本地监听、performKeyEquivalent、第一响应者），不回调；别的 App 或设置窗（NSWindow）在前台时
   /// 才回调（取消倒数）
   private func escapePressed() {
+    if !escapeForwardsToPanels {
+      onEscape?()
+      return
+    }
     guard let panel = NSApp.keyWindow as? NSPanel,
       let escape = NSEvent.keyEvent(
         with: .keyDown, location: .zero, modifierFlags: [],

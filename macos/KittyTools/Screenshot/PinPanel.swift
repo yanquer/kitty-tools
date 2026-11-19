@@ -26,12 +26,20 @@ import UniformTypeIdentifiers
     _, _, _ in
   }
 
+  /// 继续标注由 AppDelegate 接到同一套标注遮罩。
+  @ObservationIgnored var edit: (PinPanel) -> Void = { _ in }
+
   /// frame：截图时选区的位置（点，全局坐标）。钉图不抢键盘、VoiceOver 的焦点不在它上面：主动播报
-  func pin(_ image: CGImage, frame: CGRect) {
+  func pin(
+    _ image: CGImage, frame: CGRect, original: CGImage? = nil,
+    annotations: [Annotation] = [], scale: CGFloat? = nil
+  ) {
     // 钉图归截图这个功能（Feature）：关着时哪条路过来（剪贴板、角落的缩略图…）都不钉，入口那边也藏了
     guard Feature.screenshot.isOn else { return }
     if isHidden { toggleHidden() }
-    let panel = PinPanel(image: image, frame: frame, board: self)
+    let panel = PinPanel(
+      image: image, frame: frame, board: self, original: original,
+      annotations: annotations, scale: scale)
     panels.append(panel)
     panel.popIn()
     Island.announce("已钉到屏幕")
@@ -249,7 +257,21 @@ extension PinBoard {
 
 /// 一张钉图。无边框窗口默认当不了 key（收不到 Esc / ⌘C），所以要子类化
 final class PinPanel: NSPanel {
-  init(image: CGImage, frame: CGRect, board: PinBoard) {
+  let original: CGImage
+  let editingScale: CGFloat
+  /// 输出沿用钉上时的显示倍率，与查看取景和编辑坐标倍率分别保存。
+  let outputScale: CGFloat
+  private(set) var annotations: [Annotation]
+
+  /// 保留原图与可编辑标注，显示与输出仍使用合成图。
+  init(
+    image: CGImage, frame: CGRect, board: PinBoard, original: CGImage? = nil,
+    annotations: [Annotation] = [], scale: CGFloat? = nil
+  ) {
+    self.original = original ?? image
+    self.annotations = annotations
+    outputScale = CGFloat(image.width) / max(frame.width, 1)
+    editingScale = scale ?? outputScale
     // styleMask 必须在 init 里一次写全：.nonactivatingPanel 初始化后再加不生效
     super.init(
       contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered,
@@ -268,6 +290,15 @@ final class PinPanel: NSPanel {
     initialFirstResponder = view
     setFrame(frame, display: false)
   }
+
+  /// 应用标注时只更新当前钉图，不新建副本，也不改动当前窗口位置。
+  func applyEdits(image: CGImage, annotations: [Annotation]) {
+    self.annotations = annotations
+    (contentView as? PinView)?.replaceImage(image)
+  }
+
+  /// 当前合成图供编辑完成后的完整性验证与输出使用。
+  var image: CGImage? { (contentView as? PinView)?.image }
 
   override var canBecomeKey: Bool { true }
   override var canBecomeMain: Bool { false }
@@ -386,7 +417,9 @@ final class PinPanel: NSPanel {
 }
 
 private final class PinView: NSView {
-  let image: CGImage
+  private(set) var image: CGImage
+  private var localZoom = PinZoom()
+  private var panStart: (point: CGPoint, center: CGPoint)?
   /// 钉上时的大小（点）：缩放的基准
   private let originalSize: CGSize
   private unowned let board: PinBoard
@@ -498,7 +531,11 @@ private final class PinView: NSView {
   override var wantsUpdateLayer: Bool { true }
 
   override func updateLayer() {
-    layer?.contents = image
+    let crop = RegionSelector.pixelRect(
+      localZoom.viewport,
+      viewSize: CGSize(width: 1, height: 1),
+      imageSize: CGSize(width: image.width, height: image.height))
+    layer?.contents = localZoom.isEnabled ? image.cropping(to: crop) : image
     layer?.cornerRadius = Style.Radius.card
     layer?.cornerCurve = .continuous
     layer?.masksToBounds = true
@@ -516,7 +553,31 @@ private final class PinView: NSView {
     if event.clickCount == 2 { return close() }
     panel?.finishPopIn()
     window?.makeKey()  // 点过之后 Esc、⌘C 才归它
+    if localZoom.isEnabled, !event.modifierFlags.contains(.option) {
+      panStart = (convert(event.locationInWindow, from: nil), localZoom.center)
+      return
+    }
     window?.performDrag(with: event)
+  }
+
+  /// 局部放大时拖动取景；按住 ⌥ 的拖动仍由系统移动整个窗口。
+  override func mouseDragged(with event: NSEvent) {
+    guard let panStart else { return super.mouseDragged(with: event) }
+    let point = convert(event.locationInWindow, from: nil)
+    localZoom.pan(
+      from: panStart.center,
+      by: CGSize(width: point.x - panStart.point.x, height: point.y - panStart.point.y),
+      viewSize: bounds.size)
+    needsDisplay = true
+  }
+
+  /// 松开只结束本次取景拖动。
+  override func mouseUp(with event: NSEvent) { panStart = nil }
+
+  /// 更换合成图时保留查看倍率，下一次重画使用新内容。
+  func replaceImage(_ image: CGImage) {
+    self.image = image
+    needsDisplay = true
   }
 
   override func scrollWheel(with event: NSEvent) {
@@ -531,6 +592,15 @@ private final class PinView: NSView {
   private func zoom(by factor: CGFloat) {
     guard let window, factor.isFinite, factor > 0 else { return }
     panel?.finishPopIn()
+    if localZoom.isEnabled {
+      let point = convert(NSEvent.mouseLocation, from: nil)
+      localZoom.zoom(
+        by: factor,
+        at: CGPoint(x: point.x / max(bounds.width, 1), y: point.y / max(bounds.height, 1)))
+      needsDisplay = true
+      showZoom(localZoom.magnification)
+      return
+    }
     let frame = window.frame
     let minimum = max(min(1, max(0.1, 24 / originalSize.width)), min(1, 24 / originalSize.height))
     let scale = min(max(frame.width / originalSize.width * factor, minimum), 5)
@@ -619,6 +689,13 @@ private final class PinView: NSView {
         title: "另存为…", key: "s", keyCode: kVK_ANSI_S, modifiers: [.command, .shift],
         action: #selector(saveImageAs)),
       Command(
+        title: "继续标注", key: "e", keyCode: kVK_ANSI_E, modifiers: .command,
+        action: #selector(editImage)),
+      Command(
+        title: localZoom.isEnabled ? "退出局部放大" : "局部放大", key: "z", keyCode: kVK_ANSI_Z,
+        modifiers: .command,
+        action: #selector(toggleLocalZoom)),
+      Command(
         title: "原始大小", key: "0", keyCode: kVK_ANSI_0, modifiers: .command,
         action: #selector(actualSize)),
       Command(
@@ -642,9 +719,13 @@ private final class PinView: NSView {
     let opacity = NSMenuItem(title: "透明度", action: nil, keyEquivalent: "")
     opacity.submenu = opacityMenu()
     menu.addItem(opacity)
-    menu.addItem(items[6])
+    for item in items[6..<9] { menu.addItem(item) }
+    if let zoomItem = menu.items.first(where: { $0.action == #selector(toggleLocalZoom) }) {
+      zoomItem.state = localZoom.isEnabled ? .on : .off
+      zoomItem.toolTip = "固定窗口大小，滚轮放大、拖动查看；⌥ 拖动移动窗口。复制与保存保留完整图片。"
+    }
     menu.addItem(.separator())
-    menu.addItem(items[7])
+    menu.addItem(items[9])
     return menu
   }
 
@@ -658,6 +739,7 @@ private final class PinView: NSView {
     let size = window?.frame.size ?? bounds.size
     let percent = Int(((panel?.opacity ?? 1) * 100).rounded())
     return "\(Int(size.width.rounded())) × \(Int(size.height.rounded())) 点，透明度 \(percent)%"
+      + (localZoom.isEnabled ? "，局部放大 \(Int(localZoom.magnification * 100))%" : "")
   }
 
   override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
@@ -668,6 +750,17 @@ private final class PinView: NSView {
         MainActor.assumeIsolated { NSApp.sendAction(action, to: self, from: nil) }
       }
     }
+  }
+
+  /// 打开现有标注遮罩；是否应用由用户在遮罩中确认。
+  @objc private func editImage() { if let panel { board.edit(panel) } }
+
+  /// 查看模式只改变取景，不改变复制、识字和保存所用的完整图像。
+  @objc private func toggleLocalZoom() {
+    localZoom.toggle()
+    panStart = nil
+    needsDisplay = true
+    Island.announce(localZoom.isEnabled ? "局部放大：滚轮放大、拖动查看，⌥ 拖动移动窗口" : "已显示完整图片")
   }
 
   @objc private func copyImage() { board.output(.copy, image, scale) }
@@ -697,6 +790,8 @@ private final class PinView: NSView {
 
   /// 回到钉上时的大小，左上角不动
   @objc private func actualSize() {
+    localZoom = PinZoom()
+    needsDisplay = true
     guard let window else { return }
     panel?.finishPopIn()
     let frame = window.frame
