@@ -130,8 +130,13 @@ nonisolated enum ShotComposition {
       let height = properties[kCGImagePropertyPixelHeight] as? NSNumber,
       width.doubleValue > 0, height.doubleValue > 0
     else { throw Failure(message: "无法读取图片（\(label)），文件可能已移走或损坏") }
+    let orientation = properties[kCGImagePropertyOrientation] as? Int ?? 1
+    let swapsAxes = (5...8).contains(orientation)
     return Source(
-      id: id, url: url, size: CGSize(width: width.doubleValue, height: height.doubleValue),
+      id: id, url: url,
+      size: CGSize(
+        width: swapsAxes ? height.doubleValue : width.doubleValue,
+        height: swapsAxes ? width.doubleValue : height.doubleValue),
       label: label,
       thumbnail: CGImageSourceCreateThumbnailAtIndex(
         input, 0,
@@ -139,6 +144,7 @@ nonisolated enum ShotComposition {
           kCGImageSourceCreateThumbnailFromImageAlways: true,
           kCGImageSourceCreateThumbnailWithTransform: true,
           kCGImageSourceThumbnailMaxPixelSize: 120,
+          kCGImageSourceShouldCacheImmediately: true,
         ] as CFDictionary))
   }
 
@@ -196,7 +202,9 @@ nonisolated enum ShotComposition {
   @concurrent static func export(_ sources: [Source], options: Options, pdf: Bool, to target: URL)
     async throws
   {
-    guard (2...maximumCount).contains(sources.count) else { throw Failure(message: "请选择 2–20 张截图") }
+    guard (2...maximumCount).contains(sources.count) else {
+      throw Failure(message: "请选择 2–20 张静态图片")
+    }
     let operation = UUID().uuidString
     let temporary = target.deletingLastPathComponent().appending(
       path: ".kitty-compose-\(operation)")

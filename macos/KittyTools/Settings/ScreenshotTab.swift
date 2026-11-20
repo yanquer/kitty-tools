@@ -64,6 +64,13 @@ struct ScreenshotTab: View {
         Section {
           ShortcutsButton()
         } header: {
+          Text("图片处理")
+        } footer: {
+          SectionFootnote("从菜单栏、主界面或启动器选择「标注图片…」「标注剪贴板图片」或「拼图与 PDF」。仅接受静态图片，原文件保持不变；拼图可追加、替换和移除图片。")
+        }
+        Section {
+          ShortcutsButton()
+        } header: {
           Text("快捷截图")
         } footer: {
           SectionFootnote("从菜单栏「快捷截图」、主界面或启动器直接复制/存储前台窗口、当前屏幕和上次区域；各动作可单独设置全局快捷键，默认不占用按键。")

@@ -14,6 +14,7 @@ import AppKit
 import FinderSync
 import OSLog
 import SwiftUI
+import UniformTypeIdentifiers
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
   /// 数据打开之后才算跑起来，才做退出清理、才响应「再打开一次」：让位退出的重复实例、还停在「数据打不开」弹框上的
@@ -328,6 +329,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   /// 用时建立的识字结果与拼图面板，截图功能关闭时一并收起。
   private var recognitionPanel: RecognitionPanel?
   private var compositionPanel: ShotCompositionPanel?
+  /// 外部图片解码只保留最后一次请求，功能关闭时作废待返回结果。
+  private var imageImportTask: Task<Void, Never>?
+  private var imageImportGeneration = 0
+  private var imageOpenPanel: NSOpenPanel?
   /// 钉图（菜单栏显示「隐藏 / 关闭全部钉图」）
   lazy var pins: PinBoard = {
     let board = PinBoard()
@@ -1279,6 +1284,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       replaceTask = nil
     }
     if turnedOff.contains(.screenshot) {
+      cancelImageImport()
       recognitionPanel?.hide()
       compositionPanel?.hide()
       if !pins.panels.isEmpty { pins.closeAll() }
@@ -1461,6 +1467,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   func applicationWillTerminate(_ notification: Notification) {
+    cancelImageImport()
+    compositionPanel?.hide()
     builtWindowSwitcher?.stop()
     builtWindowLayout?.stop()
     builtPresentation?.stop()
@@ -1800,6 +1808,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     case .windowLayoutPicker: windowLayout.showPicker()
     case .presentation: presentation.toggle()
     case .quickScreenshot(let action): quickScreenshot(action)
+    case .imageEditFile: editExternalImage(fromClipboard: false)
+    case .imageEditClipboard: editExternalImage(fromClipboard: true)
+    case .imageCompose:
+      if compositionPanel == nil { compositionPanel = ShotCompositionPanel(history: shotHistory) }
+      compositionPanel?.showFiles()
     case .windowSwitch, .windowSwitchPrevious, .appWindowSwitch, .appWindowSwitchPrevious:
       if builtWindowSwitcher?.isOpen != true {
         builtClipboardPanel?.hide()
@@ -3009,6 +3022,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     island.show("这张图已经不在了", detail: "历史里的原图被清掉了", tone: .warning)
   }
 
+  /// 作废旧解码并关闭尚未结束的文件选择，不让功能关闭后旧请求重新打开遮罩。
+  private func cancelImageImport() {
+    imageImportGeneration &+= 1
+    imageImportTask?.cancel()
+    imageImportTask = nil
+    let panel = imageOpenPanel
+    imageOpenPanel = nil
+    panel?.cancel(nil)
+  }
+
+  /// 文件与剪贴板入口复用原生标注遮罩，只读取原图，输出仍走复制、快速保存或另存为。
+  private func editExternalImage(fromClipboard: Bool) {
+    guard !isCapturing, !isReadingSelection else {
+      return island.show("当前工具仍在处理", detail: "请稍后再打开图片", tone: .warning)
+    }
+    cancelImageImport()
+    let ticket = imageImportGeneration
+    let operation = UUID().uuidString
+    let clipboard = fromClipboard ? PinBoard.clipboardImage() : nil
+    imageImportTask = Task { [weak self] in
+      guard !Task.isCancelled, self?.imageImportGeneration == ticket else { return }
+      let source: PinBoard.Source
+      if fromClipboard {
+        guard let clipboard else {
+          self?.island.show("剪贴板里没有图片", detail: "请先复制图片或图片文件", tone: .warning)
+          Log.capture.notice(
+            "打开外部图片未执行 operation=\(operation, privacy: .public) stage=clipboard-empty")
+          return
+        }
+        source = clipboard
+      } else {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.title = "选择要标注的图片"
+        self?.imageOpenPanel = panel
+        let response = await FilePanel.begin(panel)
+        if self?.imageOpenPanel === panel { self?.imageOpenPanel = nil }
+        guard response == .OK, let url = panel.url else {
+          Log.capture.notice("打开外部图片取消 operation=\(operation, privacy: .public) stage=selection")
+          return
+        }
+        source = .file(url)
+      }
+      guard !Task.isCancelled, let self, imageImportGeneration == ticket,
+        Feature.screenshot.isOn
+      else { return }
+      let began = ContinuousClock.now
+      Log.capture.notice(
+        "打开外部图片开始 operation=\(operation, privacy: .public) clipboard=\(fromClipboard)")
+      do {
+        let image = try await ImageImport.decode(source)
+        guard !Task.isCancelled, imageImportGeneration == ticket, Feature.screenshot.isOn else {
+          return
+        }
+        hideUnpinnedPanels()
+        openAnnotate(image, scale: 1, name: "图片", strictOutput: true)
+        Log.capture.notice(
+          "打开外部图片完成 operation=\(operation, privacy: .public) width=\(image.width) height=\(image.height) elapsed=\(String(describing: began.duration(to: .now)), privacy: .public)"
+        )
+      } catch {
+        guard !Task.isCancelled, imageImportGeneration == ticket else { return }
+        Log.capture.error(
+          "打开外部图片失败 operation=\(operation, privacy: .public) cause=\(String(reflecting: error), privacy: .public)"
+        )
+        island.show("图片未打开", detail: error.localizedDescription, tone: .error)
+      }
+    }
+  }
+
   /// 同一张钉图在现有遮罩中继续标注，明确应用后才回写，取消时恢复原钉图。
   private func editPin(_ pin: PinPanel) {
     guard Feature.screenshot.isOn, pins.panels.contains(where: { $0 === pin }) else { return }
@@ -3047,11 +3131,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   /// history：它在历史里是哪一条（刚拼好的长截图是并行记的，出图时等它记完拿编号，R6）
   private func openAnnotate(
     _ image: CGImage, scale: CGFloat, history: (() async -> UUID?)? = nil,
-    annotations: [Annotation] = []
+    annotations: [Annotation] = [], name: String = "长截图", strictOutput: Bool = false
   ) {
     annotateOverlay?.close()
     let original = image
-    let editor = AnnotateOverlay(image: image, scale: scale, annotations: annotations) {
+    let editor = AnnotateOverlay(
+      image: image, scale: scale, annotations: annotations, strictOutput: strictOutput
+    ) {
       [unowned self] action, image, scale, annotations in
       // 改完的标注回写到历史那一条（拍板 C4：更新同一条，不新建），缩略图照这张成品缩、不再读原图重合成（R6）。
       // 新画的马赛克打进存下的原图（E6）：用遮罩里这张没画标注的，不再读盘。
@@ -3067,7 +3153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch action {
         case .copy:
           guard let copied = await copyImage(image, scale: scale) else { return }
-          island.show("已复制长截图", detail: copied.detail, leading: Island.thumbnail(of: image))
+          island.show("已复制\(name)", detail: copied.detail, leading: Island.thumbnail(of: image))
         case .save:
           guard let saved = await saveImage(image, scale: scale, asking: false) else { return }
           markSaved(remembered, at: saved.url)
@@ -3084,6 +3170,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
       }
     }
+    editor.onProblem = { [weak self] in self?.island.show("标注未输出", detail: $0, tone: .error) }
     editor.onClose = { [weak self] in self?.annotateOverlay = nil }
     annotateOverlay = editor
     editor.show()

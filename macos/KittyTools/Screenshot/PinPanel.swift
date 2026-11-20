@@ -297,6 +297,7 @@ final class PinPanel: NSPanel {
   let outputScale: CGFloat
   private(set) var annotations: [Annotation]
   private(set) var isMiniature = false
+  private(set) var isLocked = false
   var isEditing = false
   private var expandedFrame: CGRect?
 
@@ -328,9 +329,19 @@ final class PinPanel: NSPanel {
     setFrame(frame, display: false)
   }
 
+  /// 锁定只防止误操作，右键、复制、解锁和明确关闭入口始终保留。
+  func setLocked(_ locked: Bool) {
+    guard locked != isLocked else { return }
+    finishPopIn()
+    isLocked = locked
+    (contentView as? PinView)?.lockChanged()
+    Log.capture.notice("钉图锁定变化 window=\(self.windowNumber) locked=\(locked)")
+    Island.announce(locked ? "钉图已锁定，可从右键菜单或 ⌘L 解锁" : "钉图已解锁")
+  }
+
   /// 小卡片固定为 96×64 点，展开时恢复先前大小，并以当前位置的左上角为锚点。
   func setMiniature(_ miniature: Bool) {
-    guard miniature != isMiniature else { return }
+    guard !isLocked, miniature != isMiniature else { return }
     finishPopIn()
     isMiniature = miniature
     if miniature {
@@ -495,8 +506,9 @@ private final class PinView: NSView {
   private let originalSize: CGSize
   private unowned let board: PinBoard
 
-  /// 悬停后右上角的两个圆钮（透明度、关闭）：15 就是按钮栈，macOS 26 是包着它的玻璃容器（两块相邻的玻璃共用取样）
+  /// 悬停后右上角的三个圆钮（透明度、锁定、关闭）：15 使用按钮栈，26 使用同一玻璃容器共用取样。
   private let controls: NSView
+  private var lockButton: NSButton?
   /// 缩放时中央的百分比
   private let zoomHUD = HUDBar(radius: Style.Radius.control, height: 26)
   private let zoomLabel = NSTextField(labelWithString: "")
@@ -524,12 +536,16 @@ private final class PinView: NSView {
       barButton(
         NSImage(systemSymbolName: "circle.lefthalf.filled", accessibilityDescription: "透明度")!,
         tip: "透明度", action: #selector(showOpacity(_:)), size: CGSize(width: side, height: side)))
+    let locking = barButton(
+      NSImage(systemSymbolName: "lock.open", accessibilityDescription: "锁定钉图")!,
+      tip: "锁定钉图（⌘L）", action: #selector(toggleLock), size: CGSize(width: side, height: side))
+    lockButton = locking
     let close = circle(
       barButton(
         NSImage(systemSymbolName: "xmark", accessibilityDescription: "关闭")!, tip: "关闭",
         action: #selector(close), size: CGSize(width: side, height: side)))
     buttons.spacing = 6
-    buttons.setViews([opacity, close], in: .trailing)
+    buttons.setViews([opacity, circle(locking), close], in: .trailing)
     // 圆钮贴右上角、各让 6，百分比在 showZoom 里居中；之后窗口改尺寸（回弹、缩放、原始大小）都靠掩码跟着走。
     // 别挪进 layout() 里摆（issue #6）：布局阶段改带 autoresizing 约束的子视图 frame 会让约束失效（layout() 的文档不许）；
     // super.layout() 又把它们吸到像素格上，居中落在半点时 1x 屏上吸到整点、再摆回半点，来回到 AppKit 抛异常闪退
@@ -574,7 +590,7 @@ private final class PinView: NSView {
       try? await Task.sleep(for: .seconds(0.3))
       guard let self, self.hovering else { return }
       // 钉图太小时不放按钮（会盖住图）
-      guard self.bounds.width >= 64, self.bounds.height >= 34 else { return }
+      guard self.bounds.width >= 90, self.bounds.height >= 34 else { return }
       self.controls.isHidden = false
       self.fade(self.controls, in: true)
     }
@@ -625,6 +641,10 @@ private final class PinView: NSView {
   private var scale: CGFloat { CGFloat(image.width) / originalSize.width }
 
   override func mouseDown(with event: NSEvent) {
+    if panel?.isLocked == true {
+      window?.makeKey()
+      return
+    }
     if event.clickCount == 2 { return close() }
     panel?.finishPopIn()
     window?.makeKey()  // 点过之后 Esc、⌘C 才归它
@@ -637,6 +657,7 @@ private final class PinView: NSView {
 
   /// 局部放大时拖动取景；按住 ⌥ 的拖动仍由系统移动整个窗口。
   override func mouseDragged(with event: NSEvent) {
+    guard panel?.isLocked != true else { return }
     guard let panStart else { return super.mouseDragged(with: event) }
     let point = convert(event.locationInWindow, from: nil)
     localZoom.pan(
@@ -648,6 +669,19 @@ private final class PinView: NSView {
 
   /// 松开只结束本次取景拖动。
   override func mouseUp(with event: NSEvent) { panStart = nil }
+
+  /// 锁定时结束已有拖动并更新可见解锁按钮，不改变窗口位置或激活前台。
+  func lockChanged() {
+    panStart = nil
+    let locked = panel?.isLocked == true
+    let title = locked ? "解锁钉图" : "锁定钉图"
+    lockButton?.image = NSImage(
+      systemSymbolName: locked ? "lock.fill" : "lock.open", accessibilityDescription: title)
+    lockButton?.toolTip = title + "（⌘L）"
+    lockButton?.setAccessibilityLabel(title)
+    lockButton?.contentTintColor = locked ? Style.Shot.accent : Style.HUD.text
+    NSAccessibility.post(element: self, notification: .valueChanged)
+  }
 
   /// 更换合成图时保留查看倍率，下一次重画使用新内容。
   func replaceImage(_ image: CGImage) {
@@ -665,7 +699,9 @@ private final class PinView: NSView {
 
   /// 以鼠标为锚点缩放，保持宽高比：最小到原大的 10%、且宽高都不小于 24 点（原图本来更小就是原大），最大 5 倍
   private func zoom(by factor: CGFloat) {
-    guard panel?.isMiniature != true, let window, factor.isFinite, factor > 0 else { return }
+    guard panel?.isLocked != true, panel?.isMiniature != true, let window, factor.isFinite,
+      factor > 0
+    else { return }
     panel?.finishPopIn()
     if localZoom.isEnabled {
       let point = convert(NSEvent.mouseLocation, from: nil)
@@ -729,7 +765,9 @@ private final class PinView: NSView {
         $0.keyCode == Int(event.keyCode) && $0.modifiers == flags
       })
     else { return false }
-    if !event.isARepeat { NSApp.sendAction(command.action, to: self, from: nil) }
+    if !event.isARepeat, commandIsEnabled(command.action) {
+      NSApp.sendAction(command.action, to: self, from: nil)
+    }
     return true
   }
 
@@ -778,6 +816,9 @@ private final class PinView: NSView {
         title: isFocused ? "退出专注" : "专注这张钉图", key: "f", keyCode: kVK_ANSI_F, modifiers: .command,
         action: #selector(toggleFocus)),
       Command(
+        title: panel?.isLocked == true ? "解锁钉图" : "锁定钉图", key: "l", keyCode: kVK_ANSI_L,
+        modifiers: .command, action: #selector(toggleLock)),
+      Command(
         title: "原始大小", key: "0", keyCode: kVK_ANSI_0, modifiers: .command,
         action: #selector(actualSize)),
       Command(
@@ -785,13 +826,24 @@ private final class PinView: NSView {
     ]
   }
 
+  /// 锁定期间拒绝改变几何和编辑，复制、识字、透明度、专注、解锁与明确关闭仍可用。
+  private func commandIsEnabled(_ action: Selector) -> Bool {
+    guard panel?.isLocked == true else { return true }
+    return ![
+      #selector(editImage), #selector(toggleLocalZoom), #selector(toggleMiniature),
+      #selector(actualSize),
+    ].contains(action)
+  }
+
   override func menu(for event: NSEvent) -> NSMenu? {
     let menu = NSMenu()
+    menu.autoenablesItems = false
     let items = commands.map { command in
       let item = NSMenuItem(
         title: command.title, action: command.action, keyEquivalent: command.key)
       item.keyEquivalentModifierMask = command.modifiers
       item.target = self
+      item.isEnabled = commandIsEnabled(command.action)
       // 翻译这个功能关着（Feature）：藏起来（不从列表里拿掉——下面按位置分组）
       item.isHidden = command.action == #selector(translateImage) && !Feature.translate.isOn
       return item
@@ -801,19 +853,20 @@ private final class PinView: NSView {
     let opacity = NSMenuItem(title: "透明度", action: nil, keyEquivalent: "")
     opacity.submenu = opacityMenu()
     menu.addItem(opacity)
-    for item in items[6..<11] { menu.addItem(item) }
+    for item in items[6..<12] { menu.addItem(item) }
     if let zoomItem = menu.items.first(where: { $0.action == #selector(toggleLocalZoom) }) {
       zoomItem.state = localZoom.isEnabled ? .on : .off
       zoomItem.toolTip = "固定窗口大小，滚轮放大、拖动查看；⌥ 拖动移动窗口。复制与保存保留完整图片。"
     }
     for item in menu.items {
+      if item.action == #selector(toggleLock) { item.state = panel?.isLocked == true ? .on : .off }
       if item.action == #selector(toggleFocus) { item.state = isFocused ? .on : .off }
       if item.action == #selector(toggleMiniature) {
         item.state = panel?.isMiniature == true ? .on : .off
       }
     }
     menu.addItem(.separator())
-    menu.addItem(items[11])
+    menu.addItem(items[12])
     return menu
   }
 
@@ -830,10 +883,14 @@ private final class PinView: NSView {
       + (localZoom.isEnabled ? "，局部放大 \(Int(localZoom.magnification * 100))%" : "")
       + (panel?.isMiniature == true ? "，已收纳" : "")
       + (isFocused ? "，专注" : "")
+      + (panel?.isLocked == true ? "，已锁定" : "")
   }
 
   override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
-    commands.filter { $0.action != #selector(translateImage) || Feature.translate.isOn }.map {
+    commands.filter {
+      commandIsEnabled($0.action)
+        && ($0.action != #selector(translateImage) || Feature.translate.isOn)
+    }.map {
       command in
       let action = command.action
       return NSAccessibilityCustomAction(name: command.title) { [weak self] in
@@ -842,6 +899,9 @@ private final class PinView: NSView {
     }
   }
 
+  /// 快捷键、右键与旁白共享锁定入口，不使用点击穿透或额外全局热键。
+  @objc private func toggleLock() { if let panel { panel.setLocked(!panel.isLocked) } }
+
   /// 收纳仅改变查看方式，原始图片和编辑标注保留在同一对象中。
   @objc private func toggleMiniature() { if let panel { panel.setMiniature(!panel.isMiniature) } }
 
@@ -849,10 +909,11 @@ private final class PinView: NSView {
   @objc private func toggleFocus() { if let panel { board.toggleFocus(panel) } }
 
   /// 打开现有标注遮罩；是否应用由用户在遮罩中确认。
-  @objc private func editImage() { if let panel { board.edit(panel) } }
+  @objc private func editImage() { if let panel, !panel.isLocked { board.edit(panel) } }
 
   /// 查看模式只改变取景，不改变复制、识字和保存所用的完整图像。
   @objc private func toggleLocalZoom() {
+    guard panel?.isLocked != true else { return }
     panel?.setMiniature(false)
     localZoom.toggle()
     panStart = nil
@@ -887,6 +948,7 @@ private final class PinView: NSView {
 
   /// 回到钉上时的大小，左上角不动
   @objc private func actualSize() {
+    guard panel?.isLocked != true else { return }
     panel?.setMiniature(false)
     localZoom = PinZoom()
     needsDisplay = true

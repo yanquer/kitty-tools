@@ -40,6 +40,7 @@ import OSLog
   private let canvas: ScrollCanvas
   private let bar: EditorToolbar
   private let appliesToPin: Bool
+  private let strictOutput: Bool
   private let styleBar = StyleBar()
   /// 开着的 HUD 菜单（存储右边 ▾ 的、托盘上字号的；同时最多一个）：Esc、点外面先收它（同截图遮罩、长截图面板）
   private(set) var menu: HUDMenu?
@@ -55,13 +56,14 @@ import OSLog
   /// 坐标是这张图的点坐标）
   init(
     image: CGImage, scale: CGFloat, annotations: [Annotation] = [], screen: NSScreen? = nil,
-    appliesToPin: Bool = false,
+    appliesToPin: Bool = false, strictOutput: Bool = false,
     output: @escaping Output
   ) {
     self.image = image
     self.scale = scale
     self.output = output
     self.appliesToPin = appliesToPin
+    self.strictOutput = strictOutput
     bar = EditorToolbar(mode: appliesToPin ? .pinShot : .longShot)
     canvas = ScrollCanvas(image: image, scale: scale)
     let target =
@@ -383,10 +385,10 @@ import OSLog
       return Island.announce("正在打码，稍等再出图")
     }
     armedEscape = false
-    if appliesToPin {
+    if appliesToPin || strictOutput {
       guard let image = canvas.composedStrictly() else {
-        Log.capture.error("钉图编辑未应用：标注图像合成失败")
-        onProblem("标注合成失败，钉图保持原样，请重试")
+        Log.capture.error("图片标注未输出：图像合成失败")
+        onProblem("标注合成失败，原图保持原样，请重试")
         return
       }
       output(action, image, scale, canvas.annotations)

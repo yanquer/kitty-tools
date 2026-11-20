@@ -1540,6 +1540,47 @@ struct ScreenshotSnapshotTests {
     try shoot(pin, "pin-expanded")
   }
 
+  /// 图片导入与锁定钉图在假数据、屏外窗口中检查空态、长文件名、失败与浅深色。
+  @Test(.enabled(if: directory != nil)) func renderImageImport() throws {
+    let desktop = try Self.desktop()
+    for dark in [false, true] {
+      let empty = ShotCompositionModel()
+      try enhancement(
+        ShotCompositionView(model: empty), size: NSSize(width: 820, height: 620),
+        name: "image-import-empty", dark: dark)
+      let populated = ShotCompositionModel()
+      populated.preview = desktop
+      populated.sources = (1...5).map { index in
+        ShotComposition.Source(
+          id: UUID(), url: URL(filePath: "/tmp/fixture-\(index).png"),
+          size: CGSize(width: 1200, height: 800),
+          label: index == 1 ? "设计评审-第3版-包含非常长文件名的原始截图-2026年11月.png" : "参考图片 \(index).png",
+          thumbnail: desktop)
+      }
+      try enhancement(
+        ShotCompositionView(model: populated), size: NSSize(width: 820, height: 620),
+        name: "image-import-populated", dark: dark)
+      populated.error = "图片无法读取，原列表与预览保持不变。请检查文件是否完整及格式是否受支持。"
+      try enhancement(
+        ShotCompositionView(model: populated), size: NSSize(width: 720, height: 520),
+        name: "image-import-error-compact", dark: dark)
+    }
+    let board = PinBoard()
+    let pin = PinPanel(
+      image: desktop, frame: CGRect(x: -20000, y: -20000, width: 600, height: 400), board: board)
+    defer { pin.orderOut(nil) }
+    pin.setLocked(true)
+    let view = try #require(pin.contentView)
+    let hover = try #require(
+      NSEvent.enterExitEvent(
+        with: .mouseEntered, location: .zero, modifierFlags: [], timestamp: 0,
+        windowNumber: 0, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil))
+    try shoot(pin, "pin-locked") { view.mouseEntered(with: hover) }
+    for (index, hud) in referenceBars(in: view).enumerated() {
+      try shootContent(hud, "pin-locked-controls-\(index)")
+    }
+  }
+
   /// 查找桥接出的原生编辑器，只改变本次假文字，不发送系统键鼠。
   private func recognitionEditor(in view: NSView) -> RecognitionText? {
     if let editor = view as? RecognitionText { return editor }

@@ -209,7 +209,7 @@ struct ScreenshotExtensionTests {
     #expect(Feature.presentation.page == .presentation)
     #expect(HotKeyAction.presentation.feature == .presentation)
     #expect(HotKeyAction.presentation.defaultHotKey == nil)
-    #expect(HotKeyAction.allCases[HotKeyAction.allCases.count - 7] == .presentation)
+    #expect(HotKeyAction.allCases[HotKeyAction.allCases.count - 10] == .presentation)
     #expect(HotKeyAction(rawValue: "presentation") == .presentation)
     #expect(ShortcutsSheet.groups(enabled: []).allSatisfy { $0.page != .presentation })
     #expect(ShortcutsSheet.groups(enabled: [.presentation]).contains { $0.page == .presentation })

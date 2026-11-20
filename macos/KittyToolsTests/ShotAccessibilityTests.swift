@@ -121,7 +121,7 @@ struct ShotAccessibilityTests {
     #expect(
       actions.map(\.name) == [
         "拷贝", "识字并拷贝", "查看识字结果", "翻译", ScreenshotOutput.saveTitle, "另存为…", "继续标注", "局部放大", "收起为小卡片",
-        "专注这张钉图", "原始大小",
+        "专注这张钉图", "锁定钉图", "原始大小",
         "关闭",
       ])
     for action in actions.prefix(6) { #expect(action.handler?() == true) }

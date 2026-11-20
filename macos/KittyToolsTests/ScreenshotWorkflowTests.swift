@@ -2,8 +2,10 @@
 
 import AppKit
 import Carbon.HIToolbox
+import ImageIO
 import SwiftUI
 import Testing
+import UniformTypeIdentifiers
 
 @testable import KittyTools
 
@@ -197,7 +199,7 @@ struct ScreenshotWorkflowTests {
     #expect(QuickScreenshot.windowID(in: rows, pid: 77) == 3)
     #expect(QuickScreenshot.windowID(in: rows, pid: 99) == nil)
     let expected = QuickScreenshot.Action.allCases.map(HotKeyAction.quickScreenshot)
-    #expect(Array(HotKeyAction.allCases.suffix(expected.count)) == expected)
+    #expect(Array(HotKeyAction.allCases.dropLast(3).suffix(expected.count)) == expected)
     #expect(expected.allSatisfy { $0.feature == .screenshot && $0.defaultHotKey == nil })
     #expect(expected.allSatisfy { HotKeyAction(rawValue: $0.rawValue) == $0 })
   }
@@ -249,4 +251,266 @@ struct ScreenshotWorkflowTests {
     board.toggleHidden()
     #expect(second.isVisible && !second.isKeyWindow)
   }
+
+  /// 用真实 PNG 文件验证导入，不访问用户照片、系统剪贴板或屏幕。
+  private func importFixture() throws -> (directory: URL, files: [URL]) {
+    let directory = FileManager.default.temporaryDirectory.appending(
+      path: "kitty-import-test-" + UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+    let files = [directory.appending(path: "第一张.png"), directory.appending(path: "第二张.png")]
+    let data = try ScreenshotTests.encode(image(), as: .png)
+    for file in files { try data.write(to: file) }
+    return (directory, files)
+  }
+
+  /// 有界等待导入和预览任务完成，异步让出主线程，不创建可交互窗口。
+  private func settleImport(_ model: ShotCompositionModel) async throws {
+    for _ in 0..<250 {
+      if !model.preparing && !model.rendering { return }
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    Issue.record("导入或预览未在五秒内完成")
+  }
+
+  /// 复制成功后的源文件改变或删除，不会改变已经提交给预览与输出的图片。
+  @Test func importedSnapshotsAreImmutableAndOriginalsUntouched() async throws {
+    let fixture = try importFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let original = try Data(contentsOf: fixture.files[0])
+    let batch = try await ImageImport.snapshots(fixture.files)
+    defer { ImageImport.discard(batch.directory) }
+    #expect(batch.sources.count == 2 && batch.bytes == original.count * 2)
+    #expect(try Data(contentsOf: fixture.files[0]) == original)
+    try Data("外部文件后续改动".utf8).write(to: fixture.files[0])
+    try FileManager.default.removeItem(at: fixture.files[1])
+    for source in batch.sources {
+      #expect(try Data(contentsOf: source.url) == original)
+    }
+    let output = try await ShotComposition.render(batch.sources, options: .init())
+    #expect(output.width > 0 && output.height > 0)
+  }
+
+  /// EXIF 旋转后导入尺寸与解码方向一致，排版不会按未转正尺寸拉伸图片。
+  @Test func importedOrientationMatchesPreviewAndDecodedPixels() async throws {
+    let fixture = try importFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let rotated = fixture.directory.appending(path: "旋转方向.jpg")
+    try ScreenshotTests.encode(image(), as: .jpeg, properties: [kCGImagePropertyOrientation: 6])
+      .write(to: rotated)
+    let batch = try await ImageImport.snapshots([rotated])
+    defer { ImageImport.discard(batch.directory) }
+    let source = try #require(batch.sources.first)
+    let decoded = try await ImageImport.decode(.file(rotated))
+    #expect(source.size == CGSize(width: 100, height: 200))
+    #expect(decoded.width == 100 && decoded.height == 200)
+  }
+
+  /// 损坏、超额与非本机地址明确失败；取消不返回可采用的半批副本。
+  @Test func invalidImportsAndCancellationPreserveFailureReasons() async throws {
+    let fixture = try importFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let broken = fixture.directory.appending(path: "损坏.png")
+    try Data("invalid image".utf8).write(to: broken)
+    await #expect(throws: ImageImport.Failure.self) {
+      try await ImageImport.snapshots([fixture.files[0], broken])
+    }
+    await #expect(throws: ImageImport.Failure.self) {
+      try await ImageImport.snapshots([fixture.files[0]], remainingBytes: 1)
+    }
+    await #expect(throws: ImageImport.Failure.self) {
+      try await ImageImport.decode(.file(URL(string: "https://example.com/image.png")!))
+    }
+    let task = Task { try await ImageImport.snapshots(fixture.files) }
+    task.cancel()
+    await #expect(throws: CancellationError.self) { try await task.value }
+  }
+
+  /// 动画输入不能被静默截成第一帧；剪贴板图片数据也执行相同输入上限。
+  @Test func animatedAndOversizedClipboardImagesAreRejected() async throws {
+    let data = NSMutableData()
+    let target = try #require(
+      CGImageDestinationCreateWithData(data, UTType.gif.identifier as CFString, 2, nil))
+    let picture = try image()
+    CGImageDestinationAddImage(target, picture, nil)
+    CGImageDestinationAddImage(target, picture, nil)
+    try #require(CGImageDestinationFinalize(target))
+    await #expect(throws: ImageImport.Failure.self) {
+      try await ImageImport.decode(.data(data as Data))
+    }
+    let large = Data(count: ImageImport.maximumFileBytes + 1)
+    await #expect(throws: ImageImport.Failure.self) { try await ImageImport.decode(.data(large)) }
+  }
+
+  /// 追加、替换与移除保留顺序及稳定身份，失败不丢原列表，最后一项移除后回到可导入空态。
+  @Test func compositionImportMutationsAreAtomicAndKeepStableIdentity() async throws {
+    let fixture = try importFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let model = ShotCompositionModel()
+    defer { model.clear() }
+    model.importFiles([fixture.files[0]])
+    try await settleImport(model)
+    #expect(model.sources.count == 1 && model.preview != nil)
+    let first = try #require(model.sources.first)
+    model.importFiles([fixture.files[1]])
+    try await settleImport(model)
+    #expect(model.sources.count == 2 && model.sources[0].id == first.id)
+    model.importFiles([fixture.files[1]], replacing: first.id)
+    try await settleImport(model)
+    #expect(
+      model.sources[0].id == first.id
+        && model.sources[0].label == fixture.files[1].lastPathComponent)
+    #expect(model.sources[0].url != first.url)
+    let before = model.sources.map(\.url)
+    model.importFiles([fixture.files[0], fixture.directory.appending(path: "missing.png")])
+    try await settleImport(model)
+    #expect(model.sources.map(\.url) == before && model.error != nil && model.preview != nil)
+    let truncated = fixture.directory.appending(path: "只有文件头.png")
+    try Data(Data(contentsOf: fixture.files[0]).prefix(33)).write(to: truncated)
+    model.importFiles([fixture.files[0], truncated])
+    try await settleImport(model)
+    #expect(model.sources.map(\.url) == before && model.error != nil && model.preview != nil)
+    model.importFiles(Array(repeating: fixture.files[0], count: 20))
+    #expect(model.sources.count == 2 && model.error != nil && !model.preparing)
+    for id in model.sources.map(\.id) { model.remove(id) }
+    #expect(model.sources.isEmpty && model.preview == nil && !model.rendering && model.error == nil)
+    model.clear()
+    #expect(!FileManager.default.fileExists(atPath: first.url.path))
+    #expect(try Data(contentsOf: fixture.files[0]) == Data(contentsOf: fixture.files[1]))
+  }
+
+  /// 导入后立刻关闭，旧请求不得回填列表、预览或错误。
+  @Test func closingCompositionInvalidatesPendingImport() async throws {
+    let fixture = try importFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let model = ShotCompositionModel()
+    model.importFiles(fixture.files)
+    model.clear()
+    try await Task.sleep(for: .milliseconds(150))
+    #expect(model.sources.isEmpty && model.preview == nil && model.error == nil && !model.preparing)
+  }
+
+  /// 锁定不改图、不抢键盘，滚轮与捏合保持几何，菜单和旁白仍能解锁与明确关闭。
+  @Test func lockedPinKeepsGeometryAndExplicitExitActions() throws {
+    let board = PinBoard()
+    let pin = PinPanel(
+      image: try image(), frame: CGRect(x: -20000, y: -20000, width: 200, height: 100), board: board
+    )
+    let view = try #require(pin.contentView)
+    let frame = pin.frame
+    pin.setLocked(true)
+    pin.setMiniature(true)
+    #expect(pin.isLocked && pin.frame == frame && !pin.isMiniature)
+    let wheel = try #require(
+      CGEvent(
+        scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: 120, wheel2: 0,
+        wheel3: 0))
+    view.scrollWheel(with: try #require(NSEvent(cgEvent: wheel)))
+    #expect(pin.frame == frame && !pin.isKeyWindow)
+    let event = try #require(
+      NSEvent.mouseEvent(
+        with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0,
+        context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+    let menu = try #require(view.menu(for: event))
+    #expect(menu.items.first { $0.title == "解锁钉图" }?.state == .on)
+    #expect(menu.items.first { $0.title == "继续标注" }?.isEnabled == false)
+    #expect(menu.items.first { $0.title == "关闭" }?.isEnabled == true)
+    let actions = try #require(view.accessibilityCustomActions())
+    #expect(actions.contains { $0.name == "解锁钉图" } && actions.contains { $0.name == "关闭" })
+    #expect(!actions.contains { $0.name == "继续标注" })
+    let unlock = try #require(
+      NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: 0,
+        context: nil, characters: "l", charactersIgnoringModifiers: "l", isARepeat: false,
+        keyCode: UInt16(kVK_ANSI_L)))
+    view.keyDown(with: unlock)
+    #expect(!pin.isLocked && pin.frame == frame && !pin.isKeyWindow)
+  }
+
+  /// 图片处理动作只追加在既有 Carbon 身份后，入口归截图且默认不占按键。
+  @Test func imageProcessingActionsAppendWithoutChangingEarlierIdentities() {
+    let added: [HotKeyAction] = [.imageEditFile, .imageEditClipboard, .imageCompose]
+    #expect(Array(HotKeyAction.allCases.suffix(3)) == added)
+    #expect(added.allSatisfy { $0.feature == .screenshot && $0.defaultHotKey == nil })
+    #expect(added.allSatisfy { HotKeyAction(rawValue: $0.rawValue) == $0 })
+  }
+
+  /// 外部图片沿用真实标注遮罩的严格输出，成功返回合成图，原文件保持原样。
+  @Test func externalImageAnnotationEmitsComposedPixelsWithoutChangingSource() async throws {
+    let fixture = try importFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let bytes = try Data(contentsOf: fixture.files[0])
+    let original = try await ImageImport.decode(.file(fixture.files[0]))
+    var outputs: [CGImage] = []
+    let mark = Annotation(
+      shape: .rectangle(CGRect(x: 10, y: 10, width: 40, height: 30)),
+      style: .init(color: .red, option: 1))
+    let editor = AnnotateOverlay(image: original, scale: 1, annotations: [mark], strictOutput: true)
+    {
+      action, image, scale, annotations in
+      #expect(action == .copy && scale == 1 && annotations.count == 1)
+      outputs.append(image)
+    }
+    defer { editor.close() }
+    let content = try #require(editor.panel.contentView as? AnnotateOverlayView)
+    let event = try #require(
+      NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0,
+        context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false,
+        keyCode: UInt16(kVK_Return)))
+    content.keyDown(with: event)
+    #expect(outputs.count == 1 && outputs.first !== original)
+    #expect(outputs.first?.width == original.width && outputs.first?.height == original.height)
+    #expect(try Data(contentsOf: fixture.files[0]) == bytes)
+    #expect(!editor.panel.isVisible && !editor.panel.isKeyWindow)
+  }
+
+  /// 不支持的位图合成返回失败时保留会话并显示原因，不能输出未标注的底图。
+  @Test func strictExternalCompositionFailureDoesNotEmitOriginal() throws {
+    let bytes = Data(repeating: 0, count: 4 * 16 * 16)
+    let provider = try #require(CGDataProvider(data: bytes as CFData))
+    let original = try #require(
+      CGImage(
+        width: 16, height: 16, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 64,
+        space: CGColorSpaceCreateDeviceCMYK(),
+        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+        provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent))
+    let mark = Annotation(shape: .rectangle(CGRect(x: 1, y: 1, width: 10, height: 10)))
+    var emitted = false
+    var problem: String?
+    var closed = false
+    let editor = AnnotateOverlay(image: original, scale: 1, annotations: [mark], strictOutput: true)
+    { _, _, _, _ in emitted = true }
+    defer { editor.close() }
+    editor.onProblem = { problem = $0 }
+    editor.onClose = { closed = true }
+    let content = try #require(editor.panel.contentView as? AnnotateOverlayView)
+    let event = try #require(
+      NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0,
+        context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false,
+        keyCode: UInt16(kVK_Return)))
+    content.keyDown(with: event)
+    #expect(!emitted && !closed && problem?.contains("标注合成失败") == true)
+    #expect(!editor.panel.isVisible && !editor.panel.isKeyWindow)
+  }
+
+  /// 常见灰度 PNG 先转成可绘制 RGB，保证实际图片加标注后能合成。
+  @Test func grayscaleImportedImageCanBeAnnotated() async throws {
+    let context = try #require(
+      CGContext(
+        data: nil, width: 32, height: 16, bitsPerComponent: 8, bytesPerRow: 0,
+        space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue))
+    context.setFillColor(CGColor(gray: 0.6, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: 32, height: 16))
+    let gray = try #require(context.makeImage())
+    let data = try ScreenshotTests.encode(gray, as: .png)
+    let image = try await ImageImport.decode(.data(data))
+    #expect(image.colorSpace?.model == .rgb && image.width == 32 && image.height == 16)
+    let mark = Annotation(shape: .rectangle(CGRect(x: 2, y: 2, width: 15, height: 10)))
+    #expect(
+      Annotation.render(
+        [mark], over: image, pixelRect: CGRect(x: 0, y: 0, width: 32, height: 16),
+        viewSize: CGSize(width: 32, height: 16)) != nil)
+  }
+
 }

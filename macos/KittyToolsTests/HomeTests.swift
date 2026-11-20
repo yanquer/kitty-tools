@@ -17,7 +17,7 @@ struct HomeTests {
     var state = LauncherItem.ActionState(statusPresets: StatusPreset.builtIn)
     state.features = all
     let sections = Home.sections(state: state, keys: [.screenshot: "⌥A"])
-    #expect(sections.map(\.title) == ["剪贴板与启动器", "翻译", "截图与录制", "快捷截图", "插件"])
+    #expect(sections.map(\.title) == ["剪贴板与启动器", "翻译", "截图与录制", "快捷截图", "图片处理", "插件"])
     let tiles = sections.flatMap(\.tiles)
     #expect(!tiles.contains { $0.target == .action(.home) || $0.target == .action(.pinClipboard) })
     #expect(sections[0].tiles.map(\.target) == [.action(.clipboard), .action(.launcher)])
@@ -84,14 +84,17 @@ struct HomeTests {
     state.features = all.subtracting([.screenshot])
     #expect(Home.sections(state: state, keys: [:]).contains { $0.title == "录制" })
 
-    // 新装默认（四个功能）：四节，没有「插件」；再添加一个提醒：最后多一节「插件」，里面一格
+    // 新装默认（四个功能）：五节，没有「插件」；再添加一个提醒：最后多一节「插件」，里面一格
     state.features = Feature.core
-    #expect(Home.sections(state: state, keys: [:]).map(\.title) == ["剪贴板与启动器", "翻译", "截图", "快捷截图"])
+    #expect(
+      Home.sections(state: state, keys: [:]).map(\.title) == [
+        "剪贴板与启动器", "翻译", "截图", "快捷截图", "图片处理",
+      ])
     state.features = Feature.core.union([.reminders])
     let one = Home.sections(state: state, keys: [:])
     #expect(
-      one.count == 5 && one[4].title == Home.pluginsTitle
-        && one[4].tiles.map(\.target) == [.action(.reminderNew)])
+      one.count == 6 && one[5].title == Home.pluginsTitle
+        && one[5].tiles.map(\.target) == [.action(.reminderNew)])
 
     // 只剩刘海岛插件时只有它那一格；全关了一格都没有（打开刘海岛 2026-11-13 起归刘海岛插件）
     state.features = [.island]
@@ -121,12 +124,12 @@ struct HomeTests {
     state.features = all
     let sections = Home.sections(state: state, keys: [:])
     // 快捷截图六格折成两行，插件十三格折成三行。
-    #expect(Home.rows(sections).map(\.count) == [2, 4, 5, 2, 5, 1, 5, 5, 3])
-    #expect(Home.rows(sections).flatMap { $0 } == Array(0..<32))
-    let rows: CGFloat = 9
+    #expect(Home.rows(sections).map(\.count) == [2, 4, 5, 2, 5, 1, 3, 5, 5, 3])
+    #expect(Home.rows(sections).flatMap { $0 } == Array(0..<35))
+    let rows: CGFloat = 10
     let expected =
-      Home.top + Home.bottom + 5 * Home.titleHeight + rows * Home.tile.height
-      + (rows - 5) * Home.gap + Home.barHeight
+      Home.top + Home.bottom + 6 * Home.titleHeight + rows * Home.tile.height
+      + (rows - 6) * Home.gap + Home.barHeight
     #expect(Home.height(sections, offCount: 0) == expected)
     #expect(Home.height(sections, offCount: 2) == expected + Home.noteHeight)
     #expect(Home.width == 2 * Home.inset + 5 * Home.tile.width + 4 * Home.gap)
