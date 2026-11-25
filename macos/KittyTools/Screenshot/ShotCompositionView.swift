@@ -10,6 +10,11 @@ import UniformTypeIdentifiers
   var sources: [ShotComposition.Source] = []
   var options = ShotComposition.Options()
   var pdf = false
+  private(set) var previewSourceID: UUID?
+  var previewPage: Int { sources.firstIndex { $0.id == previewSourceID } ?? 0 }
+  var previewSource: ShotComposition.Source? {
+    sources.first { $0.id == previewSourceID } ?? sources.first
+  }
   var preview: CGImage?
   var preparing = false
   var rendering = false
@@ -139,26 +144,39 @@ import UniformTypeIdentifiers
   /// 移除只影响本次输出，不删除外部原文件或截图历史。
   func remove(_ id: UUID) {
     guard canImport, sources.contains(where: { $0.id == id }) else { return }
+    let index = sources.firstIndex { $0.id == id } ?? 0
     sources.removeAll { $0.id == id }
+    if previewSourceID == id {
+      previewSourceID = sources.isEmpty ? nil : sources[min(index, sources.count - 1)].id
+    }
     refreshPreview()
   }
 
   /// 快速换布局只保留最后一轮预览，旧结果不会覆盖新参数；失败时撤掉旧预览。
-  func refreshPreview() {
+  func refreshPreview(contentsChanged: Bool = true) {
     previewTask?.cancel()
     preview = nil
     error = nil
-    exported = nil
+    if contentsChanged { exported = nil }
     rendering = false
-    guard !sources.isEmpty else { return }
+    guard !sources.isEmpty else {
+      previewSourceID = nil
+      return
+    }
+    if !sources.contains(where: { $0.id == previewSourceID }) { previewSourceID = sources[0].id }
     rendering = true
-    let sources = pdf ? Array(sources.prefix(1)) : sources
-    var options = options
-    if pdf { options.rounded = false }
+    let sources = sources
+    let selected = previewSource!
+    let page = previewPage + 1
+    let pdf = pdf
+    let options = options
     previewTask = Task { [weak self] in
       do {
         try await Task.sleep(for: .milliseconds(120))
-        let image = try await ShotComposition.render(sources, options: options, maximum: 1000)
+        let image =
+          pdf
+          ? try await ShotComposition.renderPDFPage(selected, options: options)
+          : try await ShotComposition.render(sources, options: options, maximum: 1000)
         guard !Task.isCancelled, let self else { return }
         preview = image
         rendering = false
@@ -166,9 +184,18 @@ import UniformTypeIdentifiers
         guard !Task.isCancelled, let self else { return }
         rendering = false
         self.error = error.localizedDescription
-        Log.storage.error("截图合成预览失败：\(String(reflecting: error), privacy: .public)")
+        Log.storage.error(
+          "截图合成预览失败 pdf=\(pdf) page=\(page) source=\(selected.id.uuidString, privacy: .public) cause=\(String(reflecting: error), privacy: .public)"
+        )
       }
     }
+  }
+
+  /// 翻页只改变当前预览，保留图片顺序和已导出文件的成功提示。
+  func showPage(_ index: Int) {
+    guard pdf, canImport, sources.indices.contains(index) else { return }
+    previewSourceID = sources[index].id
+    refreshPreview(contentsChanged: false)
   }
 
   /// 用明确的上移、下移按钮调整顺序，同时保留稳定图片身份。
@@ -232,6 +259,7 @@ import UniformTypeIdentifiers
     previewTask = nil
     exportTask = nil
     sources = []
+    previewSourceID = nil
     for directory in directories { ImageImport.discard(directory) }
     directories = []
     importedBytes = 0
@@ -319,7 +347,7 @@ struct ShotCompositionView: View {
     .appAccent()
   }
 
-  /// 预览明确标注 PDF 每图一页，显示第一页不会伪装成整份文档。
+  /// PDF 使用当前页的真实页框，PNG 的棋盘底只说明透明区域，不写入输出。
   private var preview: some View {
     VStack(spacing: 12) {
       if model.preparing {
@@ -328,8 +356,11 @@ struct ShotCompositionView: View {
         ProgressView("正在生成预览…")
       } else if let image = model.preview {
         Image(decorative: image, scale: 1).resizable().aspectRatio(contentMode: .fit)
-          .accessibilityLabel(model.pdf ? "PDF 第一页预览" : "拼图预览")
-        Text(model.pdf ? "每图一页，共 \(model.sources.count) 页；上方为第一页" : "按右侧顺序排列，保留每张图的完整内容")
+          .background {
+            if !model.pdf && model.options.background == .transparent { transparencyGrid }
+          }
+          .accessibilityLabel(model.pdf ? "PDF 第 \(model.previewPage + 1) 页预览" : "拼图预览")
+        Text(model.pdf ? "每图一页，共 \(model.sources.count) 页" : "按右侧顺序排列，保留每张图的完整内容")
           .font(.system(size: 12)).foregroundStyle(.secondary)
       } else {
         EmptyState(
@@ -340,9 +371,40 @@ struct ShotCompositionView: View {
             .foregroundStyle(.secondary)
         }
       }
+      if model.pdf, !model.sources.isEmpty { pageNavigation }
     }
     .padding(20)
     .background(.quaternary.opacity(0.3))
+  }
+
+  /// 上下页和当前文件名始终可见，加载或单页失败后也能查看其他页。
+  private var pageNavigation: some View {
+    VStack(spacing: 6) {
+      HStack(spacing: 12) {
+        Button("上一页", systemImage: "chevron.left") { model.showPage(model.previewPage - 1) }
+          .disabled(!model.canImport || model.previewPage == 0)
+        Text("第 \(model.previewPage + 1) / \(model.sources.count) 页").monospacedDigit()
+        Button("下一页", systemImage: "chevron.right") { model.showPage(model.previewPage + 1) }
+          .disabled(!model.canImport || model.previewPage + 1 == model.sources.count)
+      }
+      Text(model.previewSource?.label ?? "").font(.system(size: 12)).foregroundStyle(.secondary)
+        .lineLimit(2).help(model.previewSource?.label ?? "")
+    }
+  }
+
+  /// 棋盘仅用于透明像素检查，随图片的适配框缩放，不把整块面板画成网格。
+  private var transparencyGrid: some View {
+    Canvas { context, size in
+      let side: CGFloat = 10
+      context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(.white))
+      for row in 0..<Int(ceil(size.height / side)) {
+        for column in 0..<Int(ceil(size.width / side)) where (row + column) % 2 == 0 {
+          let rect = CGRect(
+            x: CGFloat(column) * side, y: CGFloat(row) * side, width: side, height: side)
+          context.fill(Path(rect), with: .color(Color(white: 0.86)))
+        }
+      }
+    }.accessibilityHidden(true)
   }
 
   /// 保持设置控件原生样式，导出期间锁定内容和顺序。
@@ -360,11 +422,14 @@ struct ShotCompositionView: View {
           Stepper(
             "间距 \(Int(model.options.spacing)) 像素", value: $model.options.spacing, in: 0...64,
             step: 4)
-          Toggle("圆角", isOn: $model.options.rounded)
+          Stepper(
+            "圆角 \(Int(model.options.cornerRadius)) 像素", value: $model.options.cornerRadius,
+            in: 0...64, step: 4)
+          Stepper(
+            "留白 \(Int(model.options.margin)) 像素", value: $model.options.margin, in: 0...64, step: 4)
+          backgroundPicker
         }
-        Stepper(
-          "留白 \(Int(model.options.margin)) 像素", value: $model.options.margin, in: 0...64, step: 4)
-        Toggle("深色背景", isOn: $model.options.dark)
+        if model.pdf { pdfControls }
         Divider()
         HStack {
           Text("图片 \(model.sources.count)/20").font(.system(size: 13, weight: .semibold))
@@ -382,6 +447,38 @@ struct ShotCompositionView: View {
       .padding(16)
     }
     .disabled(!model.canImport)
+  }
+
+  /// 拼图使用固定内容底色，保留透明 PNG 的明确选项。
+  private var backgroundPicker: some View {
+    Picker("背景", selection: $model.options.background) {
+      ForEach(ShotComposition.Background.allCases) { Text($0.title).tag($0) }
+    }
+  }
+
+  /// PDF 参数单独计量，切换输出不改变 PNG 的背景、圆角或像素留白。
+  private var pdfControls: some View {
+    VStack(alignment: .leading, spacing: 16) {
+      Picker("纸张", selection: $model.options.paper) {
+        ForEach(ShotComposition.Paper.allCases) { Text($0.title).tag($0) }
+      }
+      if model.options.paper == .a4 {
+        Picker("方向", selection: $model.options.orientation) {
+          ForEach(ShotComposition.Orientation.allCases) { Text($0.title).tag($0) }
+        }.pickerStyle(.segmented)
+      }
+      Stepper(
+        "页边距 \(Int(model.options.pdfMargin)) 毫米", value: $model.options.pdfMargin, in: 0...40,
+        step: 2)
+      Picker("纸张背景", selection: $model.options.pdfBackground) {
+        ForEach(ShotComposition.Background.allCases.filter { $0 != .transparent }) {
+          Text($0.title).tag($0)
+        }
+      }
+      Text("图片等比居中，保留完整内容；按图片尺寸时保留原始比例。")
+        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(
+          horizontal: false, vertical: true)
+    }
   }
 
   /// 顺序号与图片的时间、来源同时展示，避免只靠编号辨认内容。

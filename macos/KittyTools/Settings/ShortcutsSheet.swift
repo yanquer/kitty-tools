@@ -446,7 +446,10 @@ struct ShortcutsSheet: View {
       Group(
         title: "图片处理", symbol: "photo.badge.plus", color: Style.Family.screenshot,
         globals: [.imageEditFile, .imageEditClipboard, .imageCompose],
-        entries: [Entry(text: "打开外部图片或剪贴板图片直接标注；拼图支持添加、替换、移除和拖入图片，原文件保持不变")]),
+        entries: [
+          Entry(text: "打开外部图片或剪贴板图片直接标注；拼图支持添加、替换、移除和拖入图片，原文件保持不变"),
+          Entry(text: "拼图可选透明或预设背景，圆角按像素调整；PDF 可选按图片尺寸或 A4、横竖方向和毫米页边距，逐页预览保留图片顺序"),
+        ]),
       // mac-whisker §6 截图「工具」「标注编辑」
       Group(
         title: "截图 · 标注", symbol: "pencil.tip.crop.circle", color: Style.Family.screenshot,

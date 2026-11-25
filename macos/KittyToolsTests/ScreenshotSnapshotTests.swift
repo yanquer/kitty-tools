@@ -1800,6 +1800,106 @@ struct ScreenshotSnapshotTests {
       dark: true)
   }
 
+  /// PDF 页框、翻页按钮、透明拼图及圆角在实际预览上检查，文件只写本次临时目录。
+  @Test(.enabled(if: directory != nil)) func renderCompositionOutput() async throws {
+    let folder = FileManager.default.temporaryDirectory.appending(
+      path: "kitty-compose-output-shots-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let model = ShotCompositionModel()
+    defer {
+      model.clear()
+      try? FileManager.default.removeItem(at: folder)
+    }
+    let desktop = try Self.desktop()
+    var urls: [URL] = []
+    for (index, rect) in [
+      CGRect(x: 0, y: 0, width: 1800, height: 1000), CGRect(x: 200, y: 0, width: 600, height: 1500),
+      CGRect(x: 400, y: 400, width: 900, height: 700),
+    ].enumerated() {
+      let url = folder.appending(
+        path: index == 0 ? "设计评审-包含长文件名的第一张参考图.png" : "参考图-\(index + 1).png")
+      try write(try #require(desktop.cropping(to: rect)), to: url.path)
+      urls.append(url)
+    }
+    model.importFiles(urls)
+    try await waitForComposition(model)
+    model.pdf = true
+    model.options.paper = .a4
+    model.refreshPreview()
+    try await waitForComposition(model)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 820, height: 620),
+      name: "composition-a4-portrait")
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 820, height: 620),
+      name: "composition-pdf-switching"
+    ) { host in
+      let button = compositionButton(in: host, label: "下一页")
+      #expect(button != nil)
+      #expect(button?() == true)
+      #expect(model.previewPage == 1)
+    }
+    try await waitForComposition(model)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 820, height: 620),
+      name: "composition-a4-second-page", dark: true)
+    model.options.orientation = .landscape
+    model.options.pdfMargin = 40
+    model.refreshPreview()
+    try await waitForComposition(model)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 720, height: 520),
+      name: "composition-a4-landscape-compact")
+    model.pdf = false
+    model.options.layout = .grid
+    model.options.background = .transparent
+    model.options.cornerRadius = 32
+    model.refreshPreview()
+    try await waitForComposition(model)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 820, height: 620),
+      name: "composition-transparent")
+    model.options.background = .mint
+    model.options.cornerRadius = 64
+    model.refreshPreview()
+    try await waitForComposition(model)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 720, height: 520),
+      name: "composition-mint-compact", dark: true)
+  }
+
+  /// 等待实际导入与预览，不把尚未产生图片的加载界面当作完成。
+  private func waitForComposition(_ model: ShotCompositionModel) async throws {
+    for _ in 0..<400 where model.preparing || model.rendering {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    try #require(!model.preparing && !model.rendering && model.preview != nil, "拼图预览未就绪")
+  }
+
+  /// 只调用本进程辅助功能节点的公开方法，兼容 SwiftUI 未正式声明协议的节点，不发送系统 AX 请求。
+  private func compositionButton(in value: Any, label: String) -> (() -> Bool)? {
+    guard let node = value as? NSObject else { return nil }
+    let read: (String) -> AnyObject? = { name in
+      let selector = NSSelectorFromString(name)
+      return node.responds(to: selector) ? node.perform(selector)?.takeUnretainedValue() : nil
+    }
+    let role = read("accessibilityRole") as? String
+    let title = read("accessibilityLabel") as? String ?? read("accessibilityTitle") as? String
+    let action = NSSelectorFromString("accessibilityPerformPress")
+    if role == NSAccessibility.Role.button.rawValue, title == label,
+      node.responds(to: action), let implementation = node.method(for: action)
+    {
+      // 公开方法返回 BOOL，按原生签名调用，不能用返回对象的 perform 冒充。
+      typealias Press = @convention(c) (AnyObject, Selector) -> Bool
+      let press = unsafeBitCast(implementation, to: Press.self)
+      return { press(node, action) }
+    }
+    for child in read("accessibilityChildren") as? [Any] ?? [] {
+      if let found = compositionButton(in: child, label: label) { return found }
+    }
+    return nil
+  }
+
   /// 经真实按钮回调选择样式，避免仅改测试字段而未刷新托盘的选中态。
   private func annotationOption(in view: NSView, title: String) -> NSButton? {
     if let button = view as? NSButton, button.title == title { return button }

@@ -138,7 +138,7 @@ struct ShotCompositionTests {
       try await source(image(1, 0), at: folder.appending(path: "red.png")),
       try await source(image(0, 1), at: folder.appending(path: "blue.png")),
     ]
-    let options = ShotComposition.Options(spacing: 0, margin: 0)
+    let options = ShotComposition.Options(spacing: 0, margin: 0, pdfMargin: 0)
     let result = try await ShotComposition.render(sources, options: options)
     #expect(result.width == 100 && result.height == 120)
     #expect(try pixel(result, at: CGPoint(x: 50, y: 90))[0] > 240)
@@ -189,6 +189,202 @@ struct ShotCompositionTests {
       try FileManager.default.contentsOfDirectory(atPath: folder.path).allSatisfy {
         !$0.hasPrefix(".kitty-compose-")
       })
+  }
+
+  /// A4 真实尺寸、毫米边距与横竖方向共用同一几何，宽图和长图都完整居中。
+  @Test func pdfPaperGeometryUsesPhysicalUnits() throws {
+    for orientation in ShotComposition.Orientation.allCases {
+      for margin: CGFloat in [0, 10, 40] {
+        let options = ShotComposition.Options(
+          paper: .a4, orientation: orientation, pdfMargin: margin)
+        for size in [CGSize(width: 4000, height: 1000), CGSize(width: 1000, height: 4000)] {
+          let page = try ShotComposition.pdfPagePlan(size: size, options: options)
+          let short: CGFloat = 210 * 72 / 25.4
+          let long: CGFloat = 297 * 72 / 25.4
+          #expect(abs(page.size.width - (orientation == .portrait ? short : long)) < 0.001)
+          #expect(abs(page.size.height - (orientation == .portrait ? long : short)) < 0.001)
+          let frame = try #require(page.frames.first)
+          #expect(
+            abs(frame.midX - page.size.width / 2) < 0.001
+              && abs(frame.midY - page.size.height / 2) < 0.001)
+          #expect(abs(frame.width / frame.height - size.width / size.height) < 0.001)
+          let inset = margin * 72 / 25.4
+          #expect(frame.minX >= inset - 0.001 && frame.minY >= inset - 0.001)
+          #expect(
+            frame.maxX <= page.size.width - inset + 0.001
+              && frame.maxY <= page.size.height - inset + 0.001)
+        }
+      }
+    }
+    let original = try ShotComposition.pdfPagePlan(
+      size: CGSize(width: 100, height: 60), options: .init(pdfMargin: 0))
+    #expect(original.size == CGSize(width: 100, height: 60))
+  }
+
+  /// 校验只作用于所属输出，PDF 不继承 PNG 的间距、圆角与透明背景参数。
+  @Test func compositionParametersRespectTheirOutputScope() throws {
+    let size = CGSize(width: 120, height: 80)
+    let mixed = ShotComposition.Options(
+      spacing: .nan, margin: -1, cornerRadius: -8, background: .transparent, paper: .a4)
+    #expect(
+      try ShotComposition.pdfPagePlan(size: size, options: mixed)
+        == ShotComposition.pdfPagePlan(size: size, options: .init(paper: .a4)))
+    #expect(throws: ShotComposition.Failure.self) {
+      try ShotComposition.plan(sizes: [size], options: mixed)
+    }
+    for value: CGFloat in [-1, 40.01, .nan] {
+      #expect(throws: ShotComposition.Failure.self) {
+        try ShotComposition.pdfPagePlan(size: size, options: .init(pdfMargin: value))
+      }
+    }
+    #expect(throws: ShotComposition.Failure.self) {
+      try ShotComposition.pdfPagePlan(size: size, options: .init(pdfBackground: .transparent))
+    }
+    #expect(throws: ShotComposition.Failure.self) {
+      try ShotComposition.plan(sizes: [size], options: .init(cornerRadius: 65))
+    }
+  }
+
+  /// 透明底和圆角进入真实 PNG，缩小预览按最终输出比例缩放圆角，不烘焙棋盘格。
+  @Test func pngTransparencyAndScaledCornersMatchPreview() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let red = try await source(
+      image(1, 0, size: CGSize(width: 800, height: 400)), at: folder.appending(path: "red.png"))
+    let options = ShotComposition.Options(cornerRadius: 32, background: .transparent)
+    let layout = try ShotComposition.plan(sizes: [red.size, red.size], options: options)
+    let full = try await ShotComposition.render([red, red], options: options)
+    let preview = try await ShotComposition.render([red, red], options: options, maximum: 200)
+    let frame = layout.frames[0]
+    let scale = min(1, 200 / max(layout.size.width, layout.size.height))
+    #expect(try pixel(full, at: CGPoint(x: 2, y: 2))[3] == 0)
+    #expect(try pixel(full, at: CGPoint(x: frame.minX + 1, y: frame.minY + 1))[3] == 0)
+    let inside = CGPoint(x: frame.minX + 16, y: frame.minY + 16)
+    #expect(try pixel(full, at: inside)[3] > 240)
+    #expect(try pixel(preview, at: CGPoint(x: inside.x * scale, y: inside.y * scale))[3] > 230)
+    let target = folder.appending(path: "transparent.png")
+    try await ShotComposition.export([red, red], options: options, pdf: false, to: target)
+    let input = try #require(CGImageSourceCreateWithURL(target as CFURL, nil))
+    let output = try #require(CGImageSourceCreateImageAtIndex(input, 0, nil))
+    #expect(try pixel(output, at: CGPoint(x: 2, y: 2))[3] == 0)
+    for background in ShotComposition.Background.allCases where background != .transparent {
+      let rendered = try await ShotComposition.render(
+        [red], options: .init(background: background), maximum: 200)
+      let corner = try pixel(rendered, at: CGPoint(x: 1, y: 1))
+      #expect(corner[3] == 255)
+      #expect(background == .dark ? corner[0] < 30 : corner[0] > 200)
+    }
+  }
+
+  /// 回读真实 PDF 页框和图像颜色，与当前页预览核对尺寸、页序与背景。
+  @Test func a4PDFReadbackMatchesPagePreviews() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let sources = [
+      try await source(image(1, 0), at: folder.appending(path: "red.png")),
+      try await source(
+        image(0, 1, size: CGSize(width: 60, height: 100)), at: folder.appending(path: "blue.png")),
+    ]
+    for orientation in ShotComposition.Orientation.allCases {
+      let options = ShotComposition.Options(
+        paper: .a4, orientation: orientation, pdfMargin: 12, pdfBackground: .cream)
+      let url = folder.appending(path: orientation.rawValue + ".pdf")
+      try await ShotComposition.export(sources, options: options, pdf: true, to: url)
+      let document = try #require(CGPDFDocument(url as CFURL))
+      #expect(document.numberOfPages == sources.count)
+      for (index, source) in sources.enumerated() {
+        let expected = try ShotComposition.pdfPagePlan(size: source.size, options: options)
+        let page = try #require(document.page(at: index + 1))
+        let box = page.getBoxRect(.mediaBox)
+        #expect(
+          abs(box.width - expected.size.width) < 0.01
+            && abs(box.height - expected.size.height) < 0.01)
+        let context = try #require(
+          CGContext(
+            data: nil, width: Int(ceil(box.width)), height: Int(ceil(box.height)),
+            bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.drawPDFPage(page)
+        let rendered = try #require(context.makeImage())
+        let preview = try await ShotComposition.renderPDFPage(source, options: options)
+        let center = CGPoint(x: box.midX, y: box.midY)
+        #expect(try pixel(rendered, at: center)[index == 0 ? 0 : 2] > 240)
+        #expect(try pixel(preview, at: center)[index == 0 ? 0 : 2] > 240)
+        let paper = try pixel(preview, at: CGPoint(x: 2, y: 2))
+        #expect(paper[0] > 240 && paper[2] < 235 && paper[3] == 255)
+      }
+    }
+  }
+
+  /// 翻页保留稳定图片身份与导出提示，移除、排序、快速切页和关闭不出现旧页回填。
+  @Test func pageNavigationPreservesSourcesAndRejectsStalePreviews() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let sources = [
+      try await source(image(1, 0), at: folder.appending(path: "red.png")),
+      try await source(image(0, 1), at: folder.appending(path: "blue.png")),
+    ]
+    let model = ShotCompositionModel()
+    defer { model.clear() }
+    model.sources = sources
+    model.pdf = true
+    model.options.paper = .a4
+    model.refreshPreview()
+    try await settlePreview(model)
+    model.exported = folder.appending(path: "already-exported.pdf")
+    model.showPage(1)
+    try await settlePreview(model)
+    #expect(
+      model.previewSourceID == sources[1].id && model.previewPage == 1 && model.exported != nil)
+    #expect(model.sources.map(\.id) == sources.map(\.id))
+    model.showPage(0)
+    model.showPage(1)
+    try await settlePreview(model)
+    let preview = try #require(model.preview)
+    #expect(try pixel(preview, at: CGPoint(x: preview.width / 2, y: preview.height / 2))[2] > 240)
+    model.showPage(2)
+    #expect(model.previewSourceID == sources[1].id)
+    model.move(sources[1].id, by: -1)
+    #expect(model.previewSourceID == sources[1].id && model.previewPage == 0)
+    model.remove(sources[1].id)
+    try await settlePreview(model)
+    #expect(model.previewSourceID == sources[0].id && model.previewPage == 0)
+    model.refreshPreview()
+    model.clear()
+    try await Task.sleep(for: .milliseconds(180))
+    #expect(model.preview == nil && !model.rendering && model.previewSourceID == nil)
+  }
+
+  /// 页面加载失败明确显示，切到有效页可恢复；整体 PDF 失败保持原文件。
+  @Test func pageFailuresDoNotBecomeBlankSuccess() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let valid = try await source(image(1, 0), at: folder.appending(path: "red.png"))
+    let missing = ShotComposition.Source(
+      id: UUID(), url: folder.appending(path: "missing.png"), size: valid.size, label: "缺失的第二页")
+    let model = ShotCompositionModel()
+    defer { model.clear() }
+    model.sources = [missing, valid]
+    model.pdf = true
+    model.refreshPreview()
+    try await settlePreview(model)
+    #expect(model.preview == nil && model.error?.contains("缺失的第二页") == true)
+    model.showPage(1)
+    try await settlePreview(model)
+    #expect(model.preview != nil && model.error == nil)
+    let url = folder.appending(path: "keep.pdf")
+    try Data("old PDF".utf8).write(to: url)
+    await #expect(throws: ShotComposition.Failure.self) {
+      try await ShotComposition.export(
+        [valid, missing], options: .init(paper: .a4), pdf: true, to: url)
+    }
+    #expect(try Data(contentsOf: url) == Data("old PDF".utf8))
+  }
+
+  /// 异步等待当前预览，超时不能当作成功结果。
+  private func settlePreview(_ model: ShotCompositionModel) async throws {
+    for _ in 0..<300 where model.rendering { try await Task.sleep(for: .milliseconds(20)) }
+    try #require(!model.rendering, "预览未在测试时限内完成")
   }
 
   @Test func generatedQRCodeReturnsContentAndBounds() async throws {
