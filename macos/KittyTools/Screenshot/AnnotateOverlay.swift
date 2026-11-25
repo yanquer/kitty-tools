@@ -260,11 +260,15 @@ import OSLog
   /// 工具栏和样式托盘跟着画布的状态走：托盘在工具栏上方 6 pt、x 对着当前工具那颗钮（夹在窗口里 10 pt）
   private func syncBars() {
     bar.setEraserSelected(canvas.erasing)
-    bar.update(tool: canvas.tool, canUndo: canvas.canUndo, canRedo: canvas.canRedo)
+    bar.update(
+      tool: canvas.tool, canUndo: canvas.canUndo, canRedo: canvas.canRedo,
+      canCaption: canvas.canEditCaption)
     guard let owner = canvas.styleOwner, let content = panel.contentView else {
       return styleBar.setShown(false)
     }
-    styleBar.update(tool: owner, style: canvas.shownStyle, number: canvas.selectedCounterNumber)
+    styleBar.update(
+      tool: owner, style: canvas.shownStyle, number: canvas.selectedCounterNumber,
+      selection: canvas.selectionMix)
     let button = bar.toolButtonFrame(owner).offsetBy(dx: bar.frame.minX, dy: bar.frame.minY)
     let size = styleBar.preferredSize
     let x = max(
@@ -301,6 +305,7 @@ import OSLog
     case .saveMenu: toggleSaveMenu()
     case .tool(let tool): canvas.choose(tool)
     case .erase: canvas.chooseEraser()
+    case .caption: canvas.editCaption()
     case .transform: toggleTransformMenu()
     case .undo: canvas.undo()
     case .redo: canvas.redo()

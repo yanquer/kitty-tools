@@ -38,7 +38,7 @@ struct AnnotationToolTests {
       Annotation.Tool.mosaic.title == "打码"
         && Annotation.Tool.mosaic.weightTitles == ["弱", "中", "强"])
     #expect(Annotation.Tool.arrow.optionTitles == ["单头", "双头"])
-    #expect(Annotation.Tool.line.optionTitles.isEmpty)
+    #expect(Annotation.Tool.line.optionTitles == ["直线", "尺寸（px）"])
     #expect(Annotation.Palette.allCases.first == .pink && Annotation.Palette.allCases.count == 8)
   }
 

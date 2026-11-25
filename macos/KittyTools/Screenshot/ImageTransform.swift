@@ -61,11 +61,14 @@ nonisolated enum ImageTransform {
     return batches.map { batch in
       batch.map { value in
         if let source = sources[value.id], source.shape == value.shape,
-          source.textTransform == value.textTransform, let changed = cache[value.id]
+          source.textTransform == value.textTransform,
+          source.caption?.orientation == value.caption?.orientation,
+          (source.caption == nil) == (value.caption == nil), let changed = cache[value.id]
         {
           var reused = value
           reused.shape = changed.shape
           reused.textTransform = changed.textTransform
+          reused.caption?.orientation = changed.caption?.orientation
           return reused
         }
         let changed = value.transformed(action, size: size)
@@ -124,6 +127,13 @@ extension Annotation {
   func transformed(_ action: ImageTransform.Action, size: CGSize) -> Annotation {
     let matrix = ImageTransform.mapping(action, size: size)
     var next = self
+    if let caption {
+      var linear = matrix
+      linear.tx = 0
+      linear.ty = 0
+      let combined = (caption.orientation?.affine ?? .identity).concatenating(linear)
+      next.caption?.orientation = combined.isIdentity ? nil : ImageTransform.Pose(combined)
+    }
     let reflect = action == .horizontal || action == .vertical
     switch shape {
     case .rectangle(let rect): next.shape = .rectangle(rect.applying(matrix))

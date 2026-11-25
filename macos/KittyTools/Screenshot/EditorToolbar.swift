@@ -216,7 +216,7 @@ final class EditorToolbar: PopView {
 
   enum Item: Equatable {
     case tool(Annotation.Tool)
-    case erase, transform
+    case erase, transform, caption
     case undo
     case redo
     /// .output(.save) 是保存本体（单击快速保存）
@@ -249,7 +249,8 @@ final class EditorToolbar: PopView {
     let left: [[Spec]] = [
       // 有快捷键的按钮悬停提示由 tip(for:name:) 现写（截图时的快捷键能改），这里的提示位先填名字
       Annotation.Tool.allCases.map { (.tool($0), $0.symbol, $0.title, $0.title) },
-      ([(.erase, "eraser", "对象橡皮擦", "对象橡皮擦")] as [Spec])
+      ([(.erase, "eraser", "对象橡皮擦", "对象橡皮擦"), (.caption, "text.bubble", "编辑关联文字", "编辑关联文字")]
+        as [Spec])
         + (mode == .capture ? [] : [(.transform, "rotate.right", "旋转与镜像", "旋转与镜像")]),
       [
         (.undo, "arrow.uturn.backward", "撤销", "撤销"),
@@ -457,7 +458,8 @@ final class EditorToolbar: PopView {
   }
 
   /// 当前工具的底块滑过去、图标换成强调色上的符号色（白，黄色这类亮色上是深色）；撤销 / 重做没得做时变灰。跟着鼠标移动一直在调，状态没变就不动
-  func update(tool: Annotation.Tool?, canUndo: Bool, canRedo: Bool) {
+  func update(tool: Annotation.Tool?, canUndo: Bool, canRedo: Bool, canCaption: Bool = false) {
+    button(for: .caption)?.isEnabled = canCaption
     if let state, state.tool == tool, state.canUndo == canUndo, state.canRedo == canRedo { return }
     let previous = state?.tool
     state = (tool, canUndo, canRedo)
@@ -781,6 +783,7 @@ final class StyleBar: HUDBar {
   /// 现在排着的那个取色点（吸管取过色才有）：换了颜色要重排
   private var custom: Int?
   private var style: Annotation.Style?
+  private var selectionMix = Annotation.SelectionStyle()
   private var colors: [Swatch] = []
   private var weights: [Swatch] = []
   private var options: [BarButton] = []
@@ -804,8 +807,15 @@ final class StyleBar: HUDBar {
 
   /// 换了工具就重排内容（色点只给有颜色的工具、三档或字号、选项分段、选中序号时的编号），样式变了只改选中状态（色点 pop）。
   /// number：选中的是序号时它的编号（托盘多一段「编号 − n +」）；别的 nil
-  func update(tool: Annotation.Tool, style: Annotation.Style, number: Int? = nil) {
-    if tool != self.tool || (number == nil) != (self.number == nil) || style.custom != custom {
+  func update(
+    tool: Annotation.Tool, style: Annotation.Style, number: Int? = nil,
+    selection: Annotation.SelectionStyle = .init()
+  ) {
+    let oldMix = selectionMix
+    selectionMix = selection
+    if tool != self.tool || (number == nil) != (self.number == nil) || style.custom != custom
+      || oldMix.mixedTools != selection.mixedTools
+    {
       rebuild(for: tool, numbered: number != nil, custom: style.custom)
       self.tool = tool
       self.custom = style.custom
@@ -813,25 +823,27 @@ final class StyleBar: HUDBar {
     }
     self.number = number
     numberValue?.stringValue = number.map(String.init) ?? ""
-    guard style != self.style else { return }
+    guard style != self.style || oldMix != selection else { return }
     if let sizeValue {
-      Self.setValue(sizeValue, Self.sizeText(style.textSize))
-      sizeValue.setAccessibilityValue(Self.sizeText(style.textSize))
+      Self.setValue(sizeValue, selection.font ? "混合" : Self.sizeText(style.textSize))
+      sizeValue.setAccessibilityValue(selection.font ? "混合字号" : Self.sizeText(style.textSize))
     }
     let animated = self.style != nil
     self.style = style
     // 取过色时亮的是取色点（tag -1），预设色都不亮
     for swatch in colors {
       swatch.setChosen(
-        style.custom == nil ? swatch.tag == style.color.rawValue : swatch.tag == -1,
+        !selection.color
+          && (style.custom == nil ? swatch.tag == style.color.rawValue : swatch.tag == -1),
         animated: animated)
     }
     // 序号拖角改过大小时三档都不亮
     for swatch in weights {
       swatch.setChosen(
-        style.diameter == nil && swatch.tag == style.weight.rawValue, animated: animated)
+        !selection.weight && style.diameter == nil && swatch.tag == style.weight.rawValue,
+        animated: animated)
     }
-    for button in options { Self.mark(button, on: button.tag == style.option) }
+    for button in options { Self.mark(button, on: !selection.option && button.tag == style.option) }
   }
 
   private func rebuild(for tool: Annotation.Tool, numbered: Bool, custom: Int?) {
@@ -880,6 +892,18 @@ final class StyleBar: HUDBar {
       dropper.widthAnchor.constraint(equalToConstant: 26).isActive = true
       dropper.heightAnchor.constraint(equalToConstant: 26).isActive = true
       views.append(dropper)
+    }
+    if selectionMix.mixedTools {
+      weights = []
+      options = []
+      let hint = NSTextField(labelWithString: "混合工具 · 仅改颜色")
+      hint.font = .systemFont(ofSize: 11)
+      hint.textColor = Style.HUD.secondaryText
+      views += [barSeparator(), hint]
+      views.forEach(stack.addArrangedSubview)
+      preferredSize = CGSize(
+        width: ceil(stack.fittingSize.width + 2 * Self.materialInset), height: Self.height)
+      return
     }
     if !colors.isEmpty { views.append(barSeparator()) }
     views += weights

@@ -272,6 +272,7 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
   var shape: Shape
   var style = Style()
   var textTransform: ImageTransform.Pose?
+  var caption: Caption?
 
   var tool: Tool {
     switch shape {
@@ -292,6 +293,12 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
 
   /// 画出来占的范围（含线宽、箭头，不含阴影），用来画选中框、点中文字和马赛克
   var bounds: CGRect {
+    guard let caption = captionAnnotation else { return shapeBounds }
+    return shapeBounds.union(caption.bounds)
+  }
+
+  /// 不含关联文字的对象边界，供原有几何分支使用。
+  private var shapeBounds: CGRect {
     if let pose = textTransform { return untransformedText.bounds.applying(pose.affine) }
     let width = style.weight.lineWidth
     switch shape {
@@ -391,6 +398,7 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
   /// 点中它没有：空心矩形 / 椭圆和聚光灯只认边线（里面点不中，免得挡住下面的标注、聚光灯里还要接着画），
   /// 线类认线（箭头连箭头），实心形状、文字、序号、马赛克认整块
   func contains(_ point: CGPoint, tolerance: CGFloat = 4) -> Bool {
+    if captionAnnotation?.contains(point, tolerance: tolerance) == true { return true }
     if let pose = textTransform {
       return untransformedText.contains(
         point.applying(pose.affine.inverted()), tolerance: tolerance)
@@ -799,6 +807,13 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
   }
 
   private func draw(in context: CGContext, image: CGImage, viewSize: CGSize, shadowScale: CGFloat) {
+    if let label = captionAnnotation {
+      var base = self
+      base.caption = nil
+      base.draw(in: context, image: image, viewSize: viewSize, shadowScale: shadowScale)
+      label.draw(in: context, image: image, viewSize: viewSize, shadowScale: shadowScale)
+      return
+    }
     if let pose = textTransform {
       context.saveGState()
       context.concatenate(pose.affine)

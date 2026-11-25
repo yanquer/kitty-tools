@@ -31,9 +31,25 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
   }
   var selectedAnnotation: UUID? {
     didSet {
+      extraSelected = []
       updateChrome()
       onState()
     }
+  }
+  private(set) var extraSelected: Set<UUID> = [] {
+    didSet {
+      updateChrome()
+      onState()
+    }
+  }
+  private var marquee: CGRect? { didSet { overlay.marquee = marquee } }
+  var selectedItems: [Annotation] {
+    Annotation.selected(in: annotations, primary: selectedAnnotation, extras: extraSelected)
+  }
+  var selectionMix: Annotation.SelectionStyle { Annotation.selectionStyle(selectedItems) }
+  var canEditCaption: Bool {
+    !isTransforming && !hasPendingGesture && selectedItems.count == 1
+      && selected?.acceptsCaption == true
   }
   /// 新标注用的颜色和粗细
   var style = Annotation.Style()
@@ -44,12 +60,22 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
   var onState: () -> Void = {}
 
   /// 样式托盘显示的样式：输入中的文字 > 选中的标注 > 新标注用的
-  var shownStyle: Annotation.Style { editor?.style ?? selected?.style ?? style }
+  var shownStyle: Annotation.Style {
+    editor?.style
+      ?? (selectionMix.mixedTools
+        ? selectedItems.first(where: { $0.tool.hasColor })?.style : selected?.style) ?? style
+  }
   /// 样式托盘跟着谁：同上的优先级（都没有就不出托盘）
-  var styleOwner: Annotation.Tool? { editor != nil ? .text : selected?.tool ?? tool }
+  var styleOwner: Annotation.Tool? {
+    editor != nil
+      ? .text
+      : selectionMix.mixedTools
+        ? (selectedItems.contains { $0.tool.hasColor } ? .rectangle : nil) : selected?.tool ?? tool
+  }
   /// 选中的序号的编号（托盘出「编号 − n +」）；选中的不是序号、正在输入文字时 nil
   var selectedCounterNumber: Int? {
-    guard editor == nil, case .counter(let number, _)? = selected?.shape else { return nil }
+    guard selectedItems.count <= 1, editor == nil, case .counter(let number, _)? = selected?.shape
+    else { return nil }
     return number
   }
   var canUndo: Bool { !isTransforming && !undoKinds.isEmpty }
@@ -89,6 +115,7 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
     let origin: CGPoint
     let displayOrigin: CGPoint?
     var style: Annotation.Style
+    var isCaption = false
   }
 
   private enum Drag {
@@ -98,6 +125,10 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
     case moveAnnotation(Annotation, start: CGPoint, before: [Annotation], copyOf: UUID?)
     case resizeAnnotation(Annotation, Annotation.Handle, before: [Annotation], offset: CGVector)
     /// 空格 + 拖动：平移画布（start 是按下时的点，窗口坐标）
+    case groupMove(
+      start: CGPoint, before: [Annotation], originals: [Annotation], ids: Set<UUID>,
+      copySource: Set<UUID>?)
+    case marquee(start: CGPoint, before: Set<UUID>)
     case pan(start: CGPoint)
   }
 
@@ -175,7 +206,15 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
   /// 标注层显示的：已有的（正在编辑的那条文字由输入框显示）+ 正在拖出来的
   private func syncAnnotations() {
     let editing = editor?.id
-    var shown = annotations.filter { $0.id != editing }
+    var shown = annotations.compactMap { value -> Annotation? in
+      guard value.id == editing else { return value }
+      if editor?.isCaption == true {
+        var base = value
+        base.caption = nil
+        return base
+      }
+      return nil
+    }
     if let draft { shown.append(draft) }
     overlay.annotations = shown
     updateChrome()
@@ -183,7 +222,9 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
   }
 
   private func updateChrome() {
-    overlay.chrome = (editor == nil ? selected : nil).map { ($0, zoom) }
+    overlay.group = editor == nil && selectedItems.count > 1 ? selectedItems : []
+    overlay.groupZoom = zoom
+    overlay.chrome = (editor == nil && selectedItems.count <= 1 ? selected : nil).map { ($0, zoom) }
   }
 
   // MARK: 标注
@@ -200,7 +241,7 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
   private func annotationHandle(at point: CGPoint) -> (
     annotation: Annotation, handle: Annotation.Handle, point: CGPoint
   )? {
-    guard editor == nil, let selected else { return nil }
+    guard selectedItems.count <= 1, editor == nil, let selected else { return nil }
     let reach = 7 / max(zoom, 0.01)
     let distance = { (grip: (Annotation.Handle, CGPoint)) in
       hypot(grip.1.x - point.x, grip.1.y - point.y)
@@ -228,7 +269,7 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
   /// 正拖着标注：撤销 / 重做 / 删除 / 复制 / 方向键都不响应（松手时按按下前的样子记一步撤销，中途改列表就对不上了）
   private var isDraggingAnnotation: Bool {
     switch drag {
-    case .annotate?, .moveAnnotation?, .resizeAnnotation?: true
+    case .annotate?, .moveAnnotation?, .resizeAnnotation?, .groupMove?, .marquee?: true
     default: false
     }
   }
@@ -474,14 +515,13 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
       self.editor = editor
       apply(editor.style, to: editor.field)
       layoutEditor()
-      remember(editor.style, for: .text)
-    } else if let id = selectedAnnotation,
-      let index = annotations.firstIndex(where: { $0.id == id })
-    {
-      var next = annotations
-      change(&next[index].style)
+      if !editor.isCaption { remember(editor.style, for: .text) }
+    } else if !selectedItems.isEmpty {
+      let ids = Set(selectedItems.map(\.id))
+      let next = Annotation.restyled(
+        annotations, ids: ids, colorOnly: selectionMix.mixedTools, change: change)
       commit(next)
-      remember(next[index].style, for: next[index].tool)
+      if let selected { remember(selected.style, for: selected.tool) }
     } else if let tool {
       var changed = style
       change(&changed)
@@ -495,26 +535,52 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
     if owner == tool { style = changed }
   }
 
+  /// 删除当前整组选中对象，关联文字随所属线条一同移除。
   func deleteSelected() {
-    guard !isDraggingAnnotation, let id = selectedAnnotation else { return }
-    selectedAnnotation = nil
-    commit(annotations.filter { $0.id != id })
+    guard !isDraggingAnnotation else { return }
+    let ids = Set(selectedItems.map(\.id))
+    guard !ids.isEmpty else { return }
+    selectAnnotations([])
+    commit(annotations.filter { !ids.contains($0.id) })
   }
 
-  /// ⌘D：选中的标注复制一份，往右下偏 12（原点左下，y 是 −12），选中副本
+  /// 批量复制形成一笔撤销，序号分配与单对象复制保持同一规则。
   private func duplicateSelected() {
-    guard !isDraggingAnnotation, let selected else { return }
-    let copy = duplicate(selected, offset: CGSize(width: 12, height: -12))
-    commit(annotations + [copy])
-    selectedAnnotation = copy.id
+    guard !isDraggingAnnotation, !selectedItems.isEmpty else { return }
+    let copies = Annotation.duplicateGroup(
+      selectedItems, offset: CGSize(width: 12, height: -12), existing: annotations)
+    commit(annotations + copies)
+    selectAnnotations(Set(copies.map(\.id)))
   }
 
-  /// 方向键微调选中的标注
+  /// 方向键按同一位移移动整组选中对象。
   private func nudge(_ dx: CGFloat, _ dy: CGFloat) {
-    guard !isDraggingAnnotation, let selected else { return NSSound.beep() }
-    let before = annotations
-    replace(selected.offset(by: CGSize(width: dx, height: dy)))
-    recordUndo(from: before)
+    guard !isDraggingAnnotation, !selectedItems.isEmpty else { return NSSound.beep() }
+    let ids = Set(selectedItems.map(\.id))
+    commit(
+      annotations.map { ids.contains($0.id) ? $0.offset(by: CGSize(width: dx, height: dy)) : $0 })
+  }
+
+  /// 临时多选不写入文档；保持主选中身份，旧的单选入口仍可直接赋值。
+  func selectAnnotations(_ ids: Set<UUID>, preferred: UUID? = nil) {
+    let live = annotations.filter { ids.contains($0.id) }
+    selectedAnnotation =
+      preferred.flatMap { id in live.contains { $0.id == id } ? id : nil } ?? live.first?.id
+    extraSelected = Set(live.map(\.id)).subtracting(selectedAnnotation.map { [$0] } ?? [])
+  }
+
+  /// 一次命令点选追加或移除一个对象，不改变其他对象的选中状态。
+  private func toggleSelection(_ id: UUID) {
+    var ids = Set(selectedItems.map(\.id))
+    if ids.contains(id) { ids.remove(id) } else { ids.insert(id) }
+    selectAnnotations(ids, preferred: selectedAnnotation)
+    Island.announce("已选择 \(ids.count) 条标注")
+  }
+
+  /// 编辑唯一选中的普通箭头或线条的说明，复用原生文本框和文本撤销栈。
+  func editCaption() {
+    guard canEditCaption, let selected else { return }
+    beginEditing(at: selected.captionOrigin, captionHost: selected)
   }
 
   /// 需要应用到既有钉图时保留合成失败，不用原图冒充编辑结果。
@@ -539,7 +605,8 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
   // MARK: 文字
 
   /// 在 origin（文字左上角）开始输入；existing 是双击的已有文字标注
-  func beginEditing(at origin: CGPoint, existing: Annotation? = nil) {
+  func beginEditing(at origin: CGPoint, existing: Annotation? = nil, captionHost: Annotation? = nil)
+  {
     endEditing()
     let field = EditorField(frame: .zero)
     field.isRichText = false
@@ -549,6 +616,8 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
     field.textContainer?.lineFragmentPadding = 0
     field.isHorizontallyResizable = true
     field.isVerticallyResizable = true
+    // 零尺寸初始化的 NSTextView 默认最大宽度也是零，显式放开后才能显示已有文字。
+    field.maxSize = CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
     field.textContainer?.widthTracksTextView = false
     field.textContainer?.heightTracksTextView = false
     field.textContainer?.containerSize = CGSize(
@@ -556,19 +625,21 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
     field.wantsLayer = true
     field.selectedTextAttributes = [.backgroundColor: Style.Shot.accent.withAlphaComponent(0.4)]
     field.delegate = self
-    let style = existing?.style ?? self.style
+    let style = captionHost?.captionStyle ?? existing?.style ?? self.style
     apply(style, to: field)
     if case .text(let string, _)? = existing?.shape { field.string = string }
+    if let captionHost { field.string = captionHost.caption?.text ?? "" }
     let display =
       existing?.textTransform == nil
       ? nil : existing.map { CGPoint(x: $0.bounds.minX, y: $0.bounds.maxY) }
     editor = Editor(
-      field: field, id: existing?.id, origin: origin, displayOrigin: display, style: style)
+      field: field, id: captionHost?.id ?? existing?.id, origin: origin, displayOrigin: display,
+      style: style, isCaption: captionHost != nil)
     addSubview(field)
     layoutEditor()
     window?.makeFirstResponder(field)
     if existing != nil { field.selectAll(nil) }
-    selectedAnnotation = existing?.id
+    selectedAnnotation = captionHost?.id ?? existing?.id
     syncAnnotations()
   }
 
@@ -583,7 +654,19 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
     var next = annotations
     var chosen = editor.id
     let index = editor.id.flatMap { id in next.firstIndex { $0.id == id } }
-    if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+    if editor.isCaption {
+      if let index {
+        next[index].caption =
+          text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+          ? nil
+          : Annotation.Caption(
+            text: text, style: editor.style, orientation: next[index].caption?.orientation)
+        if next[index].caption != nil {
+          next[index].style.color = editor.style.color
+          next[index].style.custom = editor.style.custom
+        }
+      }
+    } else if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
       if let index { next.remove(at: index) }
     } else if let index {
       next[index].shape = .text(text, origin: editor.origin)
@@ -634,6 +717,21 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
     if editor.field.textContainerInset != pad { editor.field.textContainerInset = pad }
     editor.field.frame = frame.insetBy(dx: -pad.width, dy: -pad.height)
     if editor.field.outline != nil { editor.field.needsDisplay = true }
+  }
+
+  /// 关联说明最多 2000 个 UTF-16 单元；普通文字沿用原来的编辑规则。
+  func textView(
+    _ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString: String?
+  ) -> Bool {
+    guard editor?.isCaption == true else { return true }
+    let length = (textView.string as NSString).length
+    guard range.length <= length,
+      length - range.length + ((replacementString ?? "") as NSString).length <= 2000
+    else {
+      onProblem("关联文字过长，请缩短后再输入")
+      return false
+    }
+    return true
   }
 
   func textDidChange(_ notification: Notification) { layoutEditor() }
@@ -700,6 +798,34 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
     if erasing {
       eraseBefore = annotations
       erase(to: point)
+      return
+    }
+    let clicked = annotation(at: point)
+    if modifiers.contains(.command) {
+      if let clicked {
+        toggleSelection(clicked.id)
+      } else {
+        drag = .marquee(start: point, before: Set(selectedItems.map(\.id)))
+        marquee = CGRect(origin: point, size: .zero)
+      }
+      return
+    }
+    if event.clickCount == 2, let clicked, clicked.captionAnnotation?.contains(point) == true {
+      selectAnnotations([clicked.id])
+      return editCaption()
+    }
+    if let clicked, selectedItems.count > 1, selectedItems.contains(where: { $0.id == clicked.id })
+    {
+      let before = annotations
+      let source = Set(selectedItems.map(\.id))
+      if modifiers.contains(.option) {
+        let copies = Annotation.duplicateGroup(selectedItems, offset: .zero, existing: annotations)
+        annotations += copies
+        selectAnnotations(Set(copies.map(\.id)))
+      }
+      drag = .groupMove(
+        start: point, before: before, originals: annotations, ids: Set(selectedItems.map(\.id)),
+        copySource: modifiers.contains(.option) ? source : nil)
       return
     }
     // 双击箭头 / 直线的弯曲手柄：拉直（第一下也得按在它上面）
@@ -783,6 +909,18 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
   private func dragAnnotation(to point: CGPoint) {
     let constrained = modifiers.contains(.shift)
     switch drag {
+    case .groupMove(let start, _, let originals, let ids, _)?:
+      var delta = CGSize(width: point.x - start.x, height: point.y - start.y)
+      if constrained {
+        if abs(delta.width) > abs(delta.height) { delta.height = 0 } else { delta.width = 0 }
+      }
+      annotations = originals.map { ids.contains($0.id) ? $0.offset(by: delta) : $0 }
+    case .marquee(let start, let before)?:
+      let rect = CGRect(
+        x: min(start.x, point.x), y: min(start.y, point.y), width: abs(point.x - start.x),
+        height: abs(point.y - start.y))
+      marquee = rect
+      selectAnnotations(Annotation.selected(in: annotations, rect: rect, adding: before))
     case .annotate(let start)?:
       guard let tool else { return }
       guard tool == .pen else {
@@ -849,6 +987,16 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
         replace(original)
       }
       recordUndo(from: before)
+    case .groupMove(_, let before, let originals, _, let source)?:
+      if let source, annotations == originals {
+        annotations = before
+        selectAnnotations(source)
+      } else {
+        recordUndo(from: before)
+      }
+    case .marquee?:
+      marquee = nil
+      Island.announce("已选择 \(selectedItems.count) 条标注")
     case .pan?, nil:
       break
     }
@@ -893,6 +1041,12 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
     guard flags.isEmpty else { return super.keyDown(with: event) }
     switch code {
     case kVK_Escape:
+      if case .marquee(_, let before)? = drag {
+        drag = nil
+        marquee = nil
+        selectAnnotations(before)
+        return
+      }
       if let before = eraseBefore {
         annotations = before
         eraseBefore = nil

@@ -3,6 +3,59 @@
 import AppKit
 
 extension Annotation {
+  /// 说明文字属于线条本体；旧数据缺省为无说明，不引入悬空的对象引用。
+  struct Caption: Codable, Equatable, Sendable {
+    var text: String
+    var style: Style
+    var orientation: ImageTransform.Pose?
+  }
+
+  var acceptsCaption: Bool { (tool == .arrow || tool == .line) && !isDimension }
+
+  /// 关联说明使用正向输入与绘制，跟随线条中点而不是持久化绝对位置。
+  var captionStyle: Style {
+    if let caption { return caption.style }
+    var value = style
+    value.fontSize = 13
+    value.option = 2
+    return value
+  }
+
+  /// 线条的几何中点，位置调整后即时重新计算，不保存易失效的绝对文字位置。
+  private var captionCenter: CGPoint {
+    switch shape {
+    case .arrow(let from, let to, let bend), .line(let from, let to, let bend):
+      return Self.curveMidpoint(from: from, to: to, bend: bend)
+    default: return .zero
+    }
+  }
+
+  /// 原生输入框保持正向；图像转向后的文字仍保存自己的方向。
+  var captionOrigin: CGPoint {
+    guard let label = captionAnnotation else {
+      return CGPoint(x: captionCenter.x, y: captionCenter.y + 28)
+    }
+    if caption?.orientation != nil { return CGPoint(x: label.bounds.minX, y: label.bounds.maxY) }
+    if case .text(_, let origin) = label.shape {
+      return origin.applying(label.textTransform?.affine ?? .identity)
+    }
+    return .zero
+  }
+
+  /// 说明文字是线条的一部分；像素变换和矢量绘制保持同一局部方向及相对位置。
+  var captionAnnotation: Annotation? {
+    guard acceptsCaption, let caption, !caption.text.isEmpty else { return nil }
+    let value = caption.style
+    let box = Self.textFrame(caption.text, origin: .zero, size: value.textSize)
+    let gap = max(14, value.textSize / 3 + style.weight.lineWidth * 4)
+    var pose = caption.orientation?.affine ?? .identity
+    pose.tx = captionCenter.x
+    pose.ty = captionCenter.y
+    return Annotation(
+      id: id, shape: .text(caption.text, origin: CGPoint(x: -box.width / 2, y: gap + box.height)),
+      style: value, textTransform: ImageTransform.Pose(pose))
+  }
+
   var isDimension: Bool { tool == .line && style.option == 1 }
 
   /// 为尺寸文字预留有界区域，包含 4000 万像素范围内的读数，防止局部重画裁掉文字。
@@ -62,6 +115,9 @@ extension Annotation {
 
   /// 橡皮笔画与对象轮廓求交，快速拖动跨过细线也能命中，不以鼠标采样点代替整段轨迹。
   func intersectsEraser(from: CGPoint, to: CGPoint, radius: CGFloat = 4) -> Bool {
+    if captionAnnotation?.intersectsEraser(from: from, to: to, radius: radius) == true {
+      return true
+    }
     if let pose = textTransform {
       return untransformedText.intersectsEraser(
         from: from.applying(pose.affine.inverted()), to: to.applying(pose.affine.inverted()),

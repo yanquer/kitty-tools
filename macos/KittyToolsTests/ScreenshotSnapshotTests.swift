@@ -1643,6 +1643,73 @@ struct ScreenshotSnapshotTests {
     canvas.cancelTransform()
   }
 
+  /// 多选框、混合托盘与关联说明用假桌面屏外渲染，两个画布沿用同一套选中外观。
+  @Test(.enabled(if: directory != nil)) func renderAnnotationGroups() async throws {
+    let desktop = try Self.desktop()
+    let h = Harness(image: desktop)
+    h.view.select(CGRect(x: 120, y: 160, width: 900, height: 500))
+    var arrow = Annotation(
+      shape: .arrow(from: CGPoint(x: 300, y: 370), to: CGPoint(x: 760, y: 370)),
+      style: .init(color: .red))
+    arrow.caption = .init(text: "请求返回后更新列表", style: arrow.captionStyle)
+    let rectangle = Annotation(
+      shape: .rectangle(CGRect(x: 300, y: 210, width: 230, height: 100)),
+      style: .init(color: .blue))
+    h.view.annotations = [arrow, rectangle]
+    h.view.selectAnnotations([arrow.id, rectangle.id])
+    h.move(CGPoint(x: 1100, y: 740))
+    try shoot(h.window, "annotation-group-mixed")
+    if let tray = h.styleBar { try shootContent(tray, "annotation-group-mixed") }
+    if let toolbar = h.view.subviews.compactMap({ $0 as? EditorToolbar }).first {
+      for (index, hud) in referenceBars(in: toolbar).enumerated() {
+        try shootContent(hud, "annotation-group-tools-\(index)")
+      }
+    }
+    h.view.selectAnnotations([])
+    h.begin(CGPoint(x: 240, y: 185), to: CGPoint(x: 800, y: 460), flags: .command)
+    try shoot(h.window, "annotation-group-marquee")
+    h.release(CGPoint(x: 800, y: 460), flags: .command)
+    h.view.selectedAnnotation = arrow.id
+    let bar = try #require(h.view.subviews.compactMap { $0 as? EditorToolbar }.first)
+    let button = try #require(bar.button(for: .caption))
+    #expect(NSApp.sendAction(try #require(button.action), to: button.target, from: button))
+    try shoot(h.window, "annotation-caption-edit")
+    let field = try #require(h.view.subviews.compactMap { $0 as? EditorField }.first)
+    #expect(field.frame.width > 100 && field.frame.height >= 20)
+    _ = h.view.textView(field, doCommandBy: #selector(NSResponder.cancelOperation(_:)))
+    try shoot(h.window, "annotation-caption-selected")
+    let canvas = ScrollCanvas(image: desktop, scale: 2)
+    let suite = "kitty-group-snapshot-" + UUID().uuidString
+    canvas.styleDefaults = try #require(UserDefaults(suiteName: suite))
+    defer { canvas.styleDefaults.removePersistentDomain(forName: suite) }
+    canvas.annotations = [arrow, rectangle]
+    canvas.selectAnnotations([arrow.id, rectangle.id])
+    let window = offscreen(canvas)
+    for child in canvas.subviews { child.wantsLayer = true }
+    defer {
+      window.contentView = nil
+      window.orderOut(nil)
+    }
+    try shoot(window, "annotation-group-canvas")
+    canvas.transform(.right)
+    for _ in 0..<250 where canvas.isTransforming { try await Task.sleep(for: .milliseconds(20)) }
+    #expect(!canvas.isTransforming)
+    window.setContentSize(canvas.frame.size)
+    canvas.selectedAnnotation = arrow.id
+    try shoot(window, "annotation-caption-rotated")
+    canvas.editCaption()
+    try shoot(window, "annotation-caption-canvas-edit")
+    let canvasField = try #require(canvas.subviews.compactMap { $0 as? EditorField }.first)
+    #expect(canvasField.frame.width > 100 && canvasField.string == arrow.caption?.text)
+    canvas.endEditing()
+    for dark in [false, true] {
+      try enhancement(
+        ShortcutsSheet(page: .screenshot, query: "标注"),
+        size: NSSize(width: ShortcutsSheet.width, height: 1000),
+        name: "annotation-group-shortcuts", dark: dark)
+    }
+  }
+
   /// 经真实按钮回调选择样式，避免仅改测试字段而未刷新托盘的选中态。
   private func annotationOption(in view: NSView, title: String) -> NSButton? {
     if let button = view as? NSButton, button.title == title { return button }
