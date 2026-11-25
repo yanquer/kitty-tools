@@ -86,7 +86,7 @@ struct ShotKeysTests {
     // 翻译、取消没有。上次区域、取色不在工具栏上（只能在设置页改）
     let items: [EditorToolbar.Item] =
       Annotation.Tool.allCases.map { .tool($0) } + [
-        .undo, .redo, .output(.recognize), .output(.inspect), .output(.pin), .output(.save),
+        .erase, .undo, .redo, .output(.recognize), .output(.inspect), .output(.pin), .output(.save),
         .output(.copy), .saveMenu,
         .scroll, .record,
       ]

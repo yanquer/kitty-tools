@@ -216,6 +216,7 @@ final class EditorToolbar: PopView {
 
   enum Item: Equatable {
     case tool(Annotation.Tool)
+    case erase, transform
     case undo
     case redo
     /// .output(.save) 是保存本体（单击快速保存）
@@ -248,6 +249,8 @@ final class EditorToolbar: PopView {
     let left: [[Spec]] = [
       // 有快捷键的按钮悬停提示由 tip(for:name:) 现写（截图时的快捷键能改），这里的提示位先填名字
       Annotation.Tool.allCases.map { (.tool($0), $0.symbol, $0.title, $0.title) },
+      ([(.erase, "eraser", "对象橡皮擦", "对象橡皮擦")] as [Spec])
+        + (mode == .capture ? [] : [(.transform, "rotate.right", "旋转与镜像", "旋转与镜像")]),
       [
         (.undo, "arrow.uturn.backward", "撤销", "撤销"),
         (.redo, "arrow.uturn.forward", "重做", "重做"),
@@ -313,6 +316,12 @@ final class EditorToolbar: PopView {
     update(tool: nil, canUndo: false, canRedo: false)
   }
 
+  /// 独立擦除命令沿用截图强调色和原生读屏状态，不改变原有十种工具编号。
+  func setEraserSelected(_ selected: Bool) {
+    button(for: .erase)?.contentTintColor = selected ? Style.Shot.accent : Style.HUD.text
+    button(for: .erase)?.setAccessibilityValue(selected ? "已选中" : "未选中")
+  }
+
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
   private func makeButtons(_ groups: [[(Item, String, String, String)]]) -> [NSView] {
@@ -361,6 +370,7 @@ final class EditorToolbar: PopView {
   static func shotKey(for item: Item) -> ShotKey? {
     switch item {
     case .tool(let tool): ShotKey(tool)
+    case .erase: .erase
     case .undo: .undo
     case .redo: .redo
     case .output(.recognize): .recognize

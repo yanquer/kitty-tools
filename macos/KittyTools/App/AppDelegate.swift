@@ -358,6 +358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       }
     }
     board.edit = { [unowned self] panel in editPin(panel) }
+    board.problem = { [unowned self] in island.show("图片未变换", detail: $0, tone: .error) }
     return board
   }()
 
@@ -3107,7 +3108,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ) { [weak self, weak pin] action, image, _, annotations in
       guard let self, let pin, pins.panels.contains(where: { $0 === pin }) else { return }
       if action == .pin {
-        pin.applyEdits(image: image, annotations: annotations)
+        pin.applyEdits(
+          image: image, annotations: annotations, base: self.annotateOverlay?.baseImage)
         applied = true
         Log.capture.notice("钉图编辑已应用 annotations=\(annotations.count)")
       } else {
@@ -3134,7 +3136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     annotations: [Annotation] = [], name: String = "长截图", strictOutput: Bool = false
   ) {
     annotateOverlay?.close()
-    let original = image
+    let originalInput = image
     let editor = AnnotateOverlay(
       image: image, scale: scale, annotations: annotations, strictOutput: strictOutput
     ) {
@@ -3142,6 +3144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       // 改完的标注回写到历史那一条（拍板 C4：更新同一条，不新建），缩略图照这张成品缩、不再读原图重合成（R6）。
       // 新画的马赛克打进存下的原图（E6）：用遮罩里这张没画标注的，不再读盘。
       // 编号要等历史记完（刚拼好的长截图是并行记的）：另起任务等，不挡出图（同截图那条路）
+      let original = annotateOverlay?.baseImage ?? originalInput
       let remembered = Task { await history?() }
       Task {
         if let id = await remembered.value {

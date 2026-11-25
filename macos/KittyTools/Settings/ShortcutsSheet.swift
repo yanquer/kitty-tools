@@ -452,6 +452,8 @@ struct ShortcutsSheet: View {
         title: "截图 · 标注", symbol: "pencil.tip.crop.circle", color: Style.Family.screenshot,
         features: [.screenshot],
         entries: toolEntries + [
+          Entry(key(.erase), text: "对象橡皮擦；拖过删除整条标注，一次拖动一步撤销"),
+          Entry(text: "直线工具的「尺寸（px）」形态显示图片像素长度，调整端点自动更新"),
           Entry("⇧", text: "画正方形、正圆、45° 线；拖角时保持比例"),
           Entry("⌥", text: "从中心画矩形、椭圆，或从中心改大小"),
           Entry("⌘+", "⌘-", text: "文字大一号 / 小一号（输入时、选中文字时）"),
@@ -578,6 +580,7 @@ struct ShortcutsSheet: View {
           Entry("⇧O", text: "查看识字结果"),
           Entry("⌘E", text: "继续标注，应用后更新当前钉图"),
           Entry("⌘Z", text: "进入或退出局部放大"),
+          Entry(text: "右键可旋转、水平/垂直翻转，并撤销/重做图像变换；标注编辑器内使用工具栏的「旋转与镜像」"),
           Entry("⌘L", text: "锁定 / 解锁钉图，防止误拖、缩放与双击关闭"),
           Entry("⌘M", text: "收起为小卡片 / 展开钉图"),
           Entry("⌘F", text: "专注当前钉图 / 恢复其他钉图"),

@@ -13,6 +13,7 @@ enum ShotKey: String, CaseIterable {
   case rectangle, ellipse, arrow, line, pen, highlighter, text, counter, mosaic, spotlight
   case copy, save, saveAs, pin, recognize, inspect, scroll, record, undo, redo, lastRegion,
     pickColor
+  case erase
 
   /// 设置页的两组：十种标注工具，出图和别的
   static var tools: [ShotKey] { Annotation.Tool.allCases.map { ShotKey($0) } }
@@ -41,6 +42,7 @@ enum ShotKey: String, CaseIterable {
   var title: String {
     if let tool { return tool.title }
     return switch self {
+    case .erase: "对象橡皮擦"
     case .copy: "拷贝"
     case .save: "存储"
     case .saveAs: "另存为…"
@@ -61,6 +63,7 @@ enum ShotKey: String, CaseIterable {
   var symbol: String {
     if let tool { return tool.symbol }
     return switch self {
+    case .erase: "eraser"
     case .copy: "checkmark"
     case .save: "square.and.arrow.down"
     case .saveAs: "square.and.arrow.down.on.square"
@@ -86,6 +89,7 @@ enum ShotKey: String, CaseIterable {
     if let tool { return HotKey(keyCode: digits[tool.rawValue - 1], modifiers: 0) }
     let (code, modifiers) =
       switch self {
+      case .erase: (kVK_ANSI_E, 0)
       case .copy: (kVK_ANSI_C, cmdKey)
       case .save: (kVK_ANSI_S, cmdKey)
       case .saveAs: (kVK_ANSI_S, cmdKey | shiftKey)

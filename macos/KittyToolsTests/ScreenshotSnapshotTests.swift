@@ -1581,6 +1581,74 @@ struct ScreenshotSnapshotTests {
     }
   }
 
+  /// 新工具栏、尺寸读数及旋转后的文字使用假图屏外渲染，绝不打开真实遮罩。
+  @Test(.enabled(if: directory != nil)) func renderAnnotationEnhancements() async throws {
+    let desktop = try Self.desktop()
+    try enhancement(
+      ShortcutsSheet(page: .screenshot), size: NSSize(width: ShortcutsSheet.width, height: 1200),
+      name: "annotation-shortcuts")
+    for (name, query) in [("erase", "橡皮擦"), ("dimension", "尺寸"), ("transform", "镜像")] {
+      try enhancement(
+        ShortcutsSheet(page: .screenshot, query: query),
+        size: NSSize(width: ShortcutsSheet.width, height: 520), name: "annotation-shortcuts-" + name
+      )
+    }
+    let h = Harness(image: desktop)
+    h.view.select(CGRect(x: 120, y: 160, width: 900, height: 500))
+    h.view.annotations = [
+      Annotation(
+        shape: .line(from: CGPoint(x: 260, y: 360), to: CGPoint(x: 780, y: 360)),
+        style: .init(color: .red, option: 1)),
+      Annotation(
+        shape: .text("尺寸随端点实时更新", origin: CGPoint(x: 300, y: 510)),
+        style: .init(color: .white, option: 2)),
+    ]
+    h.move(CGPoint(x: 1100, y: 740))
+    try shoot(h.window, "annotation-dimension")
+    h.view.tool = .line
+    let option = try #require(annotationOption(in: h.view, title: "尺寸（px）"))
+    let action = try #require(option.action)
+    #expect(NSApp.sendAction(action, to: option.target, from: option))
+    #expect(h.view.style.option == 1)
+    h.move(CGPoint(x: 1100, y: 740))
+    try shoot(h.window, "annotation-dimension-tray")
+    if let tray = h.styleBar { try shootContent(tray, "annotation-dimension-tray") }
+    h.key(kVK_ANSI_E, "e")
+    try shoot(h.window, "annotation-eraser")
+    if let toolbar = h.view.subviews.compactMap({ $0 as? EditorToolbar }).first {
+      for (index, hud) in referenceBars(in: toolbar).enumerated() {
+        try shootContent(hud, "annotation-tools-\(index)")
+      }
+    }
+    let editor = AnnotateOverlay(image: desktop, scale: 1, strictOutput: true) { _, _, _, _ in }
+    defer { editor.close() }
+    editor.panel.setFrameOrigin(CGPoint(x: -20000, y: -20000))
+    try #require(editor.panel.frame.maxX < 0 && editor.panel.frame.maxY < 0)
+    try shoot(editor.panel, "image-transform-editor")
+    if let root = editor.panel.contentView {
+      for (index, hud) in referenceBars(in: root).enumerated() {
+        try shootContent(hud, "image-transform-tools-\(index)")
+      }
+    }
+    let canvas = ScrollCanvas(image: desktop, scale: 1)
+    canvas.annotations = [
+      Annotation(
+        shape: .text("文字仍然可以编辑", origin: CGPoint(x: 180, y: 500)),
+        style: .init(color: .white, option: 2))
+    ]
+    canvas.transform(.right)
+    for _ in 0..<250 where canvas.isTransforming { try await Task.sleep(for: .milliseconds(20)) }
+    #expect(!canvas.isTransforming)
+    try shoot(offscreen(canvas), "image-transformed-text")
+    canvas.cancelTransform()
+  }
+
+  /// 经真实按钮回调选择样式，避免仅改测试字段而未刷新托盘的选中态。
+  private func annotationOption(in view: NSView, title: String) -> NSButton? {
+    if let button = view as? NSButton, button.title == title { return button }
+    return view.subviews.lazy.compactMap { annotationOption(in: $0, title: title) }.first
+  }
+
   /// 查找桥接出的原生编辑器，只改变本次假文字，不发送系统键鼠。
   private func recognitionEditor(in view: NSView) -> RecognitionText? {
     if let editor = view as? RecognitionText { return editor }

@@ -153,6 +153,9 @@ final class SelectionView: NSView, NSTextViewDelegate {
   }
 
   private var annotationCanvas: AnnotationCanvas?
+  private var erasing = false
+  private var eraseBefore: [Annotation]?
+  private var erasePoint: CGPoint?
   /// 标注层下面的聚光灯压暗（偶奇填充：选区 + 洞，见 AnnotationCanvas）
   private let dimCanvas = Canvas()
   private let spotlightDim = CAShapeLayer()
@@ -1296,6 +1299,8 @@ final class SelectionView: NSView, NSTextViewDelegate {
       if item != .saveMenu { hudMenu?.dismiss() }
       switch item {
       case .tool(let tool): choose(tool)
+      case .erase: chooseEraser()
+      case .transform: break
       case .undo: undo()
       case .redo: redo()
       case .output(let action): output(action)
@@ -1378,6 +1383,7 @@ final class SelectionView: NSView, NSTextViewDelegate {
       return
     }
     // 输入文字时重做钮灰掉：点它会先收下文字（记一步、清空重做），什么也重做不了（⇧⌘Z 归输入框自己）
+    toolbar.setEraserSelected(erasing)
     toolbar.update(
       tool: tool, canUndo: !undoStack.isEmpty, canRedo: !redoStack.isEmpty && editor == nil)
     let (origin, edge, anchorX) = Self.toolbarPlacement(
@@ -1870,9 +1876,10 @@ final class SelectionView: NSView, NSTextViewDelegate {
   /// 正拖着标注（画、挪、改大小）：撤销 / 重做 / 删除 / 复制 / 方向键挪标注都不响应。松手时要按按下前的样子记一步撤销，
   /// 中途改了标注列表，撤销栈和松手时的那一步就对不上了
   private var isDraggingAnnotation: Bool {
+    if eraseBefore != nil { return true }
     switch drag {
-    case .annotate?, .moveAnnotation?, .resizeAnnotation?: true
-    default: false
+    case .annotate?, .moveAnnotation?, .resizeAnnotation?: return true
+    default: return false
     }
   }
 
@@ -1894,6 +1901,12 @@ final class SelectionView: NSView, NSTextViewDelegate {
 
   /// 再按一次同一个工具就收起（回到拖动平移选区）；选上时读这个工具上次的样式
   private func choose(_ next: Annotation.Tool) {
+    if let before = eraseBefore {
+      eraseBefore = nil
+      erasePoint = nil
+      recordUndo(from: before)
+    }
+    erasing = false
     endEditing()
     pickingColor = false  // 换工具就不取色了
     let chosen = tool == next ? nil : next
@@ -1903,6 +1916,31 @@ final class SelectionView: NSView, NSTextViewDelegate {
     selectedAnnotation = nil
     refreshCursor()
     announce(chosen.map { "\($0.title)工具" } ?? "已收起工具")
+  }
+
+  /// 擦除独立于持久化工具编号，保留同一截图的底图与选区。
+  private func chooseEraser() {
+    if let before = eraseBefore {
+      eraseBefore = nil
+      erasePoint = nil
+      recordUndo(from: before)
+    }
+    endEditing()
+    pickingColor = false
+    tool = nil
+    selectedAnnotation = nil
+    erasing.toggle()
+    clickSelected = nil
+    toolbar?.setEraserSelected(erasing)
+    refreshCursor()
+    announce(erasing ? "对象橡皮擦，拖过删除整条标注" : "已收起对象橡皮擦")
+  }
+
+  /// 连续笔画按线段命中对象，整笔松手后统一登记撤销。
+  private func erase(to point: CGPoint) {
+    let from = erasePoint ?? point
+    annotations.removeAll { $0.intersectsEraser(from: from, to: point) }
+    erasePoint = point
   }
 
   /// 改了标注就记一步撤销（没变不记）
@@ -2558,7 +2596,7 @@ final class SelectionView: NSView, NSTextViewDelegate {
     let pressedBend = bendPressed
     bendPressed = nil
     if let armed, event.clickCount == 2, event.timestamp - armed.time < NSEvent.doubleClickInterval,
-      isAdjusting, tool == nil, selection?.contains(point) == true
+      isAdjusting, tool == nil, !erasing, selection?.contains(point) == true
     {
       return confirm()
     }
@@ -2577,6 +2615,11 @@ final class SelectionView: NSView, NSTextViewDelegate {
     if isOverBars(point) { return }
     // 在输入文字时点了输入框外面：先把文字收下，这一下不做别的
     if editor != nil { return endEditing() }
+    if erasing, isAdjusting, selection?.contains(point) == true {
+      eraseBefore = annotations
+      erase(to: point)
+      return
+    }
     if isAdjusting, let selection {
       // 双击箭头 / 直线的弯曲手柄：拉直（记一步撤销，本来就直的不记）。第一下也得按在它上面（见 bendPressed）
       let grip = annotationHandle(at: point)
@@ -2647,6 +2690,10 @@ final class SelectionView: NSView, NSTextViewDelegate {
 
   override func mouseDragged(with event: NSEvent) {
     let point = point(event)
+    if eraseBefore != nil {
+      erase(to: point)
+      return
+    }
     modifiers = event.modifierFlags
     dragPoint = point
     if !session.hasSelection(besides: self) { mouse = point }
@@ -2786,6 +2833,12 @@ final class SelectionView: NSView, NSTextViewDelegate {
   }
 
   override func mouseUp(with event: NSEvent) {
+    if let before = eraseBefore {
+      eraseBefore = nil
+      erasePoint = nil
+      recordUndo(from: before)
+      return
+    }
     let finished = drag
     guides = (nil, nil)
     dragPoint = nil
@@ -2859,6 +2912,10 @@ final class SelectionView: NSView, NSTextViewDelegate {
 
   /// 光标只能手动设（见 updateTrackingAreas）：状态一变就按鼠标当前位置重设
   private func refreshCursor() {
+    if erasing {
+      NSCursor.crosshair.set()
+      return
+    }
     guard adjusts else { return }
     guard isAdjusting, let selection, let point = mouse else { return NSCursor.crosshair.set() }
     if let translationCard, translationCard.hasText(at: point, in: self) {
@@ -2952,6 +3009,16 @@ final class SelectionView: NSView, NSTextViewDelegate {
   ]
 
   override func keyDown(with event: NSEvent) {
+    if Int(event.keyCode) == kVK_Escape, let before = eraseBefore {
+      annotations = before
+      eraseBefore = nil
+      erasePoint = nil
+      return
+    }
+    if Int(event.keyCode) == kVK_Escape, erasing {
+      chooseEraser()
+      return
+    }
     session.colorShiftArmed = false
     if let key = rebinding { return rebind(key, with: event) }
     let code = Int(event.keyCode)
@@ -3023,6 +3090,10 @@ final class SelectionView: NSView, NSTextViewDelegate {
     }
     guard annotates else { return false }
     guard isAdjusting else { return true }
+    if key == .erase {
+      chooseEraser()
+      return true
+    }
     if let tool = key.tool {
       choose(tool)
       return true

@@ -22,7 +22,8 @@ import OSLog
   private static let zoomStep: CGFloat = 1.25
   private static let saveMenuLabel = "存储选项"
 
-  private let image: CGImage
+  private var image: CGImage { canvas.image }
+  var baseImage: CGImage { canvas.image }
   /// 像素 / 点
   private let scale: CGFloat
   /// 单测直接摆状态、发按键用
@@ -59,7 +60,6 @@ import OSLog
     appliesToPin: Bool = false, strictOutput: Bool = false,
     output: @escaping Output
   ) {
-    self.image = image
     self.scale = scale
     self.output = output
     self.appliesToPin = appliesToPin
@@ -116,6 +116,8 @@ import OSLog
       canvas.renumberSelected(by: delta)
     }
     canvas.onState = { [unowned self] in syncBars() }
+    canvas.onProblem = { [weak self] in self?.onProblem($0) }
+    canvas.onImageChange = { [weak self] in self?.imageChanged() }
 
     let content = AnnotateOverlayView()
     content.frame = CGRect(origin: .zero, size: target.frame.size)
@@ -211,6 +213,7 @@ import OSLog
   }
 
   func close() {
+    canvas.cancelTransform()
     NotificationCenter.default.removeObserver(self)
     panel.orderOut(nil)
     onClose()
@@ -256,6 +259,7 @@ import OSLog
   /// 工具栏浮在内容底部居中（离底 16，同截图工具栏离选区 10 的那条边）
   /// 工具栏和样式托盘跟着画布的状态走：托盘在工具栏上方 6 pt、x 对着当前工具那颗钮（夹在窗口里 10 pt）
   private func syncBars() {
+    bar.setEraserSelected(canvas.erasing)
     bar.update(tool: canvas.tool, canUndo: canvas.canUndo, canRedo: canvas.canRedo)
     guard let owner = canvas.styleOwner, let content = panel.contentView else {
       return styleBar.setShown(false)
@@ -296,10 +300,34 @@ import OSLog
     case .cancel: dismiss()
     case .saveMenu: toggleSaveMenu()
     case .tool(let tool): canvas.choose(tool)
+    case .erase: canvas.chooseEraser()
+    case .transform: toggleTransformMenu()
     case .undo: canvas.undo()
     case .redo: canvas.redo()
     case .scroll, .record: break  // 长图的工具栏里没有这两颗
     }
+  }
+
+  /// 底图改变后重排显示区域，继续使用同一画布与撤销历史。
+  private func imageChanged() {
+    guard let screen = panel.screen ?? NSScreen.main else { return }
+    box = Self.imageBox(pointSize: pointSize, in: screen.visibleFrame, origin: screen.frame.origin)
+    scrollView.frame = box
+    zoomToFit()
+    scrollToTop()
+    placeBar()
+    placeOutline()
+    syncBars()
+  }
+
+  /// 变换是显式菜单动作，后台工作期间不能重复提交或输出旧方向的图片。
+  private func toggleTransformMenu() {
+    guard !canvas.isTransforming, let button = bar.button(for: .transform) else { return }
+    let next = HUDMenu(
+      ImageTransform.Action.allCases.map { action in
+        .init(title: action.title) { [weak self] in self?.canvas.transform(action) }
+      }, label: "旋转与镜像")
+    present(next, anchor: button.convert(button.bounds, to: panel.contentView))
   }
 
   /// 存储右边的 ▾：HUD 菜单「存储到「桌面」⌘S / 另存为… ⇧⌘S」，锚在存储钮下方（同截图工具栏、长截图面板的那一份，
@@ -379,6 +407,8 @@ import OSLog
 
   /// 拷贝 / 存储 / 另存为完就收起遮罩（这一次到此结束）；识字只是把文字拿走，遮罩留着
   private func emit(_ action: RegionSelector.Action) {
+    guard !canvas.isTransforming else { return onProblem("正在变换图片，请稍后再输出") }
+    guard !canvas.hasPendingGesture else { return onProblem("请先松开鼠标结束当前操作") }
     // 一键打码还在识字：等它落下再出图，不然号码跟着图出去了
     if canvas.redacting {
       NSSound.beep()
@@ -400,7 +430,7 @@ import OSLog
 
   /// 取消：画过标注的要按两下（遮罩里不弹系统框，同录屏的放弃；第一下提示音 + 顶部提示）
   private func dismiss() {
-    guard canvas.hasAnnotations, !armedEscape else { return close() }
+    guard canvas.hasChanges, !armedEscape else { return close() }
     armedEscape = true
     NSSound.beep()
     Island.announce("再按一次 Esc 放弃这些标注")

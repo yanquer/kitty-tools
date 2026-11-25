@@ -55,6 +55,7 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
     var optionTitles: [String] {
       switch self {
       case .rectangle, .ellipse: ["空心", "实心"]
+      case .line: ["直线", "尺寸（px）"]
       case .arrow: ["单头", "双头"]  // 2026-11-12 拍板 O4
       case .text: ["无底", "描边", "底色"]
       case .mosaic: ["像素", "模糊"]
@@ -270,6 +271,7 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
   var id = UUID()
   var shape: Shape
   var style = Style()
+  var textTransform: ImageTransform.Pose?
 
   var tool: Tool {
     switch shape {
@@ -290,6 +292,7 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
 
   /// 画出来占的范围（含线宽、箭头，不含阴影），用来画选中框、点中文字和马赛克
   var bounds: CGRect {
+    if let pose = textTransform { return untransformedText.bounds.applying(pose.affine) }
     let width = style.weight.lineWidth
     switch shape {
     case .rectangle(let rect), .ellipse(let rect):
@@ -299,6 +302,7 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
       let pad = max(Self.arrowWing(from: from, to: to, width: width, bend: bend), width)
       return Self.curveBox(from, to, bend).insetBy(dx: -pad, dy: -pad)
     case .line(let from, let to, let bend):
+      if isDimension { return Self.box(from, to).insetBy(dx: -6, dy: -6).union(dimensionBounds) }
       return Self.curveBox(from, to, bend).insetBy(dx: -width / 2, dy: -width / 2)
     case .highlighter(let from, let to):
       let half = style.weight.highlighterHeight / 2
@@ -387,6 +391,14 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
   /// 点中它没有：空心矩形 / 椭圆和聚光灯只认边线（里面点不中，免得挡住下面的标注、聚光灯里还要接着画），
   /// 线类认线（箭头连箭头），实心形状、文字、序号、马赛克认整块
   func contains(_ point: CGPoint, tolerance: CGFloat = 4) -> Bool {
+    if let pose = textTransform {
+      return untransformedText.contains(
+        point.applying(pose.affine.inverted()), tolerance: tolerance)
+    }
+    if isDimension, case .line(let from, let to, _) = shape {
+      return dimensionBounds.contains(point)
+        || Self.distance(from: point, toSegment: from, to) <= style.weight.lineWidth / 2 + tolerance
+    }
     let width = style.weight.lineWidth
     let filled = style.option == 1
     switch shape {
@@ -448,6 +460,13 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
   }
 
   func offset(by delta: CGSize) -> Annotation {
+    if var pose = textTransform {
+      var next = self
+      pose.tx += delta.width
+      pose.ty += delta.height
+      next.textTransform = pose
+      return next
+    }
     let shift = { (point: CGPoint) in
       CGPoint(x: point.x + delta.width, y: point.y + delta.height)
     }
@@ -478,6 +497,9 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
 
   /// 同 handles；zoom：屏幕上每点画多大（长图缩小着看时边中点按屏幕上的边长判断给不给，不然和角挤成一团）
   func handles(zoom: CGFloat) -> [(Handle, CGPoint)] {
+    if let pose = textTransform {
+      return untransformedText.handles(zoom: zoom).map { ($0.0, $0.1.applying(pose.affine)) }
+    }
     switch shape {
     case .rectangle(let rect), .ellipse(let rect), .mosaic(let rect), .spotlight(let rect):
       let minimum = Self.edgeHandleMinimum / max(zoom, 0.01)
@@ -502,7 +524,7 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
           ]
           : [])
     case .arrow(let from, let to, let bend), .line(let from, let to, let bend):
-      let roomy = hypot(to.x - from.x, to.y - from.y) >= 32
+      let roomy = !isDimension && hypot(to.x - from.x, to.y - from.y) >= 32
       return [(.start, from), (.end, to)]
         + (roomy ? [(.bend, Self.curveMidpoint(from: from, to: to, bend: bend))] : [])
     case .highlighter(let from, let to):
@@ -526,6 +548,13 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
   func resized(_ handle: Handle, to point: CGPoint, constrained: Bool, fromCenter: Bool = false)
     -> Annotation
   {
+    if let pose = textTransform {
+      var resized = untransformedText.resized(
+        handle, to: point.applying(pose.affine.inverted()), constrained: constrained,
+        fromCenter: fromCenter)
+      resized.textTransform = pose
+      return resized
+    }
     var next = self
     switch (shape, handle) {
     case (.rectangle(let rect), _), (.ellipse(let rect), _), (.mosaic(let rect), _),
@@ -770,6 +799,14 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
   }
 
   private func draw(in context: CGContext, image: CGImage, viewSize: CGSize, shadowScale: CGFloat) {
+    if let pose = textTransform {
+      context.saveGState()
+      context.concatenate(pose.affine)
+      untransformedText.draw(
+        in: context, image: image, viewSize: viewSize, shadowScale: shadowScale)
+      context.restoreGState()
+      return
+    }
     // 实心矩形 / 椭圆：先铺 0.28 的底（不带阴影，免得底下透出一片灰；铺满整块，不切条），再描带阴影的边
     if style.option == 1, let path = boxPath {
       context.setFillColor(style.paint.withAlphaComponent(0.28).cgColor)
@@ -814,6 +851,10 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
   /// 小的、没有骨架的直接画。矩形、椭圆原来也切，2026-10-13 起不切：屏幕上的标注层里每条都要模糊整个外框，
   /// 条越多越慢（见 strokeHalo）；箭头、直线在那里切不切差不多（1400 × 900 的斜线一步几毫秒到十毫秒）
   private func banded(in context: CGContext, _ body: () -> Void) {
+    if isDimension {
+      body()
+      return
+    }
     let clip = context.boundingBoxOfClipPath
     let overlap = drawBounds.intersection(clip)
     guard let (lines, reach) = skeleton, !overlap.isNull,
@@ -912,6 +953,13 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
   private func drawInk(
     in context: CGContext, image: CGImage, viewSize: CGSize, shadowScale: CGFloat, ink: CGPath?
   ) {
+    if isDimension {
+      drawDimension(
+        in: context, imageSize: CGSize(width: image.width, height: image.height), viewSize: viewSize
+      )
+      return
+    }
+
     let color = style.paint
     let width = style.weight.lineWidth
     context.saveGState()

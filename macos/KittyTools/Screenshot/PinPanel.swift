@@ -24,6 +24,7 @@ import UniformTypeIdentifiers
   private(set) var isHidden = false
   private(set) var focused: PinPanel?
   /// 拷贝 / 快速保存 / 另存为 / 识字并拷贝 / 翻译（动作、图、像素 / 点；.pin 不会来），由 AppDelegate 接到截图的输出上
+  @ObservationIgnored var problem: (String) -> Void = { Island.announce($0) }
   @ObservationIgnored var output: @MainActor (RegionSelector.Action, CGImage, CGFloat) -> Void = {
     _, _, _ in
   }
@@ -44,6 +45,7 @@ import UniformTypeIdentifiers
     let panel = PinPanel(
       image: image, frame: frame, board: self, original: original,
       annotations: annotations, scale: scale)
+    panel.onProblem = { [weak self] in self?.problem($0) }
     panels.append(panel)
     panel.popIn()
     Island.announce("已钉到屏幕")
@@ -61,6 +63,7 @@ import UniformTypeIdentifiers
   }
 
   func close(_ panel: PinPanel) {
+    panel.cancelTransform()
     panels.removeAll { $0 === panel }
     if focused === panel { focused = nil }
     if panels.isEmpty { isHidden = false }
@@ -69,7 +72,10 @@ import UniformTypeIdentifiers
   }
 
   func closeAll() {
-    for panel in panels { panel.fadeOut() }
+    for panel in panels {
+      panel.cancelTransform()
+      panel.fadeOut()
+    }
     panels = []
     focused = nil
     isHidden = false
@@ -291,7 +297,15 @@ extension PinBoard {
 
 /// 一张钉图。无边框窗口默认当不了 key（收不到 Esc / ⌘C），所以要子类化
 final class PinPanel: NSPanel {
-  let original: CGImage
+  private(set) var original: CGImage
+  private let sourceImage: CGImage
+  private(set) var isTransforming = false
+  private var transformTask: Task<Void, Never>?
+  private var transformUndo: [ImageTransform.Action] = []
+  private var transformRedo: [ImageTransform.Action] = []
+  var canUndoTransform: Bool { !transformUndo.isEmpty }
+  var canRedoTransform: Bool { !transformRedo.isEmpty }
+  var onProblem: (String) -> Void = { Island.announce($0) }
   let editingScale: CGFloat
   /// 输出沿用钉上时的显示倍率，与查看取景和编辑坐标倍率分别保存。
   let outputScale: CGFloat
@@ -307,6 +321,7 @@ final class PinPanel: NSPanel {
     annotations: [Annotation] = [], scale: CGFloat? = nil
   ) {
     self.original = original ?? image
+    sourceImage = original ?? image
     self.annotations = annotations
     outputScale = CGFloat(image.width) / max(frame.width, 1)
     editingScale = scale ?? outputScale
@@ -332,6 +347,7 @@ final class PinPanel: NSPanel {
   /// 锁定只防止误操作，右键、复制、解锁和明确关闭入口始终保留。
   func setLocked(_ locked: Bool) {
     guard locked != isLocked else { return }
+    if isTransforming { cancelTransform(reason: "lock") }
     finishPopIn()
     isLocked = locked
     (contentView as? PinView)?.lockChanged()
@@ -374,9 +390,93 @@ final class PinPanel: NSPanel {
   }
 
   /// 应用标注时只更新当前钉图，不新建副本，也不改动当前窗口位置。
-  func applyEdits(image: CGImage, annotations: [Annotation]) {
+  func applyEdits(image: CGImage, annotations: [Annotation], base: CGImage? = nil) {
+    if let base {
+      original = base
+      transformUndo = []
+      transformRedo = []
+    }
     self.annotations = annotations
-    (contentView as? PinView)?.replaceImage(image)
+    replaceTransformedImage(image)
+  }
+
+  /// 原图与成品后台同向变换；撤销只存操作，避免保留一串大位图。
+  func transform(_ action: ImageTransform.Action, replay: Int = 0) {
+    guard !isLocked, !isTransforming, !isEditing, let composed = image else { return }
+    setMiniature(false)
+    finishPopIn()
+    isTransforming = true
+    let base = original
+    let size = CGSize(
+      width: CGFloat(base.width) / editingScale, height: CGFloat(base.height) / editingScale)
+    let operation = UUID().uuidString
+    Log.capture.notice(
+      "钉图变换开始 operation=\(operation, privacy: .public) action=\(action.rawValue, privacy: .public)")
+    transformTask = Task { [weak self] in
+      do {
+        let changedBase = try await ImageTransform.image(base, action: action)
+        let changed =
+          composed === base ? changedBase : try await ImageTransform.image(composed, action: action)
+        guard !Task.isCancelled, let self else { return }
+        original = changedBase
+        annotations = annotations.map { $0.transformed(action, size: size) }
+        if replay < 0, let previous = transformUndo.popLast() {
+          transformRedo.append(previous)
+        } else if replay > 0, let next = transformRedo.popLast() {
+          transformUndo.append(next)
+        } else {
+          transformUndo.append(action)
+          transformRedo = []
+          if transformUndo.count > 100 { transformUndo.removeFirst() }
+        }
+        replaceTransformedImage(changed, resetView: true)
+        isTransforming = false
+        Log.capture.notice("钉图变换完成 operation=\(operation, privacy: .public)")
+      } catch {
+        guard !Task.isCancelled, let self else { return }
+        isTransforming = false
+        Log.capture.error(
+          "钉图变换失败 operation=\(operation, privacy: .public) cause=\(String(reflecting: error), privacy: .public)"
+        )
+        onProblem(error.localizedDescription)
+      }
+    }
+  }
+
+  /// 逆操作恢复方向和标注，不改变原图来源或把标注烘焙进底图。
+  func undoTransform() {
+    if let action = transformUndo.last { transform(action.inverse, replay: -1) }
+  }
+
+  /// 重新采用被撤销的操作。
+  func redoTransform() { if let action = transformRedo.last { transform(action, replay: 1) } }
+
+  /// 关闭后旧任务不能重新改动已收起的窗口。
+  func cancelTransform(reason: String = "close") {
+    if isTransforming {
+      Log.capture.notice("钉图变换取消 window=\(self.windowNumber) stage=\(reason, privacy: .public)")
+    }
+    transformTask?.cancel()
+    transformTask = nil
+    isTransforming = false
+  }
+
+  /// 保持当前查看倍率和中心，方向变化后按所在屏幕夹回可见范围。
+  private func replaceTransformedImage(_ image: CGImage, resetView: Bool = false) {
+    let old = self.image ?? image
+    let oldFrame = frame
+    let size = CGSize(
+      width: oldFrame.width * CGFloat(image.width) / CGFloat(old.width),
+      height: oldFrame.height * CGFloat(image.height) / CGFloat(old.height))
+    (contentView as? PinView)?.replaceImage(image, resetView: resetView)
+    if size != oldFrame.size {
+      let desired = CGRect(
+        x: oldFrame.midX - size.width / 2, y: oldFrame.midY - size.height / 2, width: size.width,
+        height: size.height)
+      let screen = NSScreen.screens.first { $0.frame.intersects(oldFrame) }?.visibleFrame
+      setFrame(Self.restoredMiniature(desired, size: size, within: screen), display: true)
+    }
+    invalidateShadow()
   }
 
   /// 当前合成图供编辑完成后的完整性验证与输出使用。
@@ -503,7 +603,7 @@ private final class PinView: NSView {
   private var localZoom = PinZoom()
   private var panStart: (point: CGPoint, center: CGPoint)?
   /// 钉上时的大小（点）：缩放的基准
-  private let originalSize: CGSize
+  private var originalSize: CGSize
   private unowned let board: PinBoard
 
   /// 悬停后右上角的三个圆钮（透明度、锁定、关闭）：15 使用按钮栈，26 使用同一玻璃容器共用取样。
@@ -641,7 +741,7 @@ private final class PinView: NSView {
   private var scale: CGFloat { CGFloat(image.width) / originalSize.width }
 
   override func mouseDown(with event: NSEvent) {
-    if panel?.isLocked == true {
+    if panel?.isLocked == true || panel?.isTransforming == true {
       window?.makeKey()
       return
     }
@@ -684,8 +784,17 @@ private final class PinView: NSView {
   }
 
   /// 更换合成图时保留查看倍率，下一次重画使用新内容。
-  func replaceImage(_ image: CGImage) {
+  func replaceImage(_ image: CGImage, resetView: Bool = false) {
     self.image = image
+    if let panel {
+      originalSize = CGSize(
+        width: CGFloat(image.width) / panel.outputScale,
+        height: CGFloat(image.height) / panel.outputScale)
+    }
+    if resetView {
+      localZoom = PinZoom()
+      panStart = nil
+    }
     needsDisplay = true
   }
 
@@ -699,7 +808,8 @@ private final class PinView: NSView {
 
   /// 以鼠标为锚点缩放，保持宽高比：最小到原大的 10%、且宽高都不小于 24 点（原图本来更小就是原大），最大 5 倍
   private func zoom(by factor: CGFloat) {
-    guard panel?.isLocked != true, panel?.isMiniature != true, let window, factor.isFinite,
+    guard panel?.isTransforming != true, panel?.isLocked != true, panel?.isMiniature != true,
+      let window, factor.isFinite,
       factor > 0
     else { return }
     panel?.finishPopIn()
@@ -822,16 +932,32 @@ private final class PinView: NSView {
         title: "原始大小", key: "0", keyCode: kVK_ANSI_0, modifiers: .command,
         action: #selector(actualSize)),
       Command(
+        title: "向左旋转 90°", key: "", keyCode: nil, modifiers: [], action: #selector(rotateLeft)),
+      Command(
+        title: "向右旋转 90°", key: "", keyCode: nil, modifiers: [], action: #selector(rotateRight)),
+      Command(
+        title: "水平翻转", key: "", keyCode: nil, modifiers: [], action: #selector(flipHorizontal)),
+      Command(title: "垂直翻转", key: "", keyCode: nil, modifiers: [], action: #selector(flipVertical)),
+      Command(
+        title: "撤销图像变换", key: "", keyCode: nil, modifiers: [], action: #selector(undoTransform)),
+      Command(
+        title: "重做图像变换", key: "", keyCode: nil, modifiers: [], action: #selector(redoTransform)),
+      Command(
         title: "关闭", key: "w", keyCode: kVK_ANSI_W, modifiers: .command, action: #selector(close)),
     ]
   }
 
   /// 锁定期间拒绝改变几何和编辑，复制、识字、透明度、专注、解锁与明确关闭仍可用。
   private func commandIsEnabled(_ action: Selector) -> Bool {
+    if panel?.isTransforming == true { return action == #selector(close) }
+    if action == #selector(undoTransform), panel?.canUndoTransform != true { return false }
+    if action == #selector(redoTransform), panel?.canRedoTransform != true { return false }
     guard panel?.isLocked == true else { return true }
     return ![
       #selector(editImage), #selector(toggleLocalZoom), #selector(toggleMiniature),
-      #selector(actualSize),
+      #selector(actualSize), #selector(rotateLeft), #selector(rotateRight),
+      #selector(flipHorizontal), #selector(flipVertical), #selector(undoTransform),
+      #selector(redoTransform),
     ].contains(action)
   }
 
@@ -853,7 +979,7 @@ private final class PinView: NSView {
     let opacity = NSMenuItem(title: "透明度", action: nil, keyEquivalent: "")
     opacity.submenu = opacityMenu()
     menu.addItem(opacity)
-    for item in items[6..<12] { menu.addItem(item) }
+    for item in items[6..<18] { menu.addItem(item) }
     if let zoomItem = menu.items.first(where: { $0.action == #selector(toggleLocalZoom) }) {
       zoomItem.state = localZoom.isEnabled ? .on : .off
       zoomItem.toolTip = "固定窗口大小，滚轮放大、拖动查看；⌥ 拖动移动窗口。复制与保存保留完整图片。"
@@ -866,7 +992,7 @@ private final class PinView: NSView {
       }
     }
     menu.addItem(.separator())
-    menu.addItem(items[12])
+    menu.addItem(items[18])
     return menu
   }
 
@@ -898,6 +1024,19 @@ private final class PinView: NSView {
       }
     }
   }
+
+  /// 右键与旁白共享四个显式图像方向操作。
+  @objc private func rotateLeft() { panel?.transform(.left) }
+  /// 顺时针旋转。
+  @objc private func rotateRight() { panel?.transform(.right) }
+  /// 水平镜像。
+  @objc private func flipHorizontal() { panel?.transform(.horizontal) }
+  /// 垂直镜像。
+  @objc private func flipVertical() { panel?.transform(.vertical) }
+  /// 撤销最近一次方向变化。
+  @objc private func undoTransform() { panel?.undoTransform() }
+  /// 重做最近一次方向变化。
+  @objc private func redoTransform() { panel?.redoTransform() }
 
   /// 快捷键、右键与旁白共享锁定入口，不使用点击穿透或额外全局热键。
   @objc private func toggleLock() { if let panel { panel.setLocked(!panel.isLocked) } }

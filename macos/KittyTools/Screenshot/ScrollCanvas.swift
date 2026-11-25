@@ -8,9 +8,16 @@
 
 import AppKit
 import Carbon.HIToolbox
+import OSLog
 
 final class ScrollCanvas: NSView, NSTextViewDelegate {
-  let image: CGImage
+  private(set) var image: CGImage
+  private let sourceImage: CGImage
+  private(set) var isTransforming = false
+  private var transformTask: Task<Void, Never>?
+  var onImageChange: () -> Void = {}
+  var onProblem: (String) -> Void = { Island.announce($0) }
+  private(set) var erasing = false
   /// 像素 / 点
   let scale: CGFloat
 
@@ -45,14 +52,24 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
     guard editor == nil, case .counter(let number, _)? = selected?.shape else { return nil }
     return number
   }
-  var canUndo: Bool { !undoStack.isEmpty }
-  var canRedo: Bool { !redoStack.isEmpty }
+  var canUndo: Bool { !isTransforming && !undoKinds.isEmpty }
+  var canRedo: Bool { !isTransforming && !redoKinds.isEmpty }
   var hasAnnotations: Bool { !annotations.isEmpty || editor != nil }
+  var hasChanges: Bool { hasAnnotations || !undoKinds.isEmpty }
+  var hasPendingGesture: Bool { isDraggingAnnotation || eraseBefore != nil }
 
   private let overlay: AnnotationCanvas
   private var draft: Annotation? { didSet { syncAnnotations() } }
   private var undoStack: [[Annotation]] = []
   private var redoStack: [[Annotation]] = []
+  private enum HistoryKind {
+    case annotations
+    case transform(ImageTransform.Action)
+  }
+  private var undoKinds: [HistoryKind] = []
+  private var redoKinds: [HistoryKind] = []
+  private var eraseBefore: [Annotation]?
+  private var erasePoint: CGPoint?
   private var editor: Editor?
   private var drag: Drag?
   private var modifiers: NSEvent.ModifierFlags = []
@@ -70,6 +87,7 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
     let undo = UndoManager()
     let id: UUID?
     let origin: CGPoint
+    let displayOrigin: CGPoint?
     var style: Annotation.Style
   }
 
@@ -85,6 +103,7 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
 
   init(image: CGImage, scale: CGFloat) {
     self.image = image
+    sourceImage = image
     self.scale = scale
     overlay = AnnotationCanvas(image: image)
     super.init(
@@ -218,7 +237,7 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
   private func commit(_ next: [Annotation]) {
     guard next != annotations else { return }
     undoStack.append(annotations)
-    redoStack = []
+    rememberAnnotationStep()
     annotations = next
   }
 
@@ -226,30 +245,149 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
   private func recordUndo(from before: [Annotation]) {
     guard annotations != before else { return }
     undoStack.append(before)
-    redoStack = []
+    rememberAnnotationStep()
     onState()
   }
 
+  /// 标注与图像变换共享顺序；只存操作和矢量快照，不把大位图塞入撤销栈。
   func undo() {
-    guard !isDraggingAnnotation else { return }
+    guard !isTransforming, !isDraggingAnnotation, eraseBefore == nil else { return }
     endEditing()
-    guard let previous = undoStack.popLast() else { return NSSound.beep() }
+    guard let kind = undoKinds.last else { return NSSound.beep() }
+    if case .transform(let action) = kind { return transform(action.inverse, replay: -1) }
+    guard let previous = undoStack.popLast() else { return }
+    _ = undoKinds.popLast()
+    redoKinds.append(.annotations)
     redoStack.append(annotations)
     annotations = previous
     if selected == nil { selectedAnnotation = nil }
   }
 
+  /// 重做维持同一操作顺序，变换失败时不提前移动历史游标。
   func redo() {
-    guard !isDraggingAnnotation else { return }
+    guard !isTransforming, !isDraggingAnnotation, eraseBefore == nil else { return }
     endEditing()
-    guard let next = redoStack.popLast() else { return NSSound.beep() }
+    guard let kind = redoKinds.last else { return NSSound.beep() }
+    if case .transform(let action) = kind { return transform(action, replay: 1) }
+    guard let next = redoStack.popLast() else { return }
+    _ = redoKinds.popLast()
+    undoKinds.append(.annotations)
     undoStack.append(annotations)
     annotations = next
     if selected == nil { selectedAnnotation = nil }
   }
 
+  /// 记录一笔并清重做，最多保留 100 次，避免长会话的矢量快照无限增长。
+  private func rememberAnnotationStep() {
+    undoKinds.append(.annotations)
+    redoKinds = []
+    redoStack = []
+    trimHistory()
+  }
+
+  /// 图像变换不持有额外位图历史，淘汰旧笔画时同时释放对应的矢量数组。
+  private func trimHistory() {
+    while undoKinds.count > 100 {
+      if case .annotations = undoKinds.removeFirst() { undoStack.removeFirst() }
+    }
+  }
+
+  /// 后台变换底图，完成后原子更新标注及撤销快照；取消或失败保持当前会话。
+  func transform(_ action: ImageTransform.Action, replay: Int = 0) {
+    guard !isTransforming, !isDraggingAnnotation, eraseBefore == nil, !redacting else { return }
+    endEditing()
+    let before = image
+    let size = bounds.size
+    isTransforming = true
+    onState()
+    let operation = UUID().uuidString
+    Log.capture.notice(
+      "标注图片变换开始 operation=\(operation, privacy: .public) action=\(action.rawValue, privacy: .public)"
+    )
+    transformTask = Task { [weak self] in
+      do {
+        let result = try await ImageTransform.image(before, action: action)
+        guard !Task.isCancelled, let self else { return }
+        let split = undoStack.count
+        let batches = ImageTransform.annotations(
+          [annotations] + undoStack + redoStack, action: action, size: size)
+        annotations = batches[0]
+        undoStack = Array(batches[1..<(1 + split)])
+        redoStack = Array(batches[(1 + split)...])
+        if replay < 0, let kind = undoKinds.popLast() {
+          redoKinds.append(kind)
+        } else if replay > 0, let kind = redoKinds.popLast() {
+          undoKinds.append(kind)
+        } else {
+          undoKinds.append(.transform(action))
+          redoKinds = []
+          redoStack = []
+          trimHistory()
+        }
+        image = result
+        overlay.image = result
+        setFrameSize(
+          CGSize(width: CGFloat(result.width) / scale, height: CGFloat(result.height) / scale))
+        overlay.frame = bounds
+        isTransforming = false
+        syncAnnotations()
+        onImageChange()
+        Log.capture.notice("标注图片变换完成 operation=\(operation, privacy: .public)")
+      } catch {
+        guard !Task.isCancelled, let self else { return }
+        isTransforming = false
+        onState()
+        Log.capture.error(
+          "标注图片变换失败 operation=\(operation, privacy: .public) cause=\(String(reflecting: error), privacy: .public)"
+        )
+        onProblem(error.localizedDescription)
+      }
+    }
+  }
+
+  /// 会话关闭时停止采用后台结果，释放未完成的工作引用。
+  func cancelTransform() {
+    if isTransforming { Log.capture.notice("标注图片变换取消 stage=close") }
+    transformTask?.cancel()
+    transformTask = nil
+  }
+
+  /// 工具切换或松手时统一提交擦除笔画，不把后续鼠标序列留给旧工具。
+  private func finishErase() {
+    guard let before = eraseBefore else { return }
+    eraseBefore = nil
+    erasePoint = nil
+    recordUndo(from: before)
+  }
+
+  /// 对象橡皮擦只改变本次标注，拖动过程中不逐个产生撤销步骤。
+  func chooseEraser() {
+    guard !isTransforming else { return }
+    finishErase()
+    endEditing()
+    pickingColor = false
+    tool = nil
+    selectedAnnotation = nil
+    erasing.toggle()
+    refreshCursor()
+    onState()
+    Island.announce(erasing ? "对象橡皮擦，拖过删除整条标注" : "已收起对象橡皮擦")
+  }
+
+  /// 从上一个鼠标点到当前点按整段轨迹求交，命中的对象整条移除。
+  private func erase(to point: CGPoint) {
+    let from = erasePoint ?? point
+    annotations.removeAll {
+      $0.intersectsEraser(from: from, to: point, radius: 4 / max(zoom, 0.01))
+    }
+    erasePoint = point
+  }
+
   /// 再按一次同一个工具就收起；选上时读这个工具上次的样式
   func choose(_ next: Annotation.Tool?) {
+    guard !isTransforming else { return }
+    finishErase()
+    erasing = false
     endEditing()
     pickingColor = false  // 换工具就不取色了
     let chosen = tool == next ? nil : next
@@ -330,6 +468,7 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
 
   /// 改颜色 / 粗细 / 选项：作用于正在输入的文字、选中的标注或当前工具的新标注，并记成那个工具的样式
   func restyle(_ change: (inout Annotation.Style) -> Void) {
+    guard !isTransforming else { return }
     if var editor {
       change(&editor.style)
       self.editor = editor
@@ -420,7 +559,11 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
     let style = existing?.style ?? self.style
     apply(style, to: field)
     if case .text(let string, _)? = existing?.shape { field.string = string }
-    editor = Editor(field: field, id: existing?.id, origin: origin, style: style)
+    let display =
+      existing?.textTransform == nil
+      ? nil : existing.map { CGPoint(x: $0.bounds.minX, y: $0.bounds.maxY) }
+    editor = Editor(
+      field: field, id: existing?.id, origin: origin, displayOrigin: display, style: style)
     addSubview(field)
     layoutEditor()
     window?.makeFirstResponder(field)
@@ -485,7 +628,8 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
   private func layoutEditor() {
     guard let editor else { return }
     let frame = Annotation.textFrame(
-      editor.field.string, origin: editor.origin, size: editor.style.textSize)
+      editor.field.string, origin: editor.displayOrigin ?? editor.origin,
+      size: editor.style.textSize)
     let pad = editor.style.option == 2 ? Annotation.platePadding : CGSize(width: 3, height: 3)
     if editor.field.textContainerInset != pad { editor.field.textContainerInset = pad }
     editor.field.frame = frame.insetBy(dx: -pad.width, dy: -pad.height)
@@ -530,6 +674,7 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
   }
 
   override func mouseDown(with event: NSEvent) {
+    guard !isTransforming else { return }
     let point = convert(event.locationInWindow, from: nil)
     mouse = point
     modifiers = event.modifierFlags
@@ -552,6 +697,11 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
     }
     // 在输入文字时点了输入框外面：先把文字收下，这一下不做别的
     if endEditing() { return }
+    if erasing {
+      eraseBefore = annotations
+      erase(to: point)
+      return
+    }
     // 双击箭头 / 直线的弯曲手柄：拉直（第一下也得按在它上面）
     let grip = annotationHandle(at: point)
     if event.clickCount == 2, let grip, grip.handle == .bend, grip.annotation.id == pressedBend {
@@ -604,6 +754,10 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
   override func mouseDragged(with event: NSEvent) {
     let point = convert(event.locationInWindow, from: nil)
     mouse = point
+    if eraseBefore != nil {
+      erase(to: point)
+      return
+    }
     modifiers = event.modifierFlags
     dragPoint = point
     if case .pan(let start)? = drag {
@@ -663,6 +817,12 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
   }
 
   override func mouseUp(with event: NSEvent) {
+    if let before = eraseBefore {
+      eraseBefore = nil
+      erasePoint = nil
+      recordUndo(from: before)
+      return
+    }
     let finished = drag
     dragPoint = nil
     drag = nil
@@ -699,7 +859,7 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
   private func refreshCursor() {
     guard let point = mouse else { return }
     if isSpaceDown { return NSCursor.openHand.set() }
-    if pickingColor { return NSCursor.crosshair.set() }
+    if pickingColor || erasing { return NSCursor.crosshair.set() }
     if let editor {
       return (editor.field.frame.contains(point) ? NSCursor.iBeam : NSCursor.arrow).set()
     }
@@ -716,6 +876,7 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
   // MARK: 键盘
 
   override func keyDown(with event: NSEvent) {
+    if isTransforming { return super.keyDown(with: event) }
     let code = Int(event.keyCode)
     if code == kVK_Space {
       if !event.isARepeat {
@@ -725,12 +886,20 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
       return
     }
     // 十种工具照截图时的快捷键（ShotKeys，能改，再按一次收起）
+    if ShotKey.matching(event) == .erase { return chooseEraser() }
     if let tool = ShotKey.matching(event)?.tool { return choose(tool) }
     let flags = event.modifierFlags.intersection([.command, .control, .option])
     let step: CGFloat = event.modifierFlags.contains(.shift) ? 10 : 1
     guard flags.isEmpty else { return super.keyDown(with: event) }
     switch code {
     case kVK_Escape:
+      if let before = eraseBefore {
+        annotations = before
+        eraseBefore = nil
+        erasePoint = nil
+        return
+      }
+      if erasing { return chooseEraser() }
       // 取色 → 收下输入中的文字 → 收起工具 → 取消选中；都没有就交给窗口（关掉）
       if pickingColor {
         pickingColor = false
@@ -765,6 +934,7 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
     let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
     // 撤销、重做和带 ⌘ 的工具键照截图时的快捷键（ShotKeys）；⌘D 复制标注固定
     switch ShotKey.matching(event) {
+    case .erase?: chooseEraser()
     case .undo?: undo()
     case .redo?: redo()
     case let key? where key.tool != nil: choose(key.tool)
