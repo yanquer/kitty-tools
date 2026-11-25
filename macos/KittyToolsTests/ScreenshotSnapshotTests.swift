@@ -2,6 +2,7 @@ import AppKit
 import Carbon.HIToolbox
 import SwiftUI
 import Testing
+import VisionKit
 
 @testable import KittyTools
 
@@ -1708,6 +1709,95 @@ struct ScreenshotSnapshotTests {
         size: NSSize(width: ShortcutsSheet.width, height: 1000),
         name: "annotation-group-shortcuts", dark: dark)
     }
+  }
+
+  /// 原位选字使用系统真实分析与合成桌面，在非 key 屏外窗口查看选择层及局部放大。
+  @Test(.enabled(if: directory != nil)) func renderPinSelection() async throws {
+    let desktop = try Self.desktop()
+    let board = PinBoard()
+    let pin = PinPanel(
+      image: desktop, frame: CGRect(x: -20000, y: -20000, width: 1200, height: 800), board: board)
+    let view = try #require(pin.contentView)
+    let selecting = try #require(pin.textSelection)
+    pin.contentView = NSView()
+    let window = offscreen(view)
+    defer {
+      selecting.stop()
+      window.contentView = nil
+      window.orderOut(nil)
+    }
+    selecting.onCopy = { _ in Issue.record("截图自检不应复制文字") }
+    selecting.open(desktop)
+    for _ in 0..<300 where selecting.state == .loading {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(selecting.state == .ready && !window.isKeyWindow)
+    let text = selecting.overlay.text
+    let range = try #require(text.range(of: "Hello"))
+    selecting.overlay.selectedRanges = [range]
+    try shoot(window, "pin-text-selection")
+    let event = try #require(
+      NSEvent.mouseEvent(
+        with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
+        windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 0)
+    )
+    let zoom = try #require(view.menu(for: event)?.items.first { $0.title == "局部放大" })
+    #expect(NSApp.sendAction(try #require(zoom.action), to: zoom.target, from: zoom))
+    let scroll = try #require(
+      CGEvent(
+        scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: 60, wheel2: 0, wheel3: 0
+      ))
+    scroll.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+    view.scrollWheel(with: try #require(NSEvent(cgEvent: scroll)))
+    try shoot(window, "pin-text-local-zoom")
+    try enhancement(
+      ShortcutsSheet(page: .screenshot, query: "原位"),
+      size: NSSize(width: ShortcutsSheet.width, height: 700), name: "pin-text-shortcuts")
+  }
+
+  /// 平铺水印与参数菜单从真实工具栏进入，检查截图和整图两个画布的最终渲染。
+  @Test(.enabled(if: directory != nil)) func renderWatermark() throws {
+    let desktop = try Self.desktop()
+    let h = Harness(image: desktop)
+    h.view.select(CGRect(x: 120, y: 160, width: 900, height: 500))
+    let bar = try #require(h.view.subviews.compactMap { $0 as? EditorToolbar }.first)
+    let add = try #require(bar.button(for: .watermark))
+    #expect(NSApp.sendAction(try #require(add.action), to: add.target, from: add))
+    let field = try #require(h.fieldEditor)
+    field.insertText(
+      "仅供评审 · 不公开",
+      replacementRange: NSRange(location: 0, length: (field.string as NSString).length))
+    try shoot(h.window, "watermark-edit")
+    h.key(kVK_Escape, "")
+    try shoot(h.window, "watermark-selected")
+    let tray = try #require(h.styleBar)
+    try shootContent(tray, "watermark-tray")
+    let angle = try #require(
+      Self.descendants(of: tray).compactMap { $0 as? NSButton }.first {
+        $0.accessibilityLabel() == "水印角度"
+      })
+    #expect(NSApp.sendAction(try #require(angle.action), to: angle.target, from: angle))
+    try shoot(h.window, "watermark-angle-menu")
+    try shootContent(try #require(h.menu), "watermark-angle-menu")
+    let currentMenu = try #require(h.menu)
+    let row = try #require(
+      Self.descendants(of: currentMenu).first { $0.accessibilityLabel() == "-45°" })
+    #expect(row.accessibilityPerformPress())
+    try shoot(h.window, "watermark-tilted")
+    let canvas = ScrollCanvas(image: desktop, scale: 2)
+    canvas.annotations = h.view.annotations
+    canvas.selectedAnnotation = canvas.annotations.first?.id
+    let window = offscreen(canvas)
+    for child in canvas.subviews { child.wantsLayer = true }
+    defer {
+      window.orderOut(nil)
+      window.contentView = nil
+    }
+    try shoot(window, "watermark-canvas")
+    try enhancement(
+      ShortcutsSheet(page: .screenshot, query: "水印"),
+      size: NSSize(width: ShortcutsSheet.width, height: 700), name: "watermark-shortcuts",
+      dark: true)
   }
 
   /// 经真实按钮回调选择样式，避免仅改测试字段而未刷新托盘的选中态。

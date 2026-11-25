@@ -1322,6 +1322,7 @@ final class SelectionView: NSView, NSTextViewDelegate {
       case .tool(let tool): choose(tool)
       case .erase: chooseEraser()
       case .caption: editCaption()
+      case .watermark: addWatermark()
       case .transform: break
       case .undo: undo()
       case .redo: redo()
@@ -1349,6 +1350,9 @@ final class SelectionView: NSView, NSTextViewDelegate {
     styleBar.onOption = { [unowned self] option in restyle { $0.option = option } }
     styleBar.onFontStep = { [unowned self] step in restyle { $0 = $0.stepped(step, for: .text) } }
     styleBar.onFontMenu = { [unowned self] button in toggleFontMenu(from: button) }
+    styleBar.onWatermarkMenu = { [unowned self] button, angle in
+      toggleWatermarkMenu(from: button, angle: angle)
+    }
     styleBar.onNumber = { [unowned self] delta in renumberSelected(by: delta) }
     styleBar.onAutoRedact = { [unowned self] in autoRedact() }
     // ponytail: macOS 26 上工具栏（两段已在同一个玻璃容器里）、样式托盘、HUD 菜单、尺寸胶囊是各自独立的玻璃兄弟视图，
@@ -1422,7 +1426,8 @@ final class SelectionView: NSView, NSTextViewDelegate {
     guard let owner else { return styleBar.setShown(false) }
     styleBar.update(
       tool: owner, style: shownStyle, number: selectedCounterNumber,
-      selection: editor == nil ? selectionMix : .init())
+      selection: editor == nil ? selectionMix : .init(),
+      watermark: selectedItems.count == 1 ? selected?.watermark : nil)
     let button = toolbar.toolButtonFrame(owner).offsetBy(dx: origin.x, dy: origin.y)
     let size = styleBar.preferredSize
     // 栏放进了选区里（上下都放不下）：托盘也夹在选区里、离四边 8 pt，不压能拖的边；否则夹在屏内 10 pt
@@ -1609,6 +1614,17 @@ final class SelectionView: NSView, NSTextViewDelegate {
     present(
       .fontSizes(current: shownStyle.textSize) { [weak self] size in
         self?.restyle { $0.fontSize = size }
+      }, anchor: button.convert(button.bounds, to: self))
+  }
+
+  /// 水印角度和透明度菜单沿用 HUD，不打开系统取色板或额外窗口。
+  private func toggleWatermarkMenu(from button: NSView, angle: Bool) {
+    guard let value = selected?.watermark else { return }
+    let label = angle ? "水印角度" : "水印透明度"
+    if closesMenu(label) { return }
+    present(
+      .watermarkValues(current: value, angle: angle) { [weak self] picked in
+        self?.restyleWatermark { if angle { $0.angle = picked } else { $0.opacity = picked } }
       }, anchor: button.convert(button.bounds, to: self))
   }
 
@@ -1871,6 +1887,12 @@ final class SelectionView: NSView, NSTextViewDelegate {
     let editing = editor?.id
     var shown = annotations.compactMap { value -> Annotation? in
       guard value.id == editing else { return value }
+      if let editor, value.watermark != nil, case .text(_, let origin) = value.shape {
+        var preview = value
+        preview.shape = .text(editor.field.string, origin: origin)
+        preview.style = editor.style
+        return preview
+      }
       if editor?.isCaption == true {
         var base = value
         base.caption = nil
@@ -2023,13 +2045,20 @@ final class SelectionView: NSView, NSTextViewDelegate {
       self.editor = editor
       apply(editor.style, to: editor.field)
       layoutEditor()
-      if !editor.isCaption { remember(editor.style, for: .text) }
+      if annotations.contains(where: { $0.id == editor.id && $0.watermark != nil }) {
+        syncAnnotations()
+      }
+      if !editor.isCaption,
+        !annotations.contains(where: { $0.id == editor.id && $0.watermark != nil })
+      {
+        remember(editor.style, for: .text)
+      }
     } else if !selectedItems.isEmpty {
       let ids = Set(selectedItems.map(\.id))
       let next = Annotation.restyled(
         annotations, ids: ids, colorOnly: selectionMix.mixedTools, change: change)
       commit(next)
-      if let selected { remember(selected.style, for: selected.tool) }
+      if let selected, selected.watermark == nil { remember(selected.style, for: selected.tool) }
     } else if let tool {
       var changed = style
       change(&changed)
@@ -2067,6 +2096,28 @@ final class SelectionView: NSView, NSTextViewDelegate {
     if ids.contains(id) { ids.remove(id) } else { ids.insert(id) }
     selectAnnotations(ids, preferred: selectedAnnotation)
     announce("已选择 \(ids.count) 条标注")
+  }
+
+  /// 水印限定在当前截图区域，保留截图框、原图与独立可编辑标注。
+  private func addWatermark() {
+    guard isAdjusting, !isDraggingAnnotation, let selection else { return }
+    endEditing()
+    let value = Annotation.watermark(in: selection)
+    commit(annotations + [value])
+    selectedAnnotation = value.id
+    beginEditing(at: CGPoint(x: selection.minX + 16, y: selection.maxY - 16), existing: value)
+  }
+
+  /// 水印参数按当前唯一对象修改，一次菜单选择一步撤销。
+  private func restyleWatermark(_ change: (inout Annotation.Watermark) -> Void) {
+    guard !isDraggingAnnotation else { return }
+    endEditing()
+    guard selectedItems.count == 1, let selected, var value = selected.watermark else { return }
+    change(&value)
+    var next = selected
+    next.watermark = value
+    commit(annotations.map { $0.id == next.id ? next : $0 })
+    refresh()
   }
 
   /// 关联文字共用原生输入框与样式托盘，不另建窗口。
@@ -2194,22 +2245,29 @@ final class SelectionView: NSView, NSTextViewDelegate {
     if editor.field.outline != nil { editor.field.needsDisplay = true }
   }
 
-  /// 关联说明最多 2000 个 UTF-16 单元；普通文字沿用原来的编辑规则。
+  /// 水印最多 200 个、关联说明最多 2000 个 UTF-16 单元，普通文字沿用原来的编辑规则。
   func textView(
     _ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString: String?
   ) -> Bool {
-    guard editor?.isCaption == true else { return true }
+    let watermark = annotations.contains { $0.id == editor?.id && $0.watermark != nil }
+    guard editor?.isCaption == true || watermark else { return true }
+    let limit = watermark ? 200 : 2000
     let length = (textView.string as NSString).length
     guard range.length <= length,
-      length - range.length + ((replacementString ?? "") as NSString).length <= 2000
+      length - range.length + ((replacementString ?? "") as NSString).length <= limit
     else {
-      announce("关联文字过长，请缩短后再输入")
+      announce(watermark ? "水印文字过长，请缩短到 200 个字符以内" : "关联文字过长，请缩短后再输入")
       return false
     }
     return true
   }
 
-  func textDidChange(_ notification: Notification) { layoutEditor() }
+  func textDidChange(_ notification: Notification) {
+    layoutEditor()
+    if annotations.contains(where: { $0.id == editor?.id && $0.watermark != nil }) {
+      syncAnnotations()
+    }
+  }
 
   /// 输入法组字（marked text）不走 textDidChange，但每次都会动选区：跟着改大小
   func textViewDidChangeSelection(_ notification: Notification) { layoutEditor() }

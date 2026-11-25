@@ -45,7 +45,9 @@ extension Annotation {
     let mixedColor =
       colors.first.map { first in colors.contains { $0.style.paint != first.style.paint } } ?? false
     return SelectionStyle(
-      mixedTools: chosen.contains { $0.tool != first.tool },
+      mixedTools: chosen.contains {
+        $0.tool != first.tool || ($0.watermark == nil) != (first.watermark == nil)
+      },
       color: mixedColor,
       weight: chosen.contains {
         $0.style.weight != first.style.weight || $0.style.diameter != first.style.diameter

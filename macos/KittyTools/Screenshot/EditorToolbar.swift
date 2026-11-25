@@ -216,7 +216,7 @@ final class EditorToolbar: PopView {
 
   enum Item: Equatable {
     case tool(Annotation.Tool)
-    case erase, transform, caption
+    case erase, transform, caption, watermark
     case undo
     case redo
     /// .output(.save) 是保存本体（单击快速保存）
@@ -249,7 +249,10 @@ final class EditorToolbar: PopView {
     let left: [[Spec]] = [
       // 有快捷键的按钮悬停提示由 tip(for:name:) 现写（截图时的快捷键能改），这里的提示位先填名字
       Annotation.Tool.allCases.map { (.tool($0), $0.symbol, $0.title, $0.title) },
-      ([(.erase, "eraser", "对象橡皮擦", "对象橡皮擦"), (.caption, "text.bubble", "编辑关联文字", "编辑关联文字")]
+      ([
+        (.erase, "eraser", "对象橡皮擦", "对象橡皮擦"), (.caption, "text.bubble", "编辑关联文字", "编辑关联文字"),
+        (.watermark, "text.badge.star", "平铺文字水印", "平铺文字水印"),
+      ]
         as [Spec])
         + (mode == .capture ? [] : [(.transform, "rotate.right", "旋转与镜像", "旋转与镜像")]),
       [
@@ -770,6 +773,7 @@ final class StyleBar: HUDBar {
   var onFontStep: (Int) -> Void = { _ in }
   /// 点了字号的数字：调用方在这颗钮旁弹出档位菜单（HUD 菜单归调用方管：同时最多开一个、Esc 先收它）
   var onFontMenu: (NSView) -> Void = { _ in }
+  var onWatermarkMenu: (NSView, Bool) -> Void = { _, _ in }
   /// 选中序号时编号的 − / +（拍板 O2）
   var onNumber: (Int) -> Void = { _ in }
   /// 打码托盘上的「自动」：找出手机号、邮箱这些自动打码（拍板 C5）
@@ -784,6 +788,9 @@ final class StyleBar: HUDBar {
   private var custom: Int?
   private var style: Annotation.Style?
   private var selectionMix = Annotation.SelectionStyle()
+  private var watermark: Annotation.Watermark?
+  private var watermarkAngle: BarButton?
+  private var watermarkOpacity: BarButton?
   private var colors: [Swatch] = []
   private var weights: [Swatch] = []
   private var options: [BarButton] = []
@@ -809,12 +816,16 @@ final class StyleBar: HUDBar {
   /// number：选中的是序号时它的编号（托盘多一段「编号 − n +」）；别的 nil
   func update(
     tool: Annotation.Tool, style: Annotation.Style, number: Int? = nil,
-    selection: Annotation.SelectionStyle = .init()
+    selection: Annotation.SelectionStyle = .init(), watermark: Annotation.Watermark? = nil
   ) {
     let oldMix = selectionMix
+    let oldWatermark = self.watermark
+    self.watermark = watermark
     selectionMix = selection
+    let watermarkChanged =
+      oldWatermark?.angle != watermark?.angle || oldWatermark?.opacity != watermark?.opacity
     if tool != self.tool || (number == nil) != (self.number == nil) || style.custom != custom
-      || oldMix.mixedTools != selection.mixedTools
+      || oldMix.mixedTools != selection.mixedTools || watermarkChanged
     {
       rebuild(for: tool, numbered: number != nil, custom: style.custom)
       self.tool = tool
@@ -823,7 +834,13 @@ final class StyleBar: HUDBar {
     }
     self.number = number
     numberValue?.stringValue = number.map(String.init) ?? ""
-    guard style != self.style || oldMix != selection else { return }
+    guard style != self.style || oldMix != selection || watermarkChanged else { return }
+    if let watermark {
+      if let watermarkAngle { Self.setValue(watermarkAngle, "角度 \(Int(watermark.angle))°") }
+      if let watermarkOpacity {
+        Self.setValue(watermarkOpacity, "透明度 \(Int((watermark.opacity * 100).rounded()))%")
+      }
+    }
     if let sizeValue {
       Self.setValue(sizeValue, selection.font ? "混合" : Self.sizeText(style.textSize))
       sizeValue.setAccessibilityValue(selection.font ? "混合字号" : Self.sizeText(style.textSize))
@@ -850,6 +867,8 @@ final class StyleBar: HUDBar {
     for view in stack.arrangedSubviews { view.removeFromSuperview() }
     sizeValue = nil
     numberValue = nil
+    watermarkAngle = nil
+    watermarkOpacity = nil
     colors =
       tool.hasColor
       ? Annotation.Palette.allCases.map { color in
@@ -937,7 +956,18 @@ final class StyleBar: HUDBar {
       chip.toolTip = "改这个序号的编号"
       views += [barSeparator(), chip]
     }
-    options = tool.optionOrder.map { index in
+    if let watermark {
+      let angle = Self.chipButton(
+        "角度 \(Int(watermark.angle))°", target: self, action: #selector(openWatermarkAngle(_:)),
+        label: "水印角度")
+      let opacity = Self.chipButton(
+        "透明度 \(Int((watermark.opacity * 100).rounded()))%", target: self,
+        action: #selector(openWatermarkOpacity(_:)), label: "水印透明度")
+      watermarkAngle = angle
+      watermarkOpacity = opacity
+      views += [barSeparator(), angle, opacity]
+    }
+    options = (watermark == nil ? tool.optionOrder : []).map { index in
       let title = tool.optionTitles[index]
       let button = BarButton(title: title, target: self, action: #selector(pickOption(_:)))
       button.isBordered = false
@@ -1077,6 +1107,11 @@ final class StyleBar: HUDBar {
   }
 
   @objc private func pickOption(_ sender: NSButton) { onOption(sender.tag) }
+  /// 在当前按钮旁展开水印角度菜单。
+  @objc private func openWatermarkAngle(_ sender: NSButton) { onWatermarkMenu(sender, true) }
+  /// 在当前按钮旁展开水印透明度菜单。
+  @objc private func openWatermarkOpacity(_ sender: NSButton) { onWatermarkMenu(sender, false) }
+
   @objc private func smallerFont() { onFontStep(-1) }
   @objc private func largerFont() { onFontStep(1) }
   @objc private func openFontMenu(_ sender: NSButton) { onFontMenu(sender) }
@@ -1099,6 +1134,21 @@ extension HUDMenu {
       Annotation.Style.fontSizes.map { size in
         Entry(title: "\(StyleBar.sizeText(size)) pt", checked: size == current) { pick(size) }
       }, label: fontMenuLabel)
+  }
+
+  /// 可辨认的水印角度与透明度档位，两个标注画布共用。
+  static func watermarkValues(
+    current: Annotation.Watermark, angle: Bool, pick: @escaping (CGFloat) -> Void
+  ) -> HUDMenu {
+    let values: [CGFloat] =
+      angle ? [-60, -45, -30, 0, 30, 45, 60, 90] : [0.1, 0.2, 0.35, 0.5, 0.75, 1]
+    return HUDMenu(
+      values.map { value in
+        Entry(
+          title: angle ? "\(Int(value))°" : "\(Int((value * 100).rounded()))%",
+          checked: value == (angle ? current.angle : current.opacity)
+        ) { pick(value) }
+      }, label: angle ? "水印角度" : "水印透明度")
   }
 
   static let fontMenuLabel = "字号"

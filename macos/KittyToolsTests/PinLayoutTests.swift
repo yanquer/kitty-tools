@@ -43,7 +43,8 @@ struct PinLayoutTests {
     window.orderFrontRegardless()
     defer { window.orderOut(nil) }
     let hud = try #require(view.subviews.first { $0 is HUDBar })
-    let controls = try #require(view.subviews.first { !($0 is HUDBar) })
+    let controls = try #require(
+      view.subviews.first { !($0 is HUDBar) && !($0 is PinTextSelection) })
 
     /// 转一下 run loop：崩溃是显示周期（NSDisplayCycleFlush → 窗口 layoutIfNeeded）里抛的，光 layoutSubtreeIfNeeded 走不到
     func settle() {

@@ -107,6 +107,9 @@ import OSLog
     styleBar.onOption = { [unowned self] option in restyle { $0.option = option } }
     styleBar.onFontStep = { [unowned self] step in restyle { $0 = $0.stepped(step, for: .text) } }
     styleBar.onFontMenu = { [unowned self] button in toggleFontMenu(from: button) }
+    styleBar.onWatermarkMenu = { [unowned self] button, angle in
+      toggleWatermarkMenu(from: button, angle: angle)
+    }
     styleBar.onAutoRedact = { [unowned self] in
       menu?.dismiss()
       canvas.autoRedact()
@@ -268,7 +271,7 @@ import OSLog
     }
     styleBar.update(
       tool: owner, style: canvas.shownStyle, number: canvas.selectedCounterNumber,
-      selection: canvas.selectionMix)
+      selection: canvas.selectionMix, watermark: canvas.shownWatermark)
     let button = bar.toolButtonFrame(owner).offsetBy(dx: bar.frame.minX, dy: bar.frame.minY)
     let size = styleBar.preferredSize
     let x = max(
@@ -306,6 +309,7 @@ import OSLog
     case .tool(let tool): canvas.choose(tool)
     case .erase: canvas.chooseEraser()
     case .caption: canvas.editCaption()
+    case .watermark: canvas.addWatermark()
     case .transform: toggleTransformMenu()
     case .undo: canvas.undo()
     case .redo: canvas.redo()
@@ -372,6 +376,23 @@ import OSLog
     present(
       .fontSizes(current: canvas.shownStyle.textSize) { [weak self] size in
         self?.canvas.restyle { $0.fontSize = size }
+      }, anchor: button.convert(button.bounds, to: content))
+  }
+
+  /// 水印参数用同一 HUD 菜单，修改只影响当前标注。
+  private func toggleWatermarkMenu(from button: NSView, angle: Bool) {
+    let label = angle ? "水印角度" : "水印透明度"
+    if let menu {
+      let same = menu.accessibilityLabel() == label
+      menu.dismiss()
+      if same { return }
+    }
+    guard let value = canvas.shownWatermark, let content = panel.contentView else { return }
+    present(
+      .watermarkValues(current: value, angle: angle) { [weak self] picked in
+        self?.canvas.restyleWatermark {
+          if angle { $0.angle = picked } else { $0.opacity = picked }
+        }
       }, anchor: button.convert(button.bounds, to: content))
   }
 

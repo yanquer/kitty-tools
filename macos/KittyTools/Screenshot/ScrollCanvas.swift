@@ -208,6 +208,12 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
     let editing = editor?.id
     var shown = annotations.compactMap { value -> Annotation? in
       guard value.id == editing else { return value }
+      if let editor, value.watermark != nil, case .text(_, let origin) = value.shape {
+        var preview = value
+        preview.shape = .text(editor.field.string, origin: origin)
+        preview.style = editor.style
+        return preview
+      }
       if editor?.isCaption == true {
         var base = value
         base.caption = nil
@@ -515,13 +521,20 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
       self.editor = editor
       apply(editor.style, to: editor.field)
       layoutEditor()
-      if !editor.isCaption { remember(editor.style, for: .text) }
+      if annotations.contains(where: { $0.id == editor.id && $0.watermark != nil }) {
+        syncAnnotations()
+      }
+      if !editor.isCaption,
+        !annotations.contains(where: { $0.id == editor.id && $0.watermark != nil })
+      {
+        remember(editor.style, for: .text)
+      }
     } else if !selectedItems.isEmpty {
       let ids = Set(selectedItems.map(\.id))
       let next = Annotation.restyled(
         annotations, ids: ids, colorOnly: selectionMix.mixedTools, change: change)
       commit(next)
-      if let selected { remember(selected.style, for: selected.tool) }
+      if let selected, selected.watermark == nil { remember(selected.style, for: selected.tool) }
     } else if let tool {
       var changed = style
       change(&changed)
@@ -576,6 +589,30 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
     selectAnnotations(ids, preferred: selectedAnnotation)
     Island.announce("已选择 \(ids.count) 条标注")
   }
+
+  /// 水印沿用文字的编辑、颜色与字号，区域只取当前整图，不烘焙到原像素。
+  func addWatermark() {
+    guard !isTransforming, !hasPendingGesture else { return }
+    endEditing()
+    let value = Annotation.watermark(in: bounds)
+    commit(annotations + [value])
+    selectedAnnotation = value.id
+    beginEditing(at: CGPoint(x: bounds.minX + 16, y: bounds.maxY - 16), existing: value)
+  }
+
+  /// 角度和透明度单次选择形成一步撤销，不改普通文字工具记忆。
+  func restyleWatermark(_ change: (inout Annotation.Watermark) -> Void) {
+    guard !isTransforming, !hasPendingGesture else { return }
+    endEditing()
+    guard selectedItems.count == 1, let selected, var value = selected.watermark else { return }
+    change(&value)
+    var next = selected
+    next.watermark = value
+    commit(annotations.map { $0.id == next.id ? next : $0 })
+    onState()
+  }
+
+  var shownWatermark: Annotation.Watermark? { selectedItems.count == 1 ? selected?.watermark : nil }
 
   /// 编辑唯一选中的普通箭头或线条的说明，复用原生文本框和文本撤销栈。
   func editCaption() {
@@ -719,22 +756,29 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
     if editor.field.outline != nil { editor.field.needsDisplay = true }
   }
 
-  /// 关联说明最多 2000 个 UTF-16 单元；普通文字沿用原来的编辑规则。
+  /// 水印最多 200 个、关联说明最多 2000 个 UTF-16 单元，普通文字沿用原来的编辑规则。
   func textView(
     _ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString: String?
   ) -> Bool {
-    guard editor?.isCaption == true else { return true }
+    let watermark = annotations.contains { $0.id == editor?.id && $0.watermark != nil }
+    guard editor?.isCaption == true || watermark else { return true }
+    let limit = watermark ? 200 : 2000
     let length = (textView.string as NSString).length
     guard range.length <= length,
-      length - range.length + ((replacementString ?? "") as NSString).length <= 2000
+      length - range.length + ((replacementString ?? "") as NSString).length <= limit
     else {
-      onProblem("关联文字过长，请缩短后再输入")
+      onProblem(watermark ? "水印文字过长，请缩短到 200 个字符以内" : "关联文字过长，请缩短后再输入")
       return false
     }
     return true
   }
 
-  func textDidChange(_ notification: Notification) { layoutEditor() }
+  func textDidChange(_ notification: Notification) {
+    layoutEditor()
+    if annotations.contains(where: { $0.id == editor?.id && $0.watermark != nil }) {
+      syncAnnotations()
+    }
+  }
 
   /// 输入法组字（marked text）不走 textDidChange，但每次都会动选区：跟着改大小
   func textViewDidChangeSelection(_ notification: Notification) { layoutEditor() }

@@ -312,7 +312,8 @@ final class PinPanel: NSPanel {
   private(set) var annotations: [Annotation]
   private(set) var isMiniature = false
   private(set) var isLocked = false
-  var isEditing = false
+  var isEditing = false { didSet { if isEditing { textSelection?.stop() } } }
+  var textSelection: PinTextSelection? { (contentView as? PinView)?.textSelection }
   private var expandedFrame: CGRect?
 
   /// 保留原图与可编辑标注，显示与输出仍使用合成图。
@@ -360,6 +361,7 @@ final class PinPanel: NSPanel {
     guard !isLocked, miniature != isMiniature else { return }
     finishPopIn()
     isMiniature = miniature
+    if miniature { textSelection?.stop() }
     if miniature {
       expandedFrame = frame
       setFrame(CGRect(x: frame.minX, y: frame.maxY - 64, width: 96, height: 64), display: true)
@@ -405,6 +407,7 @@ final class PinPanel: NSPanel {
     guard !isLocked, !isTransforming, !isEditing, let composed = image else { return }
     setMiniature(false)
     finishPopIn()
+    textSelection?.stop()
     isTransforming = true
     let base = original
     let size = CGSize(
@@ -481,6 +484,12 @@ final class PinPanel: NSPanel {
 
   /// 当前合成图供编辑完成后的完整性验证与输出使用。
   var image: CGImage? { (contentView as? PinView)?.image }
+
+  /// 选字时在窗口内分发复制、退出与缩放，避免系统文字层吞掉钉图的既有操作。
+  override func sendEvent(_ event: NSEvent) {
+    if let view = contentView as? PinView, view.interceptTextEvent(event) { return }
+    super.sendEvent(event)
+  }
 
   override var canBecomeKey: Bool { true }
   override var canBecomeMain: Bool { false }
@@ -567,6 +576,7 @@ final class PinPanel: NSPanel {
 
   /// 关闭：内容缩到 0.92（以中心为准）并淡出 0.16 s，完了再收窗口
   func fadeOut() {
+    textSelection?.stop()
     finishPopIn()
     if !Style.reduceMotion, let layer = contentView?.layer {
       let size = layer.bounds.size
@@ -600,6 +610,7 @@ final class PinPanel: NSPanel {
 
 private final class PinView: NSView {
   private(set) var image: CGImage
+  let textSelection = PinTextSelection(frame: .zero)
   private var localZoom = PinZoom()
   private var panStart: (point: CGPoint, center: CGPoint)?
   /// 钉上时的大小（点）：缩放的基准
@@ -631,6 +642,18 @@ private final class PinView: NSView {
     }
     super.init(frame: CGRect(origin: .zero, size: size))
     wantsLayer = true
+    textSelection.frame = bounds
+    textSelection.autoresizingMask = [.width, .height]
+    textSelection.acceptsPoint = { [weak self] point in
+      guard let self else { return false }
+      return self.controls.isHidden || !self.controls.frame.contains(point)
+    }
+    textSelection.contextMenu = { [weak self] in self?.menu(for: $0) }
+    textSelection.onState = { [weak self] in
+      guard let self else { return }
+      NSAccessibility.post(element: self, notification: .valueChanged)
+    }
+    addSubview(textSelection)
     let side = 22 - 2 * HUDBar.materialInset
     let opacity = circle(
       barButton(
@@ -723,6 +746,9 @@ private final class PinView: NSView {
       viewSize: CGSize(width: 1, height: 1),
       imageSize: CGSize(width: image.width, height: image.height))
     let miniature = panel?.isMiniature == true
+    textSelection.viewport =
+      localZoom.isEnabled && !miniature
+      ? localZoom.viewport : CGRect(x: 0, y: 0, width: 1, height: 1)
     layer?.contents = localZoom.isEnabled && !miniature ? image.cropping(to: crop) : image
     layer?.contentsGravity = miniature ? .resizeAspect : .resize
     layer?.backgroundColor = miniature ? Style.HUD.solidFill.cgColor : nil
@@ -785,6 +811,7 @@ private final class PinView: NSView {
 
   /// 更换合成图时保留查看倍率，下一次重画使用新内容。
   func replaceImage(_ image: CGImage, resetView: Bool = false) {
+    textSelection.stop()
     self.image = image
     if let panel {
       originalSize = CGSize(
@@ -853,8 +880,36 @@ private final class PinView: NSView {
     }
   }
 
+  /// 仅选字模式下接管本窗口的事件，不安装全局键鼠监听。
+  func interceptTextEvent(_ event: NSEvent) -> Bool {
+    guard textSelection.isEnabled else { return false }
+    if event.type == .scrollWheel {
+      scrollWheel(with: event)
+      return true
+    }
+    if event.type == .magnify {
+      magnify(with: event)
+      return true
+    }
+    let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+    if event.type == .keyDown,
+      event.keyCode == kVK_Escape || event.keyCode == kVK_ANSI_C && flags == .command
+    {
+      keyDown(with: event)
+      return true
+    }
+    return false
+  }
+
   override func keyDown(with event: NSEvent) {
-    if Int(event.keyCode) == kVK_Escape { return close() }
+    if Int(event.keyCode) == kVK_Escape {
+      if textSelection.isEnabled {
+        textSelection.stop()
+        window?.makeFirstResponder(self)
+        return
+      }
+      return close()
+    }
     if !perform(event) { super.keyDown(with: event) }
   }
 
@@ -895,7 +950,8 @@ private final class PinView: NSView {
   private var commands: [Command] {
     [
       Command(
-        title: "拷贝", key: "c", keyCode: kVK_ANSI_C, modifiers: .command,
+        title: textSelection.isEnabled ? "复制所选文字" : "拷贝", key: "c", keyCode: kVK_ANSI_C,
+        modifiers: .command,
         action: #selector(copyImage)),
       Command(
         title: "识字并拷贝", key: "o", keyCode: kVK_ANSI_O, modifiers: [],
@@ -944,12 +1000,21 @@ private final class PinView: NSView {
         title: "重做图像变换", key: "", keyCode: nil, modifiers: [], action: #selector(redoTransform)),
       Command(
         title: "关闭", key: "w", keyCode: kVK_ANSI_W, modifiers: .command, action: #selector(close)),
+      Command(
+        title: textSelection.isEnabled ? "退出原位选字" : "原位选字", key: "t", keyCode: kVK_ANSI_T,
+        modifiers: .command, action: #selector(toggleTextSelection)),
     ]
   }
 
   /// 锁定期间拒绝改变几何和编辑，复制、识字、透明度、专注、解锁与明确关闭仍可用。
   private func commandIsEnabled(_ action: Selector) -> Bool {
     if panel?.isTransforming == true { return action == #selector(close) }
+    if action == #selector(copyImage), textSelection.isEnabled {
+      return textSelection.hasSelection
+    }
+    if action == #selector(toggleTextSelection) {
+      return panel?.isMiniature != true && panel?.isEditing != true
+    }
     if action == #selector(undoTransform), panel?.canUndoTransform != true { return false }
     if action == #selector(redoTransform), panel?.canRedoTransform != true { return false }
     guard panel?.isLocked == true else { return true }
@@ -975,6 +1040,10 @@ private final class PinView: NSView {
       return item
     }
     items[0..<6].forEach(menu.addItem)
+    if let selecting = items.first(where: { $0.action == #selector(toggleTextSelection) }) {
+      selecting.state = textSelection.isEnabled ? .on : .off
+      menu.addItem(selecting)
+    }
     menu.addItem(.separator())
     let opacity = NSMenuItem(title: "透明度", action: nil, keyEquivalent: "")
     opacity.submenu = opacityMenu()
@@ -999,7 +1068,9 @@ private final class PinView: NSView {
   // MARK: 无障碍（mac-whisker §7，体检 B45）：钉图平时没有看得见的按钮，整张图是一个元素，操作都在自定义动作里
 
   override func isAccessibilityElement() -> Bool { true }
-  override func accessibilityRole() -> NSAccessibility.Role? { .image }
+  override func accessibilityRole() -> NSAccessibility.Role? {
+    textSelection.isEnabled ? .group : .image
+  }
   override func accessibilityLabel() -> String? { "钉图" }
 
   override func accessibilityValue() -> Any? {
@@ -1010,6 +1081,7 @@ private final class PinView: NSView {
       + (panel?.isMiniature == true ? "，已收纳" : "")
       + (isFocused ? "，专注" : "")
       + (panel?.isLocked == true ? "，已锁定" : "")
+      + (textSelection.isEnabled ? "，原位选字" : "")
   }
 
   override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
@@ -1060,7 +1132,20 @@ private final class PinView: NSView {
     Island.announce(localZoom.isEnabled ? "局部放大：滚轮放大、拖动查看，⌥ 拖动移动窗口" : "已显示完整图片")
   }
 
-  @objc private func copyImage() { board.output(.copy, image, scale) }
+  /// 选字模式只复制明确选区，普通模式继续输出完整图片。
+  @objc private func copyImage() {
+    if textSelection.isEnabled {
+      _ = textSelection.copySelection()
+    } else {
+      board.output(.copy, image, scale)
+    }
+  }
+
+  /// 用户手动开启实况文本，使用当前已打码的合成图，不改剪贴板或原图。
+  @objc private func toggleTextSelection() {
+    guard panel?.isMiniature != true else { return }
+    if textSelection.isEnabled { textSelection.stop() } else { textSelection.open(image) }
+  }
   @objc private func saveImage() { board.output(.save, image, scale) }
   @objc private func saveImageAs() { board.output(.saveAs, image, scale) }
   /// 查看钉图的识字结果，不改变当前钉图。

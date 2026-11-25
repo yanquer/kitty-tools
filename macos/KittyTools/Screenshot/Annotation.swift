@@ -273,6 +273,7 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
   var style = Style()
   var textTransform: ImageTransform.Pose?
   var caption: Caption?
+  var watermark: Watermark?
 
   var tool: Tool {
     switch shape {
@@ -299,6 +300,7 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
 
   /// 不含关联文字的对象边界，供原有几何分支使用。
   private var shapeBounds: CGRect {
+    if let watermark { return watermark.area.applying(textTransform?.affine ?? .identity) }
     if let pose = textTransform { return untransformedText.bounds.applying(pose.affine) }
     let width = style.weight.lineWidth
     switch shape {
@@ -407,6 +409,7 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
       return dimensionBounds.contains(point)
         || Self.distance(from: point, toSegment: from, to) <= style.weight.lineWidth / 2 + tolerance
     }
+    if watermark != nil { return watermarkContains(point) }
     let width = style.weight.lineWidth
     let filled = style.option == 1
     switch shape {
@@ -473,6 +476,15 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
       pose.tx += delta.width
       pose.ty += delta.height
       next.textTransform = pose
+      return next
+    }
+    if let watermark {
+      var next = self
+      next.watermark?.area = watermark.area.offsetBy(dx: delta.width, dy: delta.height)
+      if case .text(let text, let origin) = shape {
+        next.shape = .text(
+          text, origin: CGPoint(x: origin.x + delta.width, y: origin.y + delta.height))
+      }
       return next
     }
     let shift = { (point: CGPoint) in
@@ -822,6 +834,7 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
       context.restoreGState()
       return
     }
+    if watermark != nil { return drawWatermark(in: context) }
     // 实心矩形 / 椭圆：先铺 0.28 的底（不带阴影，免得底下透出一片灰；铺满整块，不切条），再描带阴影的边
     if style.option == 1, let path = boxPath {
       context.setFillColor(style.paint.withAlphaComponent(0.28).cgColor)

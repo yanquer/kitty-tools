@@ -40,6 +40,7 @@
 | QuickLookThumbnailing `QLThumbnailGenerator` | 10.15 | 剪贴板检查器里文件的真实缩略图（PDF 首页、图片、视频帧） |
 | QuickLookUI `QLPreviewView` | 10.6 | 剪贴板 ⌘Y 放大预览里的文件（嵌在自己的浮层里；不用 `QLPreviewPanel`，见 D3） |
 | Vision `RecognizeTextRequest` | 15.0 | 剪贴板图片 OCR、截图翻译识字；空闲时放掉识字模型用它的私有 `VNSession.globalSession.releaseCachedResources`（2026-10-07 用户同意，接口不在就不放，mac-clipboard §1） |
+| VisionKit `ImageAnalyzer` / `ImageAnalysisOverlayView` | 13.0 | 钉图手动原位选字：仅文字识别与选择，复用系统跨行选区和几何映射，不启用数据检测、主体或查询动作 |
 | ScreenCaptureKit `SCShareableContent` + `SCScreenshotManager` | 14.0 | 截图翻译的冻结帧（逐屏截图）；长截图用 `SCStreamConfiguration.sourceRect`（12.3+）反复截选区 |
 | NaturalLanguage `NLLanguageRecognizer` | 10.14 | 语种检测（替代 Lingua，能识别繁体） |
 | ScreenCaptureKit `SCStream` + `SCRecordingOutput`；AVFoundation `AVAudioRecorder`、`AVCaptureDevice`（麦克风授权与设备）、`AVURLAsset` / `AVAssetImageGenerator` / `AVAssetExportSession` / `AVMutableComposition`；Synchronization `Mutex` | 15.0 | 录屏与录音（2026-09-30 立项，PLAN §10「录屏与录音」）：系统录制管线直接写文件、录音、闪退恢复读文件、最后一帧、音轨导出；录制委托的可变状态（`Mutex` 翻译服务已在用）。第 1 批起在用：`SCStream` + `SCRecordingOutput`（`Screenshot/ScreenRecorder.swift` 录屏）、`AVURLAsset`（启动时读上次闪退留下的文件 `isPlayable`）；第 3 批起 `AVAssetImageGenerator`（停止后取最后一帧，飞入和视频卡用）；第 4 批起 `AVCaptureDevice`（麦克风授权、默认输入的设备名 / 蓝牙、断开通知）；第 5 批起 `AVAudioRecorder`（`Screenshot/AudioRecorder.swift` 录音：m4a、暂停续写、`updateMeters` / `averagePower` 电平，主线程直接用、不挂委托）；第 6 批起 `AVMutableComposition` + `AVAssetExportSession`（录系统声音：录屏管线的 mp4 只取音轨无损导出成 m4a，`ScreenRecorder.extractAudio`）和 `CMSampleBuffer` 的格式描述 / 数据块（样本回调里读 Float32 声音样本算电平）；第 7 批 `AVAssetImageGenerator` 还用来逐帧取 GIF 的帧（`VideoExport`） |
@@ -102,6 +103,7 @@
 
 | 目录 | 文件 |
 |---|---|
+| `Screenshot/`（原位选字与水印，2026-11-25） | `PinTextSelection.swift`（系统实况文本、单工作循环、过期结果作废及受控复制）、`AnnotationWatermark.swift`（可编辑水印元数据、平铺布局、命中与共享绘制） |
 | `Screenshot/`（方向与标注增强，2026-11-25） | `ImageTransform.swift`（正交像素变换、可编辑文字姿态及分配预算）、`AnnotationExtras.swift`（对象擦除轮廓、图片像素尺寸线与关联说明）、`AnnotationSelection.swift`（共用多选、批量复制和混合样式运算）；复用 `Annotation`、两种标注画布及工具栏 |
 | `Screenshot/`（外部图片导入，2026-11-20） | `ImageImport.swift`（静态图片有界读取、EXIF 转正、不可变会话副本及失败清理）；复用 `AnnotateOverlay` 与 `ShotCompositionView` |
 | `Screenshot/`（快捷截图，2026-11-19） | `QuickScreenshot.swift`（免框选动作、请求快照与区域/前台普通窗口校验）；采集仍在 `ScreenCapture.swift`，输出与历史复用既有截图流程 |
@@ -1659,6 +1661,20 @@ CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO
   的杂文件」勾选，Keka 只有那一个勾选，同步盘客户端多是一行一条的忽略列表、内置的规则只读列出；没选：多行文本框（还是要懂语法、
   没法逐条标错）、标记输入框（NSTokenField，一条一个胶囊，标不了错也放不下说明）、整套规则编辑器（为一行设置太重）。
   单测 `ArchivesTests.skipEditing`，截图自检 `SnapshotProbeTests/finderMenuSettings()`。
+
+### 钉图原位选字与平铺文字水印（2026-11-25）
+
+用户确认第七轮只做这两项；PDF 纸张尺寸不在本轮范围，不增加插件或第三方依赖。
+
+- **原位选字**：钉图右键/旁白和局部 ⌘T 手动开关，复用系统 VisionKit 实况文本，只启用文字选择；以当前合成图识别，打码下方原文不进入识别。支持跨行选字、⌘C 复制选中；未选中不改剪贴板。复制经 `Paster.write`，不自动识别、不自动复制或打开链接。
+- 原位选字与钉图位于同一窗口，原图空白仍可拖动，悬停控件保留优先级；滚轮/捏合继续缩放，局部放大和平移共用归一化取景映射。Esc 先退出选字，再按才关闭钉图。收纳、编辑、图像变更、旋转和关闭撤下选字并作废旧结果；锁定时可选字，禁止的几何操作照旧禁止。
+- 识别只有一个工作循环，快速开关时只保留最新请求。加载、有效空结果、失败分别提示，统一日志 `capture` 记录选择会话、代次、图片尺寸、耗时、过期结果与原始错误，不记录识别正文。不持久化识别结果或原位选区。
+- **水印**：两种标注画布的工具栏增加「平铺文字水印」，十种原工具及数字键不改。新水印先编辑文字，复用原生文本框和颜色/字号托盘；角度和透明度由 HUD 档位菜单调整。水印文字最多 200 UTF-16 单元，超限拒绝；空文字删除当前水印，不污染普通文字工具记忆。
+- 水印属于文字标注的可选 `watermark` 元数据，保存区域、角度与透明度；旧数据缺省 nil。平铺显示、命中与输出走同一布局，文字之间的空白不截获其他对象。移动、复制、删除、批量改色、撤销与整图变换均保留可编辑数据；和普通文字混选仅共同改色。长图按脏区绘制并限制平铺密度，原图只读。下一版发布时追加用户更新日志，本轮版本仍 0.9.0。
+
+- 本机验证：192 项相关回归通过，最终 8 项选字/水印与钉图布局定向复验通过；4 项依赖宿主录制功能开启的既有测试未运行。使用假图片、隔离偏好和不可成为 key 的屏外窗口，复制在出口拦截。验证真实系统分析、跨行复制、原图/非对称取景命中、原生菜单替换、单工作循环、空/错/过期状态、水印输入预算、样式记忆隔离、参数菜单、撤销、编码、四次旋转、输出区域与透明度。最终原位选字、局部放大、文字水印编辑/选中、角度菜单和整图画布已查看；严格格式检查无输出，Dev 偏好 MD5 保持原值。受控失败原始原因与停止状态已从统一日志 `capture` 读回；真实鼠标、系统玻璃、多屏和 macOS 15 仍按 HANDTEST 验收。
+
+- 本机安装：个人团队 `KN2ZDPF9SC` 的 Release 归档通过主程序/访达扩展/XPC 的签名、arm64、运行时、系统依赖与资源检查，安装至 `/Applications/Kitty Tools.app`，版本仍 0.9.0。807 个安装文件与归档一致，新进程路径和主程序指纹匹配；源码工作区指纹 `d5943d27e6ca`，主程序 SHA-256 前缀 `1be0e52a07bd`。假图 OCR 子进程冒烟通过，Dev 偏好 MD5 未变，后台启动时前台应用保持原值。旧版位于 `build/local-install-backups/Kitty Tools-before-round7-20261125-d5943d27.app`；本轮安装中间副本已清理，最终归档与共享构建缓存保留供复验。新功能实际鼠标与跨系统验证仍见 HANDTEST。
 
 ### 标注多选与关联文字（2026-11-25）
 
