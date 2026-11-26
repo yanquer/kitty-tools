@@ -2376,6 +2376,50 @@ struct ScreenshotSnapshotTests {
       name: "history-tags-detail", dark: true)
   }
 
+  /// 检查独立入口和成功底栏在两种面板尺寸下的位置，不打开真实文件面板。
+  @Test(.enabled(if: directory != nil)) func renderIndividualPNGExport() async throws {
+    let folder = FileManager.default.temporaryDirectory.appending(
+      path: "kitty-png-batch-shots-\(UUID())")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let model = ShotCompositionModel()
+    defer {
+      model.clear()
+      try? FileManager.default.removeItem(at: folder)
+    }
+    let desktop = try Self.desktop()
+    let first = folder.appending(path: "待核对的页面 A.png")
+    let second = folder.appending(path: "待核对的页面 B.png")
+    try write(
+      try #require(desktop.cropping(to: CGRect(x: 0, y: 0, width: 1000, height: 720))),
+      to: first.path)
+    try write(
+      try #require(desktop.cropping(to: CGRect(x: 200, y: 100, width: 700, height: 1000))),
+      to: second.path)
+    model.importFiles([first, second])
+    try await waitForComposition(model)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 820, height: 620),
+      name: "composition-individual-png-action"
+    ) { host in
+      #expect(compositionButton(in: host, label: "逐张导出 PNG…") != nil)
+      #expect(compositionButton(in: host, label: "导出 PNG…") != nil)
+    }
+    model.pdf = true
+    model.refreshPreview()
+    try await waitForComposition(model)
+    model.saveIndividualPNGs(into: folder)
+    for _ in 0..<200 where model.exporting { try await Task.sleep(for: .milliseconds(20)) }
+    try #require(model.exportedImageCount == 2)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 720, height: 520),
+      name: "composition-individual-png-completed", dark: true
+    ) { host in
+      #expect(compositionButton(in: host, label: "在访达中显示") != nil)
+      #expect(compositionButton(in: host, label: "逐张导出 PNG…") != nil)
+      #expect(compositionButton(in: host, label: "导出 PDF…") != nil)
+    }
+  }
+
   /// 等待实际导入与预览，不把尚未产生图片的加载界面当作完成。
   private func waitForComposition(_ model: ShotCompositionModel) async throws {
     for _ in 0..<400

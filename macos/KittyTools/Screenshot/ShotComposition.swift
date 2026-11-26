@@ -1,6 +1,7 @@
-// 简单截图拼图与多页 PDF：限制画布像素、逐张读取，导出先写临时文件，成功后才交付。
+// 截图拼图、多页 PDF 和逐张 PNG：逐张读取，先写临时产物，成功后才交付。
 
 import AppKit
+import Darwin
 import ImageIO
 import OSLog
 import UniformTypeIdentifiers
@@ -27,6 +28,8 @@ nonisolated enum ShotComposition {
     var editedThumbnail: CGImage? = nil
     var thumbnailEdit: Edit? = nil
     var thumbnailError: String? = nil
+    /// 导入前的文件名，避免把会话副本的临时编号当作导出名称。
+    var originalFilename: String? = nil
 
     /// 排版读取经过像素对齐的裁剪尺寸，四分之一转时交换宽高。
     func adjustedSize() throws -> CGSize {
@@ -504,12 +507,7 @@ nonisolated enum ShotComposition {
         Log.storage.notice(
           "PNG 输出尺寸 operation=\(operation, privacy: .public) widthMode=\(options.widthMode.rawValue, privacy: .public) requestedWidth=\(options.requestedWidth ?? 0) actualWidth=\(image.width) actualHeight=\(image.height)"
         )
-        guard
-          let output = CGImageDestinationCreateWithURL(
-            temporary as CFURL, UTType.png.identifier as CFString, 1, nil)
-        else { throw Failure(message: "无法创建 PNG 文件") }
-        CGImageDestinationAddImage(output, image, nil)
-        guard CGImageDestinationFinalize(output) else { throw Failure(message: "PNG 文件写入失败") }
+        try writePNG(image, to: temporary)
       }
       try Task.checkCancellation()
       if FileManager.default.fileExists(atPath: target.path) {
@@ -526,6 +524,157 @@ nonisolated enum ShotComposition {
       )
       throw error
     }
+  }
+
+  /// 逐张生成原像素 PNG，再把包含全部结果的目录一次性发布到用户选定位置。
+  @concurrent static func exportIndividualPNGs(_ sources: [Source], into parent: URL) async throws
+    -> URL
+  {
+    guard (1...maximumCount).contains(sources.count), parent.isFileURL else {
+      throw Failure(message: "请选择 1–20 张图片和本机导出文件夹")
+    }
+    let operation = UUID().uuidString
+    let began = ContinuousClock.now
+    let scoped = parent.startAccessingSecurityScopedResource()
+    defer { if scoped { parent.stopAccessingSecurityScopedResource() } }
+    let staging = parent.appending(
+      path: ".kitty-compose-png-\(operation)", directoryHint: .isDirectory)
+    var stage = "staging"
+    var writing: Int?
+    Log.storage.notice("逐张导出开始 operation=\(operation, privacy: .public) count=\(sources.count)")
+    do {
+      try Task.checkCancellation()
+      let creationError = staging.withUnsafeFileSystemRepresentation { path -> Int32 in
+        guard let path else { return EINVAL }
+        return mkdir(path, mode_t(S_IRWXU)) == 0 ? 0 : errno
+      }
+      guard creationError == 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: creationError) ?? .EIO)
+      }
+      defer { cleanup(staging) }
+      stage = "encode"
+      for (index, source) in sources.enumerated() {
+        writing = index
+        try Task.checkCancellation()
+        let filename = individualFilename(
+          source.originalFilename ?? source.label, number: index + 1)
+        try autoreleasepool {
+          try writeIndividual(source, to: staging.appending(path: filename))
+        }
+      }
+      writing = nil
+      stage = "publish"
+      let published = try publishIndividualDirectory(staging, in: parent)
+      Log.storage.notice(
+        "逐张导出完成 operation=\(operation, privacy: .public) count=\(sources.count) elapsed=\(String(describing: began.duration(to: .now)), privacy: .public)"
+      )
+      return published
+    } catch {
+      let underlying = error as NSError
+      let source = writing.map { sources[$0].id.uuidString } ?? "-"
+      let reason = individualFailureReason(error, source: writing.map { sources[$0] })
+      Log.storage.error(
+        "逐张导出未完成 operation=\(operation, privacy: .public) stage=\(stage, privacy: .public) position=\(writing.map { $0 + 1 } ?? 0) source=\(source, privacy: .public) domain=\(underlying.domain, privacy: .public) code=\(underlying.code) reason=\(reason, privacy: .public) elapsed=\(String(describing: began.duration(to: .now)), privacy: .public)"
+      )
+      if error is CancellationError { throw error }
+      if let writing {
+        throw Failure(message: "第 \(writing + 1) 张图片导出失败。\(reason)")
+      }
+      if let failure = error as? Failure { throw failure }
+      throw Failure(message: "无法写入所选文件夹。\(reason)")
+    }
+  }
+
+  /// 逐张导出不经拼图缩放，并回读单页及像素尺寸后才计入完整批次。
+  private static func writeIndividual(_ source: Source, to file: URL) throws {
+    let size = try source.adjustedSize()
+    guard source.size.width * source.size.height <= CGFloat(ImageStore.maxPixels),
+      let side = Int(exactly: max(size.width, size.height))
+    else { throw Failure(message: "图片尺寸超出单张导出范围") }
+    let image = try decode(source, side: side)
+    guard CGSize(width: image.width, height: image.height) == size else {
+      throw Failure(message: "解码后的像素尺寸与当前调整不一致")
+    }
+    try writePNG(image, to: file)
+    guard let input = CGImageSourceCreateWithURL(file as CFURL, nil),
+      CGImageSourceGetStatus(input) == .statusComplete, CGImageSourceGetCount(input) == 1,
+      let properties = CGImageSourceCopyPropertiesAtIndex(input, 0, nil) as? [CFString: Any],
+      (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue == image.width,
+      (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue == image.height
+    else { throw Failure(message: "PNG 写入不完整或像素尺寸不正确") }
+  }
+
+  /// 拼图与逐张导出共用系统 PNG 编码，保留图片色彩空间和透明像素。
+  private static func writePNG(_ image: CGImage, to url: URL) throws {
+    guard
+      let output = CGImageDestinationCreateWithURL(
+        url as CFURL, UTType.png.identifier as CFString, 1, nil)
+    else { throw Failure(message: "无法创建 PNG 文件") }
+    CGImageDestinationAddImage(output, image, nil)
+    guard CGImageDestinationFinalize(output) else { throw Failure(message: "PNG 文件写入失败") }
+  }
+
+  /// 去掉路径字符及原扩展名，按显示顺序加号，长度留出文件系统规范化空间。
+  static func individualFilename(_ original: String, number: Int) -> String {
+    let safe = original.unicodeScalars.map { scalar in
+      if scalar.properties.generalCategory == .control || CharacterSet.newlines.contains(scalar) {
+        return ""
+      }
+      return "/:\\".unicodeScalars.contains(scalar) ? "-" : String(scalar)
+    }.joined()
+    let stem = (safe as NSString).deletingPathExtension
+      .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
+    var bytes = 0
+    let head = String(
+      stem.prefix(while: { character in
+        bytes += String(character).decomposedStringWithCanonicalMapping.utf8.count
+        return bytes <= 180
+      }))
+    let prefix = String(format: "%02d", number)
+    return "\(prefix)-\(head.isEmpty ? "图片" : head).png"
+  }
+
+  /// 使用原子的排他改名。文件系统不支持时停止，不以可能覆盖目标的改名代替。
+  private static func publishIndividualDirectory(_ staging: URL, in parent: URL) throws -> URL {
+    var number = 1
+    while true {
+      try Task.checkCancellation()
+      let name = number == 1 ? "调整后的 PNG" : "调整后的 PNG \(number)"
+      let target = parent.appending(path: name, directoryHint: .isDirectory)
+      let code = staging.withUnsafeFileSystemRepresentation { from in
+        target.withUnsafeFileSystemRepresentation { to -> Int32 in
+          guard let from, let to else { return EINVAL }
+          return renamex_np(from, to, UInt32(RENAME_EXCL)) == 0 ? 0 : errno
+        }
+      }
+      if code == 0 { return target }
+      if code == EEXIST || code == ENOTEMPTY {
+        number += 1
+        continue
+      }
+      throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+    }
+  }
+
+  /// 保留编码或系统拒绝的原因，避免统一日志记录文件名、路径和图片内容。
+  private static func individualFailureReason(_ error: Error, source: Source?) -> String {
+    if let failure = error as? Failure {
+      if let label = source?.label, !label.isEmpty {
+        return failure.message.replacingOccurrences(of: label, with: "当前图片")
+      }
+      return failure.message
+    }
+    let value = error as NSError
+    if value.domain == NSPOSIXErrorDomain {
+      if value.code == Int(ENOTSUP) || value.code == Int(EINVAL) {
+        return "此位置无法安全发布整批文件，请选择其它文件夹。"
+      }
+      return String(cString: strerror(Int32(value.code)))
+    }
+    if value.domain == NSCocoaErrorDomain {
+      return CocoaError(CocoaError.Code(rawValue: value.code)).localizedDescription
+    }
+    return "\(value.domain) (\(value.code))"
   }
 
   /// 每图一页、保留比例与顺序；每页解码后立即释放，不把整批像素留在内存。
@@ -565,8 +714,9 @@ nonisolated enum ShotComposition {
   private static func cleanup(_ url: URL) {
     guard FileManager.default.fileExists(atPath: url.path) else { return }
     do { try FileManager.default.removeItem(at: url) } catch {
+      let underlying = error as NSError
       Log.storage.error(
-        "截图合成临时文件清理失败 temporary=\(url.lastPathComponent, privacy: .public) cause=\(String(reflecting: error), privacy: .public)"
+        "截图合成临时文件清理失败 temporary=\(url.lastPathComponent, privacy: .public) domain=\(underlying.domain, privacy: .public) code=\(underlying.code) reason=\(individualFailureReason(error, source: nil), privacy: .public)"
       )
     }
   }

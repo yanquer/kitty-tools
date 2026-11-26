@@ -37,7 +37,8 @@ struct ShotCompositionInsertion: Equatable {
   var rendering = false
   var exporting = false
   var error: String?
-  var exported: URL?
+  var exported: URL? { didSet { exportedImageCount = nil } }
+  private(set) var exportedImageCount: Int?
   var choosing = false
   private var directories: [URL] = []
   private var importedBytes = 0
@@ -111,7 +112,8 @@ struct ShotCompositionInsertion: Equatable {
       let first = batch.sources.first
     {
       sources[index] = ShotComposition.Source(
-        id: id, url: first.url, size: first.size, label: first.label, thumbnail: first.thumbnail)
+        id: id, url: first.url, size: first.size, label: first.label, thumbnail: first.thumbnail,
+        originalFilename: first.originalFilename)
     } else {
       sources.append(contentsOf: batch.sources)
     }
@@ -294,7 +296,7 @@ struct ShotCompositionInsertion: Equatable {
     sources.map {
       ShotComposition.Source(
         id: $0.id, url: $0.url, size: $0.size, label: $0.label, thumbnail: $0.thumbnail,
-        edit: $0.edit)
+        edit: $0.edit, originalFilename: $0.originalFilename)
     }
   }
 
@@ -553,6 +555,64 @@ struct ShotCompositionInsertion: Equatable {
     }
   }
 
+  /// 独立 PNG 不依赖拼图预览是否可导出，也允许处理一张图。
+  var canExportIndividualPNGs: Bool {
+    canImport && reorderingID == nil && !rendering
+      && (1...ShotComposition.maximumCount).contains(sources.count)
+  }
+
+  /// 用户启动逐张导出时固定来源顺序和调整，成功后显示整个已发布目录。
+  func saveIndividualPNGs(into selectedDirectory: URL? = nil) {
+    guard canExportIndividualPNGs else { return }
+    exporting = true
+    error = nil
+    exported = nil
+    let sources = sources
+    let ticket = generation
+    exportTask = Task { [weak self] in
+      guard let self, !Task.isCancelled, generation == ticket else { return }
+      let directory: URL?
+      if let selectedDirectory {
+        directory = selectedDirectory
+      } else {
+        directory = await chooseIndividualPNGDirectory()
+      }
+      guard !Task.isCancelled, generation == ticket else { return }
+      guard let directory else {
+        exporting = false
+        return
+      }
+      do {
+        let result = try await ShotComposition.exportIndividualPNGs(sources, into: directory)
+        guard !Task.isCancelled, generation == ticket else { return }
+        exporting = false
+        exported = result
+        exportedImageCount = sources.count
+        Island.announce("已导出 \(sources.count) 张 PNG")
+      } catch {
+        guard !Task.isCancelled, generation == ticket else { return }
+        exporting = false
+        self.error = error.localizedDescription
+      }
+    }
+  }
+
+  /// 文件夹选择沿用现有原生面板，关闭当前会话时可以取消。
+  private func chooseIndividualPNGDirectory() async -> URL? {
+    let panel = NSOpenPanel()
+    panel.canChooseFiles = false
+    panel.canChooseDirectories = true
+    panel.canCreateDirectories = true
+    panel.allowsMultipleSelection = false
+    panel.title = "逐张导出 PNG"
+    panel.message = "按当前顺序导出每张调整后的图片，完成后在所选位置创建新文件夹。"
+    panel.prompt = "导出到此处"
+    filePanel = panel
+    let response = await FilePanel.begin(panel)
+    if filePanel === panel { filePanel = nil }
+    return response == .OK ? panel.url : nil
+  }
+
   /// 关闭、重开或功能停用时停止任务并释放缩略图、快照引用。
   func clear() {
     generation &+= 1
@@ -702,7 +762,7 @@ struct ShotCompositionView: View {
           symbol: "photo.on.rectangle",
           title: model.sources.isEmpty ? "添加要合成的图片" : "暂时无法预览"
         ) {
-          Text(model.sources.isEmpty ? "拖入图片，或点右侧「添加…」；至少两张可导出" : "请查看下方原因，或替换无法读取的图片")
+          Text(model.sources.isEmpty ? "拖入图片，或点右侧「添加…」。两张起可拼图，也可逐张导出。" : "请查看下方原因，或替换无法读取的图片")
             .foregroundStyle(.secondary)
         }
       }
@@ -1007,13 +1067,18 @@ struct ShotCompositionView: View {
       } else if let error = model.error {
         Text(error).font(.system(size: 12)).foregroundStyle(Style.danger).lineLimit(3)
       } else if let url = model.exported {
-        Text("已导出：\(url.lastPathComponent)").font(.system(size: 12)).lineLimit(1).truncationMode(
-          .middle)
+        let title =
+          model.exportedImageCount.map { "已导出 \($0) 张 PNG · \(url.lastPathComponent)" }
+          ?? "已导出：\(url.lastPathComponent)"
+        Text(title).font(.system(size: 12)).lineLimit(1).truncationMode(.middle).help(title)
         Button("在访达中显示") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
       } else {
         Text("预览与导出使用同一批图片快照").font(.system(size: 12)).foregroundStyle(.secondary)
       }
       Spacer(minLength: 0)
+      Button("逐张导出 PNG…") { model.saveIndividualPNGs() }
+        .help("按当前顺序保存裁剪和旋转后的图片")
+        .disabled(!model.canExportIndividualPNGs)
       Button(model.pdf ? "导出 PDF…" : "导出 PNG…", action: model.save)
         .buttonStyle(BrandButtonStyle())
         .disabled(

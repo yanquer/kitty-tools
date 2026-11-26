@@ -606,6 +606,147 @@ struct ShotCompositionTests {
     #expect(try Data(contentsOf: first.url) == before)
   }
 
+  /// 经真实会话导入、改序和撤销重做后逐张导出，回读裁剪、转向、透明度及编号。
+  @Test func individualPNGsUseCurrentOrderCropRotationAndTransparency() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let firstFolder = folder.appending(path: "first")
+    let secondFolder = folder.appending(path: "second")
+    let target = folder.appending(path: "out")
+    for path in [firstFolder, secondFolder, target] {
+      try FileManager.default.createDirectory(at: path, withIntermediateDirectories: false)
+    }
+    let first = firstFolder.appending(path: "素材.png")
+    let second = secondFolder.appending(path: "素材.png")
+    let mask = try ScreenshotTests.image(size: 120) { context in
+      context.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+      context.fill(CGRect(x: 0, y: 0, width: 60, height: 120))
+    }
+    _ = try await source(mask, at: first)
+    _ = try await source(image(0, 1), at: second)
+    let original = try Data(contentsOf: first)
+    let model = ShotCompositionModel()
+    defer { model.clear() }
+    model.importFiles([first, second])
+    try await settleImport(model)
+    try await settlePreview(model)
+    let firstID = try #require(model.sources.first?.id)
+    model.beginCrop(firstID)
+    try await settleCrop(model)
+    let draft = try #require(model.cropDraft)
+    draft.selection = CGRect(x: 0.25, y: 0, width: 0.75, height: 0.5)
+    model.applyCrop()
+    model.rotate(firstID, by: 1)
+    model.move(firstID, by: 1)
+    model.undoEdit()
+    model.redoEdit()
+    model.options.widthMode = .custom
+    model.options.customWidth = 0
+    model.refreshPreview()
+    try await settlePreview(model)
+    #expect(model.preview == nil && model.canExportIndividualPNGs)
+    let occupied = target.appending(path: "调整后的 PNG")
+    try Data("existing file".utf8).write(to: occupied)
+    let existing = target.appending(path: "调整后的 PNG 2")
+    try FileManager.default.createDirectory(at: existing, withIntermediateDirectories: false)
+    try Data("existing directory".utf8).write(to: existing.appending(path: "keep.txt"))
+    model.saveIndividualPNGs(into: target)
+    try await settleIndividualExport(model)
+    let batch = try #require(model.exported)
+    #expect(batch.lastPathComponent == "调整后的 PNG 3" && model.exportedImageCount == 2)
+    #expect(try Data(contentsOf: occupied) == Data("existing file".utf8))
+    #expect(
+      try Data(contentsOf: existing.appending(path: "keep.txt")) == Data("existing directory".utf8))
+    let files = try FileManager.default.contentsOfDirectory(atPath: batch.path).sorted()
+    #expect(files == ["01-素材.png", "02-素材.png"])
+    let blue = try readPNG(batch.appending(path: "01-素材.png"))
+    #expect(blue.width == 100 && blue.height == 60)
+    #expect(try pixel(blue, at: CGPoint(x: 15, y: 20))[2] > 240)
+    let adjusted = try readPNG(batch.appending(path: "02-素材.png"))
+    #expect(adjusted.width == 60 && adjusted.height == 90)
+    let rotated = try pixel(adjusted, at: CGPoint(x: 20, y: 80))
+    let reference = try pixel(mask, at: CGPoint(x: 40, y: 20))
+    #expect(
+      zip(rotated, reference).allSatisfy { abs(Int($0) - Int($1)) <= 3 },
+      "旋转后的有色位置为 \(rotated)，来源像素为 \(reference)")
+    #expect(try pixel(adjusted, at: CGPoint(x: 20, y: 20))[3] == 0)
+    #expect(try Data(contentsOf: first) == original)
+    #expect(try FileManager.default.contentsOfDirectory(atPath: target.path).count == 3)
+  }
+
+  /// 第二张失败和任务取消都不暴露成功目录，已存在的文件继续可用。
+  @Test func individualPNGFailureDoesNotPublishPartialDirectory() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let valid = try await source(image(1, 0), at: folder.appending(path: "source.png"))
+    let output = folder.appending(path: "output")
+    try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false)
+    let marker = output.appending(path: "keep.txt")
+    try Data("keep".utf8).write(to: marker)
+    let missing = ShotComposition.Source(
+      id: UUID(), url: folder.appending(path: "missing.png"),
+      size: valid.size, label: "缺失图片.png")
+    let model = ShotCompositionModel()
+    defer { model.clear() }
+    model.sources = [valid, missing]
+    model.saveIndividualPNGs(into: output)
+    try await settleIndividualExport(model)
+    #expect(model.exported == nil && model.error?.contains("第 2 张") == true)
+    #expect(try FileManager.default.contentsOfDirectory(atPath: output.path) == ["keep.txt"])
+    let cancelled = Task { try await ShotComposition.exportIndividualPNGs([valid], into: output) }
+    cancelled.cancel()
+    await #expect(throws: CancellationError.self) { try await cancelled.value }
+    #expect(try FileManager.default.contentsOfDirectory(atPath: output.path) == ["keep.txt"])
+  }
+
+  /// 一张超长图按实际尺寸出图，文件名既有原名和序号也能安全用于路径。
+  @Test func individualPNGRetainsLongDimensionsAndSafeName() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    var item = try await source(
+      image(0, 1, size: CGSize(width: 12, height: 9000)),
+      at: folder.appending(path: "long.png"))
+    item.originalFilename = "../版本:\0/" + String(repeating: "图", count: 120) + ".jpeg"
+    let batch = try await ShotComposition.exportIndividualPNGs([item], into: folder)
+    let names = try FileManager.default.contentsOfDirectory(atPath: batch.path)
+    let name = try #require(names.first)
+    #expect(names.count == 1 && name.hasPrefix("01-") && name.hasSuffix(".png"))
+    #expect(
+      !name.contains("/") && !name.contains(":") && !name.contains("\0") && name.utf8.count < 255)
+    let png = try readPNG(batch.appending(path: name))
+    #expect(png.width == 12 && png.height == 9000)
+  }
+
+  /// EXIF 方向先转正再导出，PNG 的命名与可见尺寸来自同一张导入图片。
+  @Test func individualPNGUsesExifOrientedDimensions() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let jpeg = folder.appending(path: "有方向的照片.jpg")
+    let destination = try #require(
+      CGImageDestinationCreateWithURL(jpeg as CFURL, UTType.jpeg.identifier as CFString, 1, nil))
+    CGImageDestinationAddImage(
+      destination, try image(1, 0), [kCGImagePropertyOrientation: 6] as CFDictionary)
+    try #require(CGImageDestinationFinalize(destination))
+    let imported = try await ImageImport.snapshots([jpeg])
+    defer { ImageImport.discard(imported.directory) }
+    let once = try await ShotComposition.exportIndividualPNGs(imported.sources, into: folder)
+    let png = try readPNG(once.appending(path: "01-有方向的照片.png"))
+    #expect(png.width == 60 && png.height == 100)
+  }
+
+  /// 从磁盘读实际 PNG，而不是取会话内的预览或缩略图。
+  private func readPNG(_ url: URL) throws -> CGImage {
+    let input = try #require(CGImageSourceCreateWithURL(url as CFURL, nil))
+    #expect(CGImageSourceGetType(input) as String? == UTType.png.identifier)
+    return try #require(CGImageSourceCreateImageAtIndex(input, 0, nil))
+  }
+
+  /// 等待模型报告整批导出结果，避免把中间状态当成完成。
+  private func settleIndividualExport(_ model: ShotCompositionModel) async throws {
+    for _ in 0..<300 where model.exporting { try await Task.sleep(for: .milliseconds(20)) }
+    try #require(!model.exporting, "逐张导出未在测试时限内完成")
+  }
+
   /// 像素对齐的小范围保留细节，转向前后的裁剪框往返不漂移；无效范围明确拒绝。
   @Test func cropGeometryAndQuarterTurnsRemainReversible() async throws {
     let folder = try directory()

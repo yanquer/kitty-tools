@@ -129,8 +129,9 @@ nonisolated enum ImageImport {
         let id = UUID()
         let copy = directory.appending(path: id.uuidString)
         try data.write(to: copy, options: .atomic)
-        let source = try await ShotComposition.source(
+        var source = try await ShotComposition.source(
           id: id, url: copy, label: labels?[index] ?? url.lastPathComponent)
+        source.originalFilename = url.lastPathComponent
         guard source.thumbnail != nil else {
           throw Failure(message: "图片像素无法解码，未采用本批图片，请检查文件是否完整")
         }
