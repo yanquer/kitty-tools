@@ -23,6 +23,89 @@ nonisolated enum ShotComposition {
     let size: CGSize
     let label: String
     var thumbnail: CGImage? = nil
+    var edit = Edit()
+    var editedThumbnail: CGImage? = nil
+    var thumbnailEdit: Edit? = nil
+    var thumbnailError: String? = nil
+
+    /// 排版读取经过像素对齐的裁剪尺寸，四分之一转时交换宽高。
+    func adjustedSize() throws -> CGSize {
+      let rect = try edit.pixelRect(in: size)
+      return edit.turns % 2 == 0 ? rect.size : CGSize(width: rect.height, height: rect.width)
+    }
+
+    /// 列表只读后台生成的当前版本缩略图，不用整图小缩略图冒充细小裁剪结果。
+    var adjustedThumbnail: CGImage? {
+      if edit.isIdentity { return thumbnail }
+      return thumbnailEdit == edit ? editedThumbnail : nil
+    }
+
+    /// 调整状态使用可理解的动作说明，未旋转时不显示没有意义的零度。
+    var adjustmentDescription: String {
+      var parts: [String] = []
+      if edit.crop != CGRect(x: 0, y: 0, width: 1, height: 1) { parts.append("已裁剪") }
+      switch edit.turns {
+      case 1: parts.append("右转 90°")
+      case 2: parts.append("旋转 180°")
+      case 3: parts.append("左转 90°")
+      default: break
+      }
+      return parts.joined(separator: " · ")
+    }
+  }
+
+  /// 裁剪以转正原图的左下归一化坐标保存，旋转在裁剪之后采用，恢复不依赖历史副本。
+  struct Edit: Equatable, Sendable {
+    var crop = CGRect(x: 0, y: 0, width: 1, height: 1)
+    var turns = 0
+    var isIdentity: Bool { crop == CGRect(x: 0, y: 0, width: 1, height: 1) && turns == 0 }
+
+    /// 校验并转换为原点左上的真实像素框；最小范围来自一个像素，不引入额外裁剪配额。
+    func pixelRect(in size: CGSize) throws -> CGRect {
+      guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0,
+        crop.minX.isFinite, crop.minY.isFinite, crop.width.isFinite, crop.height.isFinite,
+        crop.minX >= -0.000000001, crop.minY >= -0.000000001, crop.width > 0, crop.height > 0,
+        crop.maxX <= 1.000000001, crop.maxY <= 1.000000001, (0..<4).contains(turns)
+      else { throw Failure(message: "图片裁剪范围或旋转方向无效") }
+      let left = max(0, (crop.minX * size.width).rounded())
+      let right = min(size.width, (crop.maxX * size.width).rounded())
+      let bottom = max(0, (crop.minY * size.height).rounded())
+      let top = min(size.height, (crop.maxY * size.height).rounded())
+      guard right - left >= 1, top - bottom >= 1 else {
+        throw Failure(message: "裁剪范围至少需要 1 × 1 像素")
+      }
+      return CGRect(x: left, y: size.height - top, width: right - left, height: top - bottom)
+    }
+
+    /// 元数据以真实原图像素边界归一化，解码、草稿应用和缩略图使用同一范围。
+    func aligned(in size: CGSize) throws -> Edit {
+      let rect = try pixelRect(in: size)
+      return Edit(
+        crop: CGRect(
+          x: rect.minX / size.width, y: (size.height - rect.maxY) / size.height,
+          width: rect.width / size.width, height: rect.height / size.height), turns: turns)
+    }
+
+    /// 显示中的整图旋转与裁剪框使用同一矩阵，应用时可逆向映射回原图。
+    var rotation: CGAffineTransform {
+      (0..<max(0, min(turns, 3))).reduce(CGAffineTransform.identity) { value, _ in
+        value.concatenating(ImageTransform.mapping(.right, size: CGSize(width: 1, height: 1)))
+      }
+    }
+  }
+
+  /// 预设只决定目标宽度，自定义数值仅在自定义模式生效。
+  enum WidthMode: String, CaseIterable, Identifiable, Sendable {
+    case automatic, compact, wide, custom
+    var id: String { rawValue }
+    var title: String {
+      switch self {
+      case .automatic: "自动"
+      case .compact: "1024 像素"
+      case .wide: "1920 像素"
+      case .custom: "自定义"
+      }
+    }
   }
 
   enum Layout: String, CaseIterable, Identifiable, Sendable {
@@ -88,12 +171,24 @@ nonisolated enum ShotComposition {
     var orientation = Orientation.portrait
     var pdfMargin: CGFloat = 10
     var pdfBackground = Background.light
+    var widthMode = WidthMode.automatic
+    var customWidth = 1920
+    var requestedWidth: CGFloat? {
+      switch widthMode {
+      case .automatic: nil
+      case .compact: 1024
+      case .wide: 1920
+      case .custom: CGFloat(customWidth)
+      }
+    }
   }
 
   struct Plan: Equatable, Sendable {
     let size: CGSize
     /// 与输入图片顺序一致、使用左下原点；PNG 单位为输出像素，PDF 单位为点。
     let frames: [CGRect]
+    var requestedSize: CGSize? = nil
+    var isLimited = false
   }
 
   struct Failure: LocalizedError, Sendable {
@@ -152,19 +247,30 @@ nonisolated enum ShotComposition {
             width: fitted.width, height: fitted.height))
       }
     }
+    if let width = options.requestedWidth, !(1...maximumSide).contains(width) {
+      throw Failure(message: "PNG 输出宽度需要在 1–8192 像素之间")
+    }
     guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else {
       throw Failure(message: "拼图尺寸超出可处理范围")
     }
+    let requestedScale = options.requestedWidth.map { $0 / size.width } ?? 1
+    let requestedSize = CGSize(
+      width: size.width * requestedScale, height: size.height * requestedScale)
     let ratio = min(
-      1, maximum / max(size.width, size.height), sqrt(maximumPixels / (size.width * size.height)))
+      requestedScale, maximum / max(size.width, size.height),
+      sqrt(maximumPixels / (size.width * size.height)))
+    let limited = ratio < requestedScale - 0.000000001
     let height = max(1, ceil(size.height * ratio))
     frames = frames.map {
       CGRect(
         x: $0.minX * ratio, y: height - $0.maxY * ratio,
         width: $0.width * ratio, height: $0.height * ratio)
     }
-    size = CGSize(width: max(1, ceil(size.width * ratio)), height: height)
-    return Plan(size: size, frames: frames)
+    size = CGSize(
+      width: !limited
+        ? (options.requestedWidth ?? max(1, ceil(size.width * ratio)))
+        : max(1, ceil(size.width * ratio)), height: height)
+    return Plan(size: size, frames: frames, requestedSize: requestedSize, isLimited: limited)
   }
 
   /// PDF 预览与导出共享页框和图片框，毫米边距不与 PNG 像素留白混用。
@@ -221,6 +327,30 @@ nonisolated enum ShotComposition {
 
   /// ImageIO 按实际输出需要缩小解码，避免先解开整张超长原图。
   private static func decode(_ source: Source, side: Int) throws -> CGImage {
+    let cropped = try source.edit.pixelRect(in: source.size)
+    let originalSide = max(source.size.width, source.size.height)
+    let needed = min(
+      originalSide, ceil(CGFloat(side) * originalSide / max(cropped.width, cropped.height)))
+    let image = try decodeOriginal(source, side: Int(needed))
+    return try adjusted(image, edit: source.edit.aligned(in: source.size))
+  }
+
+  /// 裁剪编辑器只读取整图的有界预览，像素内容不写回会话副本。
+  @concurrent static func cropPreview(_ source: Source) async throws -> CGImage {
+    _ = try source.edit.pixelRect(in: source.size)
+    try Task.checkCancellation()
+    let image = try decodeOriginal(source, side: 1400)
+    return try adjusted(image, edit: Edit(turns: source.edit.turns))
+  }
+
+  /// 调整后的缩略图同样按裁剪需求解码，单像素小范围不会取到整图缩小后的混合颜色。
+  @concurrent static func thumbnail(for source: Source) async throws -> CGImage {
+    try Task.checkCancellation()
+    return try decode(source, side: 120)
+  }
+
+  /// 转正解码与裁剪需求分开计算，小范围裁剪不会因为先缩成整图缩略图而丢掉细节。
+  private static func decodeOriginal(_ source: Source, side: Int) throws -> CGImage {
     guard let input = CGImageSourceCreateWithURL(source.url as CFURL, nil),
       let image = CGImageSourceCreateThumbnailAtIndex(
         input, 0,
@@ -234,6 +364,49 @@ nonisolated enum ShotComposition {
     return image
   }
 
+  /// 小图缩略图与最终输出共用裁剪和正交旋转，坐标始终映射转正后的原图。
+  static func adjusted(_ image: CGImage, edit: Edit) throws -> CGImage {
+    guard (0..<4).contains(edit.turns), edit.crop.width > 0, edit.crop.height > 0,
+      edit.crop.minX.isFinite, edit.crop.minY.isFinite, edit.crop.maxX.isFinite,
+      edit.crop.maxY.isFinite,
+      edit.crop.minX >= 0, edit.crop.minY >= 0, edit.crop.maxX <= 1.000000001,
+      edit.crop.maxY <= 1.000000001
+    else { throw Failure(message: "图片调整参数无效") }
+    let size = CGSize(width: image.width, height: image.height)
+    // 归一化的整数像素边界会有浮点误差；容差远小于一个像素，避免多裁入一行。
+    let left = floor(edit.crop.minX * size.width + 0.0000001)
+    let right = ceil(edit.crop.maxX * size.width - 0.0000001)
+    let top = floor((1 - edit.crop.maxY) * size.height + 0.0000001)
+    let bottom = ceil((1 - edit.crop.minY) * size.height - 0.0000001)
+    let area = CGRect(x: left, y: top, width: right - left, height: bottom - top)
+      .intersection(CGRect(origin: .zero, size: size))
+    guard let crop = image.cropping(to: area) else { throw Failure(message: "裁剪范围无法生成图片") }
+    if edit.turns == 0, area == CGRect(origin: .zero, size: size) { return image }
+    // 裁剪结果也生成独立位图，避免一像素缩略图仍持有整张原图的像素存储。
+    var output = CGSize(width: crop.width, height: crop.height)
+    var matrix = CGAffineTransform.identity
+    for _ in 0..<edit.turns {
+      matrix = matrix.concatenating(ImageTransform.mapping(.right, size: output))
+      output = CGSize(width: output.height, height: output.width)
+    }
+    let colorSpace =
+      crop.colorSpace.flatMap { $0.model == .rgb ? $0 : nil } ?? CGColorSpace(
+        name: CGColorSpace.sRGB)!
+    guard
+      let context = CGContext(
+        data: nil, width: Int(output.width), height: Int(output.height), bitsPerComponent: 8,
+        bytesPerRow: 0, space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    else {
+      throw Failure(message: "无法分配图片调整画布")
+    }
+    context.interpolationQuality = .none
+    context.concatenate(matrix)
+    context.draw(crop, in: CGRect(x: 0, y: 0, width: crop.width, height: crop.height))
+    guard let result = context.makeImage() else { throw Failure(message: "图片调整未完成") }
+    return result
+  }
+
   /// 预览与最终 PNG 共用同一排版和绘制，只改变输出像素上限。
   @concurrent static func render(
     _ sources: [Source], options: Options, maximum: CGFloat = maximumSide
@@ -241,7 +414,7 @@ nonisolated enum ShotComposition {
     async throws -> CGImage
   {
     guard maximum.isFinite, maximum >= 1 else { throw Failure(message: "预览尺寸无效") }
-    let layout = try plan(sizes: sources.map(\.size), options: options)
+    let layout = try plan(sizes: sources.map { try $0.adjustedSize() }, options: options)
     let scale = min(1, maximum / max(layout.size.width, layout.size.height))
     let size = CGSize(
       width: ceil(layout.size.width * scale), height: ceil(layout.size.height * scale))
@@ -273,7 +446,7 @@ nonisolated enum ShotComposition {
   {
     guard maximum.isFinite, maximum >= 1 else { throw Failure(message: "预览尺寸无效") }
     try Task.checkCancellation()
-    let page = try pdfPagePlan(size: source.size, options: options)
+    let page = try pdfPagePlan(size: source.adjustedSize(), options: options)
     let scale = min(1, maximum / max(page.size.width, page.size.height))
     let size = CGSize(width: ceil(page.size.width * scale), height: ceil(page.size.height * scale))
     let context = try canvas(size: size, background: options.pdfBackground)
@@ -328,6 +501,9 @@ nonisolated enum ShotComposition {
         }
       } else {
         let image = try await render(sources, options: options)
+        Log.storage.notice(
+          "PNG 输出尺寸 operation=\(operation, privacy: .public) widthMode=\(options.widthMode.rawValue, privacy: .public) requestedWidth=\(options.requestedWidth ?? 0) actualWidth=\(image.width) actualHeight=\(image.height)"
+        )
         guard
           let output = CGImageDestinationCreateWithURL(
             temporary as CFURL, UTType.png.identifier as CFString, 1, nil)
@@ -364,14 +540,15 @@ nonisolated enum ShotComposition {
       try Task.checkCancellation()
       do {
         try autoreleasepool {
-          let page = try pdfPagePlan(size: source.size, options: options)
+          let editedSize = try source.adjustedSize()
+          let page = try pdfPagePlan(size: editedSize, options: options)
           var box = CGRect(origin: .zero, size: page.size)
           let media = Data(bytes: &box, count: MemoryLayout<CGRect>.size)
           context.beginPDFPage([kCGPDFContextMediaBox: media] as CFDictionary)
           context.setFillColor(options.pdfBackground.color)
           context.fill(box)
           let image = try decode(
-            source, side: min(4096, Int(ceil(max(source.size.width, source.size.height)))))
+            source, side: min(4096, Int(ceil(max(editedSize.width, editedSize.height)))))
           context.draw(image, in: page.frames[0])
           context.endPDFPage()
         }

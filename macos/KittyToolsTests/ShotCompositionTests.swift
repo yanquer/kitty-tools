@@ -1,6 +1,7 @@
 // 截图增强的行为验证：拼图尺寸与像素、PDF 页序、失败不覆盖文件，以及自动扫码的过期结果隔离。
 
 import AppKit
+import Carbon.HIToolbox
 import CoreImage
 import ImageIO
 import Testing
@@ -385,6 +386,322 @@ struct ShotCompositionTests {
   private func settlePreview(_ model: ShotCompositionModel) async throws {
     for _ in 0..<300 where model.rendering { try await Task.sleep(for: .milliseconds(20)) }
     try #require(!model.rendering, "预览未在测试时限内完成")
+  }
+
+  /// 单张裁剪和旋转同时进入 PNG、PDF 与缩略图，原文件内容保持不变。
+  @Test func perImageEditsReachBothExportsWithoutChangingFiles() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let picture = try ScreenshotTests.image(size: 120) { context in
+      context.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+      context.fill(CGRect(x: 0, y: 0, width: 120, height: 120))
+      context.setFillColor(CGColor(red: 0, green: 0, blue: 1, alpha: 1))
+      context.fill(CGRect(x: 60, y: 0, width: 60, height: 120))
+    }
+    var first = try await source(picture, at: folder.appending(path: "split.png"))
+    let second = try await source(image(0, 1), at: folder.appending(path: "blue.png"))
+    let before = try Data(contentsOf: first.url)
+    first.edit = .init(crop: CGRect(x: 0, y: 0.25, width: 0.5, height: 0.5), turns: 1)
+    #expect(try first.adjustedSize() == CGSize(width: 60, height: 60))
+    let thumbnail = try await ShotComposition.thumbnail(for: first)
+    #expect(thumbnail.width == 60)
+    let options = ShotComposition.Options(spacing: 0, margin: 0, pdfMargin: 0)
+    let png = try await ShotComposition.render([first, second], options: options)
+    #expect(try pixel(png, at: CGPoint(x: png.width / 2, y: png.height - 10))[0] > 240)
+    let url = folder.appending(path: "edited.pdf")
+    try await ShotComposition.export([first, second], options: options, pdf: true, to: url)
+    let document = try #require(CGPDFDocument(url as CFURL))
+    let page = try #require(document.page(at: 1))
+    #expect(page.getBoxRect(.mediaBox).size == CGSize(width: 60, height: 60))
+    let context = try #require(
+      CGContext(
+        data: nil, width: 60, height: 60, bitsPerComponent: 8, bytesPerRow: 0,
+        space: CGColorSpace(name: CGColorSpace.sRGB)!,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+    context.drawPDFPage(page)
+    let pageImage = try #require(context.makeImage())
+    #expect(try pixel(pageImage, at: CGPoint(x: 30, y: 30))[0] > 240)
+    #expect(try Data(contentsOf: first.url) == before)
+  }
+
+  /// 像素对齐的小范围保留细节，转向前后的裁剪框往返不漂移；无效范围明确拒绝。
+  @Test func cropGeometryAndQuarterTurnsRemainReversible() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    var item = try await source(
+      image(1, 0, size: CGSize(width: 121, height: 79)), at: folder.appending(path: "odd.png"))
+    item.edit = try ShotComposition.Edit(
+      crop: CGRect(x: 13.0 / 121, y: 17.0 / 79, width: 37.0 / 121, height: 29.0 / 79)
+    ).aligned(in: item.size)
+    for turns in 0..<4 {
+      item.edit.turns = turns
+      let draft = ShotCropDraft(source: item, image: try await ShotComposition.cropPreview(item))
+      #expect(try draft.appliedEdit() == item.edit)
+      #expect(
+        try item.adjustedSize()
+          == (turns % 2 == 0 ? CGSize(width: 37, height: 29) : CGSize(width: 29, height: 37)))
+    }
+    let pixel = try ShotComposition.Edit(
+      crop: CGRect(x: 0, y: 0, width: 1.0 / 121, height: 1.0 / 79)
+    ).pixelRect(in: item.size)
+    #expect(pixel.size == CGSize(width: 1, height: 1))
+    for edit in [
+      ShotComposition.Edit(crop: .zero), .init(crop: CGRect(x: -0.1, y: 0, width: 1, height: 1)),
+      .init(turns: 4),
+    ] {
+      #expect(throws: ShotComposition.Failure.self) { try edit.pixelRect(in: item.size) }
+    }
+    var options = ShotComposition.Options(
+      spacing: 0, margin: 0, widthMode: .custom, customWidth: 1001)
+    item.edit = .init(crop: CGRect(x: 0, y: 0, width: 1.0 / 121, height: 1.0 / 79))
+    let result = try await ShotComposition.render([item, item], options: options)
+    #expect(result.width == 1001 && result.height == 2002)
+    options.customWidth = 8192
+    let limited = try ShotComposition.plan(
+      sizes: [CGSize(width: 1, height: 1), CGSize(width: 1, height: 1)], options: options)
+    #expect(limited.isLimited && limited.size.width < 8192)
+  }
+
+  /// 预设、自定义、自动与像素预算共同生效，最终宽度精确，整张图范围和比例保持。
+  @Test func outputWidthControlsActualPNGAndReportsLimits() async throws {
+    let sizes = [CGSize(width: 137, height: 83), CGSize(width: 61, height: 105)]
+    for layout in ShotComposition.Layout.allCases {
+      for (mode, custom, expected) in [
+        (ShotComposition.WidthMode.compact, 0, 1024), (.wide, 0, 1920), (.custom, 1001, 1001),
+      ] {
+        let options = ShotComposition.Options(layout: layout, widthMode: mode, customWidth: custom)
+        let plan = try ShotComposition.plan(sizes: sizes, options: options)
+        #expect(plan.size.width == CGFloat(expected) && !plan.isLimited)
+        for (frame, original) in zip(plan.frames, sizes) {
+          #expect(abs(frame.width / frame.height - original.width / original.height) < 0.001)
+          #expect(
+            frame.minX >= -0.001 && frame.minY >= -0.001 && frame.maxX <= plan.size.width + 0.001
+              && frame.maxY <= plan.size.height + 0.001)
+        }
+      }
+    }
+    let options = ShotComposition.Options(widthMode: .custom, customWidth: 8192)
+    let long = try ShotComposition.plan(
+      sizes: [CGSize(width: 100, height: 10000)], options: options)
+    #expect(
+      long.isLimited && long.requestedSize?.width == 8192
+        && max(long.size.width, long.size.height) <= 8192)
+    for value in [0, 8193] {
+      #expect(throws: ShotComposition.Failure.self) {
+        try ShotComposition.plan(
+          sizes: sizes, options: .init(widthMode: .custom, customWidth: value))
+      }
+    }
+    #expect(
+      try ShotComposition.plan(sizes: sizes, options: .init(customWidth: -1))
+        == ShotComposition.plan(sizes: sizes, options: .init()))
+    #expect(
+      try ShotComposition.pdfPagePlan(
+        size: sizes[0], options: .init(paper: .a4, widthMode: .custom, customWidth: -1))
+        == ShotComposition.pdfPagePlan(size: sizes[0], options: .init(paper: .a4)))
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let sources = [
+      try await source(image(1, 0), at: folder.appending(path: "a.png")),
+      try await source(image(0, 1), at: folder.appending(path: "b.png")),
+    ]
+    let url = folder.appending(path: "width.png")
+    try await ShotComposition.export(sources, options: .init(widthMode: .wide), pdf: false, to: url)
+    let input = try #require(CGImageSourceCreateWithURL(url as CFURL, nil))
+    #expect(
+      CGImageSourceCopyPropertiesAtIndex(input, 0, nil).map {
+        ($0 as NSDictionary)[kCGImagePropertyPixelWidth] as? Int
+      } == 1920)
+  }
+
+  /// 裁剪草稿只有应用才改变当前项，取消、替换、恢复及来源变化遵守同一版本契约。
+  @Test func cropDraftLifecycleRejectsChangedSourceAndRestoresOriginal() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let first = try await source(
+      image(1, 0, size: CGSize(width: 200, height: 100)), at: folder.appending(path: "red.png"))
+    let second = try await source(image(0, 1), at: folder.appending(path: "blue.png"))
+    let model = ShotCompositionModel()
+    defer { model.clear() }
+    model.sources = [first, second]
+    model.rotate(first.id, by: 1)
+    #expect(model.sources[0].edit.turns == 1)
+    model.beginCrop(first.id)
+    try await settleCrop(model)
+    let draft = try #require(model.cropDraft)
+    #expect(!model.canImport)
+    draft.selection = CGRect(x: 0, y: 0, width: 0.5, height: 1)
+    model.applyCrop()
+    try await settlePreview(model)
+    #expect(model.canImport && model.sources[0].edit.turns == 1)
+    #expect(try model.sources[0].adjustedSize() == CGSize(width: 50, height: 200))
+    model.restore(first.id)
+    #expect(model.sources[0].edit.isIdentity && model.sources[0].url == first.url)
+    model.beginCrop(first.id)
+    model.cancelCrop()
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(model.cropDraft == nil && model.sources[0].edit.isIdentity)
+    model.beginCrop(first.id)
+    try await settleCrop(model)
+    model.sources[0] = ShotComposition.Source(
+      id: first.id, url: second.url, size: second.size, label: second.label)
+    model.applyCrop()
+    #expect(model.error?.contains("图片已变化") == true && model.sources[0].edit.isIdentity)
+    model.beginCrop(first.id)
+    model.clear()
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(model.cropDraft == nil && model.cropTarget == nil && model.sources.isEmpty)
+  }
+
+  /// 缺失图片的缩略图失败独立呈现，不覆盖主流程错误，也不拿旧图冒充新调整。
+  @Test func thumbnailFailurePreservesMainErrorAndOtherImages() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let valid = try await source(image(1, 0), at: folder.appending(path: "valid.png"))
+    let missing = ShotComposition.Source(
+      id: UUID(), url: folder.appending(path: "missing.png"), size: valid.size,
+      label: "缺失的测试图片", thumbnail: valid.thumbnail)
+    let model = ShotCompositionModel()
+    defer { model.clear() }
+    model.sources = [valid, missing]
+    model.pdf = true
+    model.rotate(missing.id, by: 1)
+    model.showPage(0)
+    model.error = "主流程错误保持原样"
+    for _ in 0..<100 where model.sources[1].thumbnailError == nil || model.rendering {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(model.sources[1].thumbnailError?.contains(missing.label) == true)
+    #expect(model.sources[1].adjustedThumbnail == nil)
+    #expect(model.sources[0].edit.isIdentity && model.sources[0].thumbnailError == nil)
+    #expect(model.error == "主流程错误保持原样")
+    #expect(model.preview != nil && !model.rendering)
+  }
+
+  /// 原生裁剪画布从真实鼠标入口缩框、按原图像素移动，回车和 Esc 都只回调本草稿。
+  @Test func nativeCropCanvasUsesImageCoordinatesWithoutTakingKey() throws {
+    let picture = try image(1, 0, size: CGSize(width: 200, height: 100))
+    let view = ShotCropView(image: picture, pixelSize: CGSize(width: 200, height: 100))
+    let window = NSWindow(
+      contentRect: CGRect(x: -20000, y: -20000, width: 240, height: 240), styleMask: .borderless,
+      backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    window.contentView = view
+    defer {
+      window.contentView = nil
+      window.orderOut(nil)
+    }
+    let frame = view.imageFrame
+    let start = CGPoint(x: frame.maxX, y: frame.maxY)
+    let end = CGPoint(x: frame.midX, y: frame.midY)
+    let down = try #require(
+      NSEvent.mouseEvent(
+        with: .leftMouseDown, location: start, modifierFlags: [], timestamp: 0,
+        windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)
+    )
+    let move = try #require(
+      NSEvent.mouseEvent(
+        with: .leftMouseDragged, location: end, modifierFlags: [], timestamp: 0,
+        windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)
+    )
+    view.mouseDown(with: down)
+    view.mouseDragged(with: move)
+    view.mouseUp(with: move)
+    #expect(abs(view.selection.width - 0.5) < 0.001 && abs(view.selection.height - 0.5) < 0.001)
+    var applied = false
+    var cancelled = false
+    view.onApply = { applied = true }
+    view.onCancel = { cancelled = true }
+    for code in [kVK_RightArrow, kVK_Return, kVK_Escape] {
+      let key = try #require(
+        NSEvent.keyEvent(
+          with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+          windowNumber: window.windowNumber, context: nil, characters: "",
+          charactersIgnoringModifiers: "", isARepeat: false, keyCode: UInt16(code)))
+      view.keyDown(with: key)
+    }
+    #expect(abs(view.selection.minX - 1.0 / 200) < 0.001)
+    #expect(applied && cancelled && !window.isKeyWindow)
+    view.selection = CGRect(x: 0, y: 0, width: 1, height: 1)
+    let shrink = try #require(
+      NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: .option, timestamp: 0,
+        windowNumber: window.windowNumber, context: nil, characters: "",
+        charactersIgnoringModifiers: "", isARepeat: false, keyCode: UInt16(kVK_RightArrow)))
+    view.keyDown(with: shrink)
+    #expect(abs(view.selection.width - 199.0 / 200) < 0.00001)
+    let expand = try #require(
+      NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+        windowNumber: window.windowNumber, context: nil, characters: "",
+        charactersIgnoringModifiers: "", isARepeat: false, keyCode: UInt16(kVK_RightArrow)))
+    view.keyDown(with: expand)
+    #expect(view.selection == CGRect(x: 0, y: 0, width: 1, height: 1))
+  }
+
+  /// 等待当前草稿加载，读取失败或超时保持明确错误，不把缺失草稿当作成功。
+  private func settleCrop(_ model: ShotCompositionModel) async throws {
+    for _ in 0..<300 where model.cropTarget != nil && model.cropDraft == nil && model.error == nil {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    try #require(model.cropDraft != nil, "裁剪草稿未就绪")
+  }
+
+  /// 单像素细节在导出与后台缩略图中都来自原图，缓存位图不继续持有完整原图存储。
+  @Test func tinyCropKeepsDetailAndThumbnailStorageBounded() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let picture = try ScreenshotTests.image(size: 1500) { context in
+      context.setFillColor(CGColor(red: 0, green: 0, blue: 1, alpha: 1))
+      context.fill(CGRect(x: 0, y: 0, width: 1500, height: 1500))
+      context.setFillColor(CGColor(red: 0, green: 1, blue: 0, alpha: 1))
+      context.fill(CGRect(x: 997, y: 551, width: 1, height: 1))
+    }
+    let item = try await source(picture, at: folder.appending(path: "pixel.png"))
+    let before = try Data(contentsOf: item.url)
+    let model = ShotCompositionModel()
+    defer { model.clear() }
+    let other = ShotComposition.Source(
+      id: UUID(), url: item.url, size: item.size, label: "第二张图片", thumbnail: item.thumbnail)
+    model.sources = [item, other]
+    model.beginCrop(item.id)
+    try await settleCrop(model)
+    let draft = try #require(model.cropDraft)
+    draft.selection = CGRect(
+      x: 997.0 / 1500, y: 551.0 / 1500, width: 1.0 / 1500, height: 1.0 / 1500)
+    model.applyCrop()
+    for _ in 0..<300 where model.sources[0].adjustedThumbnail == nil {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    let thumbnail = try #require(model.sources[0].adjustedThumbnail)
+    #expect(thumbnail.width == 1 && thumbnail.height == 1)
+    let value = try pixel(thumbnail, at: .zero)
+    #expect(value[1] > 240 && value[2] < 10)
+    let data = try #require(thumbnail.dataProvider?.data)
+    #expect(CFDataGetLength(data) < 4096)
+    let output = try await ShotComposition.render(
+      [model.sources[0], model.sources[0]],
+      options: .init(spacing: 0, margin: 0, widthMode: .compact))
+    let center = try pixel(output, at: CGPoint(x: output.width / 2, y: output.height / 2))
+    #expect(center[1] > 240 && center[2] < 10)
+    #expect(try Data(contentsOf: item.url) == before)
+  }
+
+  /// RGB 广色域图片在正交旋转时保留原色彩空间，逆操作还原尺寸。
+  @Test func perImageRotationPreservesRGBColorSpace() throws {
+    let space = try #require(CGColorSpace(name: CGColorSpace.displayP3))
+    let context = try #require(
+      CGContext(
+        data: nil, width: 8, height: 4, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+    context.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: 8, height: 4))
+    let image = try #require(context.makeImage())
+    let turned = try ShotComposition.adjusted(image, edit: .init(turns: 1))
+    let restored = try ShotComposition.adjusted(turned, edit: .init(turns: 3))
+    #expect(turned.width == 4 && turned.height == 8)
+    #expect(turned.colorSpace?.name == space.name && restored.colorSpace?.name == space.name)
+    #expect(restored.width == 8 && restored.height == 4)
   }
 
   @Test func generatedQRCodeReturnsContentAndBounds() async throws {

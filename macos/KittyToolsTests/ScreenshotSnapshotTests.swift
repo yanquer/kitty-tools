@@ -1868,9 +1868,86 @@ struct ScreenshotSnapshotTests {
       name: "composition-mint-compact", dark: true)
   }
 
+  /// 单张调整、裁剪草稿与输出宽度使用真实文件和预览，在屏外核对应用按钮和最终图像。
+  @Test(.enabled(if: directory != nil)) func renderCompositionAdjustments() async throws {
+    let folder = FileManager.default.temporaryDirectory.appending(
+      path: "kitty-compose-edit-shots-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let model = ShotCompositionModel()
+    defer {
+      model.clear()
+      try? FileManager.default.removeItem(at: folder)
+    }
+    let desktop = try Self.desktop()
+    var urls: [URL] = []
+    for (index, rect) in [
+      CGRect(x: 0, y: 0, width: 1800, height: 1000), CGRect(x: 100, y: 0, width: 600, height: 1500),
+    ].enumerated() {
+      let url = folder.appending(path: index == 0 ? "项目设计评审-需要单独裁剪的第一张参考图.png" : "第二张竖图.png")
+      try write(try #require(desktop.cropping(to: rect)), to: url.path)
+      urls.append(url)
+    }
+    model.importFiles(urls)
+    try await waitForComposition(model)
+    let id = try #require(model.sources.first?.id)
+    model.options.widthMode = .custom
+    model.options.customWidth = 1001
+    model.rotate(id, by: 1)
+    try await waitForComposition(model)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 820, height: 620),
+      name: "composition-single-rotated")
+    model.beginCrop(id)
+    for _ in 0..<300 where model.cropDraft == nil && model.error == nil {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    let draft = try #require(model.cropDraft)
+    draft.selection = CGRect(x: 0.15, y: 0.2, width: 0.65, height: 0.6)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 820, height: 620),
+      name: "composition-crop-draft")
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 720, height: 520),
+      name: "composition-crop-compact", dark: true)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 820, height: 620),
+      name: "composition-crop-applying"
+    ) { host in
+      let action = compositionButton(in: host, label: "应用裁剪")
+      #expect(action != nil && action?() == true)
+      #expect(model.cropTarget == nil)
+    }
+    try await waitForComposition(model)
+    #expect(model.sources[0].edit != .init())
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 820, height: 620),
+      name: "composition-crop-applied", dark: true)
+    model.pdf = true
+    model.options.paper = .a4
+    model.refreshPreview()
+    try await waitForComposition(model)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 820, height: 620),
+      name: "composition-crop-pdf")
+    model.pdf = false
+    model.restore(id)
+    model.options.customWidth = 8192
+    model.refreshPreview()
+    try await waitForComposition(model)
+    #expect(model.outputPlan?.isLimited == true)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 720, height: 520),
+      name: "composition-width-limited")
+  }
+
   /// 等待实际导入与预览，不把尚未产生图片的加载界面当作完成。
   private func waitForComposition(_ model: ShotCompositionModel) async throws {
-    for _ in 0..<400 where model.preparing || model.rendering {
+    for _ in 0..<400
+    where model.preparing || model.rendering
+      || model.sources.contains(where: {
+        !$0.edit.isIdentity && $0.thumbnailEdit != $0.edit && $0.thumbnailError == nil
+      })
+    {
       try await Task.sleep(for: .milliseconds(20))
     }
     try #require(!model.preparing && !model.rendering && model.preview != nil, "拼图预览未就绪")

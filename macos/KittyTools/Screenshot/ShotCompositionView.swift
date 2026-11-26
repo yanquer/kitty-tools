@@ -24,7 +24,15 @@ import UniformTypeIdentifiers
   var choosing = false
   private var directories: [URL] = []
   private var importedBytes = 0
-  var canImport: Bool { !preparing && !exporting && !choosing }
+  private(set) var cropTarget: UUID?
+  private(set) var cropDraft: ShotCropDraft?
+  private var cropTask: Task<Void, Never>?
+  private var thumbnailWorker: Task<Void, Never>?
+  private var pendingThumbnails: [UUID: ShotComposition.Source] = [:]
+  var canImport: Bool { !preparing && !exporting && !choosing && cropTarget == nil }
+  var outputPlan: ShotComposition.Plan? {
+    try? ShotComposition.plan(sizes: sources.map { try $0.adjustedSize() }, options: options)
+  }
   @ObservationIgnored var close: () -> Void = {}
   private var loadingTask: Task<Void, Never>?
   private var previewTask: Task<Void, Never>?
@@ -207,6 +215,147 @@ import UniformTypeIdentifiers
     refreshPreview()
   }
 
+  /// 只加载当前图片的有界整图预览，取消或关闭后不回填旧编辑器。
+  func beginCrop(_ id: UUID) {
+    guard canImport, let source = sources.first(where: { $0.id == id }) else { return }
+    cropTask?.cancel()
+    cropTarget = id
+    cropDraft = nil
+    error = nil
+    let ticket = generation
+    Log.storage.notice(
+      "拼图裁剪开始 source=\(id.uuidString, privacy: .public) turns=\(source.edit.turns)")
+    cropTask = Task { [weak self] in
+      do {
+        let image = try await ShotComposition.cropPreview(source)
+        guard !Task.isCancelled, let self, generation == ticket, cropTarget == id else { return }
+        cropDraft = ShotCropDraft(source: source, image: image)
+      } catch {
+        guard !Task.isCancelled, let self, generation == ticket, cropTarget == id else { return }
+        cancelCrop()
+        self.error = error.localizedDescription
+        Log.storage.error(
+          "拼图裁剪准备失败 source=\(id.uuidString, privacy: .public) cause=\(String(reflecting: error), privacy: .public)"
+        )
+      }
+    }
+  }
+
+  /// 草稿采用前核对来源版本，图片变更时不能把旧裁剪应用到新内容。
+  func applyCrop() {
+    guard let draft = cropDraft,
+      let index = sources.firstIndex(where: { $0.id == draft.source.id }),
+      sources[index].url == draft.source.url, sources[index].size == draft.source.size,
+      sources[index].edit == draft.source.edit
+    else {
+      cancelCrop()
+      error = "图片已变化，请重新打开裁剪"
+      Log.storage.notice("拼图裁剪拒绝 stage=source-version")
+      return
+    }
+    do {
+      let edit = try draft.appliedEdit()
+      sources[index].edit = edit
+      requestThumbnail(sources[index].id)
+      if pdf { previewSourceID = sources[index].id }
+      cancelCrop()
+      refreshPreview()
+      Log.storage.notice(
+        "拼图裁剪采用 source=\(draft.source.id.uuidString, privacy: .public) crop=\(String(describing: edit.crop), privacy: .public) turns=\(edit.turns)"
+      )
+    } catch {
+      self.error = error.localizedDescription
+      Log.storage.error(
+        "拼图裁剪采用失败 source=\(draft.source.id.uuidString, privacy: .public) cause=\(String(reflecting: error), privacy: .public)"
+      )
+    }
+  }
+
+  /// 取消只撤下草稿，原图片、顺序和已导出提示保持原样。
+  func cancelCrop() {
+    if let cropTarget {
+      Log.storage.notice("拼图裁剪收起 source=\(cropTarget.uuidString, privacy: .public)")
+    }
+    cropTask?.cancel()
+    cropTask = nil
+    cropTarget = nil
+    cropDraft = nil
+  }
+
+  /// 单张正交旋转仅修改元数据，PNG 与 PDF 后续读取同一调整结果。
+  func rotate(_ id: UUID, by step: Int) {
+    guard canImport, let index = sources.firstIndex(where: { $0.id == id }) else { return }
+    sources[index].edit.turns = (sources[index].edit.turns + step % 4 + 4) % 4
+    requestThumbnail(id)
+    if pdf { previewSourceID = id }
+    refreshPreview()
+    Log.storage.notice(
+      "拼图单张旋转 source=\(id.uuidString, privacy: .public) turns=\(self.sources[index].edit.turns)")
+  }
+
+  /// 恢复读取会话中的未修改副本，同时清除裁剪与旋转，不重新读取外部原文件。
+  func restore(_ id: UUID) {
+    guard canImport, let index = sources.firstIndex(where: { $0.id == id }) else { return }
+    sources[index].edit = .init()
+    sources[index].editedThumbnail = nil
+    sources[index].thumbnailEdit = nil
+    sources[index].thumbnailError = nil
+    pendingThumbnails.removeValue(forKey: id)
+    if pdf { previewSourceID = id }
+    refreshPreview()
+    Log.storage.notice("拼图单张恢复 source=\(id.uuidString, privacy: .public)")
+  }
+
+  /// 缩略图只保留各图片最新版本，整段会话使用一个后台工作循环。
+  private func requestThumbnail(_ id: UUID) {
+    guard let index = sources.firstIndex(where: { $0.id == id })
+    else {
+      pendingThumbnails.removeValue(forKey: id)
+      return
+    }
+    sources[index].thumbnailError = nil
+    guard !sources[index].edit.isIdentity else {
+      pendingThumbnails.removeValue(forKey: id)
+      return
+    }
+    let source = sources[index]
+    pendingThumbnails[id] = source
+    guard thumbnailWorker == nil else { return }
+    let ticket = generation
+    thumbnailWorker = Task { [weak self] in await self?.updateThumbnails(ticket: ticket) }
+  }
+
+  /// 读取失败独立标记在当前项；过期或关闭的结果不能修改新图片，也不覆盖导出失败原因。
+  private func updateThumbnails(ticket: Int) async {
+    defer { if generation == ticket { thumbnailWorker = nil } }
+    while !Task.isCancelled, generation == ticket, let (id, source) = pendingThumbnails.first {
+      pendingThumbnails.removeValue(forKey: id)
+      do {
+        let image = try await ShotComposition.thumbnail(for: source)
+        guard !Task.isCancelled, generation == ticket,
+          let index = sources.firstIndex(where: {
+            $0.id == id && $0.url == source.url && $0.size == source.size && $0.edit == source.edit
+          })
+        else { continue }
+        sources[index].editedThumbnail = image
+        sources[index].thumbnailEdit = source.edit
+        sources[index].thumbnailError = nil
+      } catch {
+        guard !Task.isCancelled, generation == ticket else { return }
+        Log.storage.error(
+          "拼图缩略图调整失败 source=\(id.uuidString, privacy: .public) cause=\(String(reflecting: error), privacy: .public)"
+        )
+        if let index = sources.firstIndex(where: {
+          $0.id == id && $0.url == source.url && $0.size == source.size && $0.edit == source.edit
+        }) {
+          sources[index].editedThumbnail = nil
+          sources[index].thumbnailEdit = source.edit
+          sources[index].thumbnailError = error.localizedDescription
+        }
+      }
+    }
+  }
+
   /// 用户确认保存路径后固定参数执行导出；取消关闭不会显示成功或留下半成品。
   func save() {
     guard canImport, !rendering, preview != nil, sources.count >= 2 else { return }
@@ -249,6 +398,10 @@ import UniformTypeIdentifiers
   /// 关闭、重开或功能停用时停止任务并释放缩略图、快照引用。
   func clear() {
     generation &+= 1
+    cancelCrop()
+    thumbnailWorker?.cancel()
+    thumbnailWorker = nil
+    pendingThumbnails = [:]
     let panel = filePanel
     filePanel = nil
     panel?.cancel(nil)
@@ -350,7 +503,12 @@ struct ShotCompositionView: View {
   /// PDF 使用当前页的真实页框，PNG 的棋盘底只说明透明区域，不写入输出。
   private var preview: some View {
     VStack(spacing: 12) {
-      if model.preparing {
+      if let draft = model.cropDraft {
+        ShotCropEditor(draft: draft, apply: model.applyCrop, cancel: model.cancelCrop)
+      } else if model.cropTarget != nil {
+        ProgressView("正在准备裁剪…")
+        Button("取消", action: model.cancelCrop)
+      } else if model.preparing {
         ProgressView("正在准备图片…")
       } else if model.rendering {
         ProgressView("正在生成预览…")
@@ -371,7 +529,21 @@ struct ShotCompositionView: View {
             .foregroundStyle(.secondary)
         }
       }
-      if model.pdf, !model.sources.isEmpty { pageNavigation }
+      if model.cropTarget == nil {
+        if model.pdf, !model.sources.isEmpty {
+          pageNavigation
+        } else if !model.sources.isEmpty, let plan = model.outputPlan {
+          Text("输出：\(Int(plan.size.width)) × \(Int(plan.size.height)) 像素")
+            .font(.system(size: 12)).monospacedDigit().foregroundStyle(.secondary)
+          if plan.isLimited {
+            Text(
+              "受尺寸或像素预算限制，输出已按比例缩小；目标宽度 \(model.options.requestedWidth.map { String(Int($0)) } ?? "自动")。"
+            )
+            .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(
+              horizontal: false, vertical: true)
+          }
+        }
+      }
     }
     .padding(20)
     .background(.quaternary.opacity(0.3))
@@ -419,6 +591,7 @@ struct ShotCompositionView: View {
           Picker("排列", selection: $model.options.layout) {
             ForEach(ShotComposition.Layout.allCases) { Text($0.title).tag($0) }
           }
+          widthControls
           Stepper(
             "间距 \(Int(model.options.spacing)) 像素", value: $model.options.spacing, in: 0...64,
             step: 4)
@@ -447,6 +620,28 @@ struct ShotCompositionView: View {
       .padding(16)
     }
     .disabled(!model.canImport)
+  }
+
+  /// 宽度预设和自定义共用唯一生效模式，高度由排版比例决定。
+  private var widthControls: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      Picker("输出宽度", selection: $model.options.widthMode) {
+        ForEach(ShotComposition.WidthMode.allCases) { Text($0.title).tag($0) }
+      }
+      if model.options.widthMode == .custom {
+        HStack {
+          Text("宽度")
+          TextField("像素", value: $model.options.customWidth, format: .number.grouping(.never))
+            .textFieldStyle(.roundedBorder).accessibilityLabel("自定义 PNG 输出宽度")
+          Text("像素").foregroundStyle(.secondary)
+        }
+      }
+      if model.options.widthMode != .automatic {
+        Text("宽度按整体排版等比缩放，间距与留白随之缩放。")
+          .font(.system(size: 11)).foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+    }
   }
 
   /// 拼图使用固定内容底色，保留透明 PNG 的明确选项。
@@ -486,17 +681,31 @@ struct ShotCompositionView: View {
     let index = model.sources.firstIndex(where: { $0.id == source.id }) ?? 0
     return HStack(spacing: 6) {
       Text("\(index + 1)").monospacedDigit().foregroundStyle(.secondary).frame(width: 20)
-      if let thumbnail = source.thumbnail {
+      if let thumbnail = source.adjustedThumbnail {
         Image(decorative: thumbnail, scale: 1).resizable().aspectRatio(contentMode: .fit)
           .frame(width: 36, height: 36).accessibilityHidden(true)
+      } else {
+        Image(systemName: "photo").frame(width: 36, height: 36).foregroundStyle(.secondary)
+          .accessibilityLabel(source.thumbnailError == nil ? "缩略图尚未就绪" : "缩略图生成失败")
+          .help(source.thumbnailError ?? "正在生成调整后的缩略图")
       }
-      Text(source.label).font(.system(size: 12)).lineLimit(2).help(source.label)
-        .frame(maxWidth: .infinity, alignment: .leading)
+      VStack(alignment: .leading, spacing: 3) {
+        Text(source.label).font(.system(size: 12)).lineLimit(2).help(source.label)
+        if !source.edit.isIdentity {
+          Text(source.adjustmentDescription)
+            .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+        }
+      }.frame(maxWidth: .infinity, alignment: .leading)
       Button("上移", systemImage: "arrow.up") { model.move(source.id, by: -1) }
         .disabled(index == 0).help("上移第 \(index + 1) 张")
       Button("下移", systemImage: "arrow.down") { model.move(source.id, by: 1) }
         .disabled(index == model.sources.count - 1).help("下移第 \(index + 1) 张")
       Menu("更多", systemImage: "ellipsis") {
+        Button("裁剪…") { model.beginCrop(source.id) }
+        Button("向左旋转 90°") { model.rotate(source.id, by: -1) }
+        Button("向右旋转 90°") { model.rotate(source.id, by: 1) }
+        Button("恢复原图") { model.restore(source.id) }.disabled(source.edit.isIdentity)
+        Divider()
         Button("替换图片…") { model.chooseFiles(replacing: source.id) }
         Button("移除", role: .destructive) { model.remove(source.id) }
       }
