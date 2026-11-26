@@ -2307,6 +2307,75 @@ struct ScreenshotSnapshotTests {
     return view.subviews.lazy.compactMap { compositionGrip(in: $0, id: id) }.first
   }
 
+  /// 屏外调用标签表单和筛选的实际按钮，核对待提交、筛选结果和最窄历史窗。
+  @Test(.enabled(if: directory != nil)) func renderShotHistoryTags() async throws {
+    let root = FileManager.default.temporaryDirectory.appending(
+      path: "kitty-history-tag-shots-\(UUID())")
+    let history = try ShotHistory(db: Database(path: ":memory:"), directory: root)
+    let preferenceDomain = "kitty-history-tag-shots-pref-\(UUID())"
+    let prefs = try #require(UserDefaults(suiteName: preferenceDomain))
+    prefs.set(true, forKey: Prefs.shotHistory)
+    history.defaults = prefs
+    defer {
+      prefs.removePersistentDomain(forName: preferenceDomain)
+      try? FileManager.default.removeItem(at: root)
+    }
+    let page = try Self.desktop()
+    let first = try #require(await history.record(page, scale: 2, source: "Safari"))
+    let secondImage = try #require(
+      page.cropping(to: CGRect(x: 120, y: 100, width: 1200, height: 700)))
+    let second = try #require(
+      await history.record(secondImage, scale: 2, kind: .scroll, source: "终端"))
+    let other = try #require(await history.record(secondImage, scale: 2, source: "便签"))
+    try history.applyTags(to: [first], adding: ["项目验收", "用于下次发布的多个主题和界面细节对照"], removing: [])
+    try history.applyTags(to: [second], adding: ["跟进"], removing: [])
+    try history.applyTags(to: [other], adding: ["个人"], removing: [])
+    for id in [first, second] {
+      let item = try #require(history.item(id))
+      _ = try #require(await ShotThumbnails.shared.image(for: item, in: history))
+    }
+    defer { for id in [first, second] { ShotThumbnails.shared.forget(id) } }
+    let model = ShotHistoryModel(history: history)
+    model.pick(first)
+    model.toggle(second)
+    let edit = ShotTagEdit(items: model.chosen)
+    let editor = ShotHistoryTagEditor(edit: edit) { ids, adding, removing in
+      try model.applyTags(ids, adding: adding, removing: removing)
+    }
+    try enhancement(editor, size: NSSize(width: 456, height: 352), name: "history-tags-draft") {
+      host in
+      let action = try #require(compositionButton(in: host, label: "将「项目验收」添加到全部"))
+      #expect(action() == true)
+      #expect(history.item(second)?.tags == ["跟进"])
+    }
+    try enhancement(
+      editor, size: NSSize(width: 456, height: 352), name: "history-tags-save", dark: true
+    ) { host in
+      let stage = try #require(compositionButton(in: host, label: "将「项目验收」添加到全部"))
+      #expect(stage() == true)
+      RunLoop.main.run(until: Date.now.addingTimeInterval(0.12))
+      let save = try #require(compositionButton(in: host, label: "保存标签"))
+      #expect(save() == true)
+      #expect(history.item(second)?.tags == ["跟进", "项目验收"])
+    }
+    try enhancement(
+      ShotHistoryTagPicker(names: model.availableTags, selection: model.tagFilter) {
+        model.setTagFilter($0)
+      }, size: NSSize(width: 264, height: 206), name: "history-tags-picker"
+    ) { host in
+      let choose = try #require(compositionButton(in: host, label: "项目验收"))
+      #expect(choose() == true)
+      #expect(model.tagFilter == "项目验收" && Set(model.shown.map(\.id)) == [first, second])
+    }
+    try enhancement(
+      ShotHistoryView(model: model).defaultAppStorage(prefs), size: NSSize(width: 960, height: 620),
+      name: "history-tags-filtered")
+    model.pick(first)
+    try enhancement(
+      ShotHistoryView(model: model).defaultAppStorage(prefs), size: NSSize(width: 720, height: 420),
+      name: "history-tags-detail", dark: true)
+  }
+
   /// 等待实际导入与预览，不把尚未产生图片的加载界面当作完成。
   private func waitForComposition(_ model: ShotCompositionModel) async throws {
     for _ in 0..<400

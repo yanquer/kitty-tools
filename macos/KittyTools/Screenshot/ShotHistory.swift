@@ -15,6 +15,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import OSLog
 import UniformTypeIdentifiers
 
 /// 历史里一条的那几样操作（AppDelegate 接到截图那条路上：拷贝、快速保存、另存为、钉到屏幕、识字并拷贝、改标注）。
@@ -81,6 +82,8 @@ import UniformTypeIdentifiers
     var frame: CGRect?
     /// 原图 + 缩略图占多少字节（算总量上限用）
     var bytes: Int = 0
+    /// 本机标签跟着历史编号和清理策略，与文件路径无关。
+    var tags: [String] = []
   }
 
   /// 新的在前
@@ -116,12 +119,12 @@ import UniformTypeIdentifiers
         source_name TEXT, saved_path TEXT, file_path TEXT,
         annotations TEXT, -- [Annotation] 的 JSON（拍板 A1）
         pinned_at REAL, bytes INTEGER NOT NULL DEFAULT 0,
-        frame TEXT) -- 当初框的那一块（NSStringFromRect），钉回原位用
+        frame TEXT, tags TEXT) -- 框选位置和本机标签 JSON
       """)
-    // 旧库补列（幂等，每次启动都跑）
-    if try !db.query("PRAGMA table_info(shots)", row: { $0.text(1) }).contains("frame") {
-      try db.execute("ALTER TABLE shots ADD COLUMN frame TEXT")
-    }
+    // 添加的都是可空列，已有的历史行和文件照旧使用。
+    let columns = try db.query("PRAGMA table_info(shots)") { $0.text(1) }
+    if !columns.contains("frame") { try db.execute("ALTER TABLE shots ADD COLUMN frame TEXT") }
+    if !columns.contains("tags") { try db.execute("ALTER TABLE shots ADD COLUMN tags TEXT") }
     try db.execute("CREATE INDEX IF NOT EXISTS shots_created_at ON shots(created_at DESC)")
     try reload()
     prune()  // 关了几天再开：过期的这时就清掉，不等下一次截图
@@ -301,6 +304,70 @@ import UniformTypeIdentifiers
     try? db.execute(
       "UPDATE shots SET pinned_at = ? WHERE id = ?",
       [now.timeIntervalSinceReferenceDate, id.uuidString])
+  }
+
+  /// 对稳定记录编号做同一组增删，全部写成功后才更新历史窗口与缓存版本。
+  @discardableResult func applyTags(to ids: [UUID], adding: [String], removing: [String]) throws
+    -> Int
+  {
+    let operation = UUID().uuidString
+    let target = Set(ids)
+    let began = ContinuousClock.now
+    Log.storage.notice("截图标签更新开始 operation=\(operation, privacy: .public) count=\(target.count)")
+    do {
+      let additions = ShotTags.unique(try adding.map(ShotTags.name))
+      let removals = Set(try removing.map { ShotTags.key(try ShotTags.name($0)) })
+        .subtracting(additions.map(ShotTags.key))
+      var updates: [(index: Int, value: TagUpdate)] = []
+      for id in target {
+        guard let index = positions[id] else { throw ShotTags.Failure.missingItems }
+        let before = items[index].tags
+        let after = try ShotTags.applying(to: before, adding: additions, removing: removals)
+        if after != before { updates.append((index, TagUpdate(id: id.uuidString, tags: after))) }
+      }
+      if !updates.isEmpty {
+        try storeTagUpdates(updates.map(\.value))
+        var changed = items
+        for update in updates { changed[update.index].tags = update.value.tags }
+        items = changed
+      }
+      Log.storage.notice(
+        "截图标签更新完成 operation=\(operation, privacy: .public) changed=\(updates.count) elapsed=\(String(describing: began.duration(to: .now)), privacy: .public)"
+      )
+      return updates.count
+    } catch {
+      let cause = String(String(reflecting: error).prefix(400))
+      Log.storage.error(
+        "截图标签更新未完成 operation=\(operation, privacy: .public) count=\(target.count) cause=\(cause, privacy: .public) elapsed=\(String(describing: began.duration(to: .now)), privacy: .public)"
+      )
+      throw error
+    }
+  }
+
+  /// 用一个有界批次传入编号和标签，在同一个事务中验证全部更新结果。
+  private func storeTagUpdates(_ updates: [TagUpdate]) throws {
+    try db.transaction {
+      for start in stride(from: 0, to: updates.count, by: 256) {
+        let batch = updates[start..<min(start + 256, updates.count)]
+        let data = try JSONEncoder().encode(Array(batch))
+        let updated = try db.query(
+          """
+          UPDATE shots SET tags = json_extract(batch.value, '$.tags')
+          FROM json_each(?) AS batch WHERE shots.id = json_extract(batch.value, '$.id')
+          RETURNING id
+          """, [String(decoding: data, as: UTF8.self)]
+        ) { $0.text(0) }
+        guard Set(updated.compactMap { $0 }) == Set(batch.map(\.id)) else {
+          throw ShotTags.Failure.missingItems
+        }
+      }
+    }
+  }
+
+  /// 一条待提交的标签修改，只持有标签和稳定编号。
+  private struct TagUpdate: Encodable {
+    let id: String
+    let tags: [String]
   }
 
   // MARK: 拖出去
@@ -622,7 +689,7 @@ import UniformTypeIdentifiers
     items = try db.query(
       """
       SELECT id, kind, created_at, pixel_width, pixel_height, scale, source_name, saved_path,
-        file_path, annotations, pinned_at, bytes, frame FROM shots ORDER BY created_at DESC
+        file_path, annotations, pinned_at, bytes, frame, tags FROM shots ORDER BY created_at DESC
       """
     ) { row -> Item? in
       guard let id = row.text(0).flatMap(UUID.init(uuidString:)),
@@ -634,8 +701,17 @@ import UniformTypeIdentifiers
         scale: CGFloat(row.double(5) ?? 2), source: row.text(6), savedPath: row.text(7),
         filePath: row.text(8), annotations: row.text(9).flatMap(Self.decode) ?? [],
         pinnedAt: row.double(10).map(Date.init(timeIntervalSinceReferenceDate:)),
-        frame: row.text(12).map(NSRectFromString), bytes: Int(row.int(11) ?? 0))
+        frame: row.text(12).map(NSRectFromString), bytes: Int(row.int(11) ?? 0),
+        tags: Self.readTags(row.text(13), id: id))
     }.compactMap { $0 }
+  }
+
+  /// 标签元数据受损时保留该历史记录和图像，并记录可追溯的编号。
+  private static func readTags(_ stored: String?, id: UUID) -> [String] {
+    guard let stored else { return [] }
+    if let tags = ShotTags.decode(stored) { return tags }
+    Log.storage.error("截图标签读取失败 id=\(id.uuidString, privacy: .public) stage=decode")
+    return []
   }
 
   // MARK: 图和 JSON

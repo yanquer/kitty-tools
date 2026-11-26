@@ -13,6 +13,8 @@ struct ShotHistoryView: View {
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   /// 光标在不在搜索框里：在的话方向键和 ⌘C 让给它（见 shortcuts）
   @FocusState private var searching: Bool
+  @State private var tagEdit: ShotTagEdit?
+  @State private var showsTagFilter = false
   /// 空状态按实际设置说（第四轮体检 U13）：历史关着（截图功能或「保留截图历史」）、保留几天
   @AppStorage(Feature.screenshot.prefsKey) private var screenshotOn = true
   @AppStorage(Prefs.shotHistory) private var keepsHistory = true
@@ -24,14 +26,17 @@ struct ShotHistoryView: View {
 
   var body: some View {
     HStack(spacing: 0) {
-      grid
+      VStack(spacing: 0) {
+        if let tag = model.tagFilter { activeTag(tag) }
+        grid
+      }
       let chosen = model.chosen
       if chosen.count > 1 {
         Divider()
-        many(chosen).frame(width: 280)
+        ScrollView { many(chosen) }.frame(width: 280)
       } else if let item = model.selected {
         Divider()
-        detail(item).frame(width: 280)
+        ScrollView { detail(item) }.frame(width: 280)
       }
       shortcuts
     }
@@ -43,11 +48,33 @@ struct ShotHistoryView: View {
         .pickerStyle(.segmented)
         .frame(width: 280)
       }
+      ToolbarItem(placement: .automatic) {
+        Button("标签筛选", systemImage: model.tagFilter == nil ? "tag" : "tag.fill") {
+          showsTagFilter.toggle()
+        }
+        .accessibilityValue(model.tagFilter ?? "所有标签")
+        .help("按标签筛选")
+        .popover(isPresented: $showsTagFilter, arrowEdge: .bottom) {
+          ShotHistoryTagPicker(names: model.availableTags, selection: model.tagFilter) { name in
+            model.setTagFilter(name)
+            showsTagFilter = false
+          }
+        }
+      }
     }
-    .searchable(text: $model.search, prompt: "搜来源或种类")
+    .searchable(text: $model.search, prompt: "搜来源、种类、文件名或标签")
     .searchFocused($searching)
+    .onChange(of: model.search) { _, _ in model.reconcileSelection() }
+    .onChange(of: model.filter) { _, _ in model.reconcileSelection() }
+    .sheet(item: $tagEdit) { edit in
+      ShotHistoryTagEditor(edit: edit) { ids, adding, removing in
+        try model.applyTags(ids, adding: adding, removing: removing)
+      }
+    }
     .onKeyPress(.delete) {
-      guard !model.picked.isEmpty else { return .ignored }
+      guard !searching, tagEdit == nil, !showsTagFilter, !model.chosen.isEmpty else {
+        return .ignored
+      }
       model.deleteSelection()
       return .handled
     }
@@ -68,6 +95,24 @@ struct ShotHistoryView: View {
     }
     .symbolEffectsRemoved(reduceMotion)
     .appAccent()
+  }
+
+  /// 筛选条件显示在结果上方，长标签可查看完整名称并一键清除。
+  private func activeTag(_ tag: String) -> some View {
+    HStack(spacing: 8) {
+      Label(tag, systemImage: "tag").lineLimit(1).help(tag)
+      Button("清除标签筛选", systemImage: "xmark.circle.fill") { model.setTagFilter(nil) }
+        .labelStyle(.iconOnly).buttonStyle(.borderless)
+      Spacer(minLength: 0)
+    }
+    .font(.system(size: 12)).foregroundStyle(.secondary)
+    .padding(.horizontal, 16).padding(.vertical, 8)
+  }
+
+  /// 打开编辑器时固定清晰的目标，右键未选中项只编辑该项。
+  private func editTags(_ items: [ShotHistory.Item]) {
+    guard !items.isEmpty else { return }
+    tagEdit = ShotTagEdit(items: items)
   }
 
   // MARK: 快捷键
@@ -117,6 +162,7 @@ struct ShotHistoryView: View {
       }
     }
     .opacity(0)
+    .disabled(tagEdit != nil || showsTagFilter)
     .frame(width: 0, height: 0)
     .accessibilityHidden(true)
   }
@@ -139,7 +185,7 @@ struct ShotHistoryView: View {
                 ForEach(group.items) { item in
                   ShotCard(
                     item: item, chosen: model.picked.contains(item.id), history: model.history,
-                    generation: model.redraws,
+                    generation: model.redraws, activeTag: model.tagFilter,
                     select: { model.click(item.id) }, edit: { edit(item) },
                     drag: { model.beginDrag(item) }
                   )
@@ -177,9 +223,13 @@ struct ShotHistoryView: View {
 
   /// 网格里一条都没有时：搜不到 / 历史关着（给去设置的入口）/ 还没有（保留几天照设置说）
   @ViewBuilder private var emptyState: some View {
-    if !model.search.isEmpty {
+    if model.tagFilter != nil || !model.search.isEmpty || model.filter != .all {
       EmptyState(symbol: "magnifyingglass", title: "没有匹配的截图") {
-        Text("换个词试试").foregroundStyle(.secondary)
+        if model.tagFilter != nil {
+          Button("清除标签筛选") { model.setTagFilter(nil) }
+        } else {
+          Text("换个词或筛选条件试试").foregroundStyle(.secondary)
+        }
       }
     } else if !(screenshotOn && keepsHistory) {
       EmptyState(symbol: "clock.arrow.circlepath", title: "截图历史已关闭") {
@@ -242,12 +292,30 @@ struct ShotHistoryView: View {
       if !details.isEmpty {
         Text(details).font(.system(size: 11)).foregroundStyle(.secondary)
       }
+      detailTags(item)
       Divider()
       actions(item)
       Spacer()
     }
     .padding(16)
     .frame(maxHeight: .infinity, alignment: .top)
+  }
+
+  /// 标签及单条编辑入口放在操作列表前面，紧凑窗里也能从详情直接编辑。
+  private func detailTags(_ item: ShotHistory.Item) -> some View {
+    VStack(alignment: .leading, spacing: 5) {
+      HStack {
+        Label("标签", systemImage: "tag").foregroundStyle(.secondary)
+        Spacer(minLength: 8)
+        Button(item.tags.isEmpty ? "添加标签…" : "编辑标签…") { editTags([item]) }
+          .buttonStyle(.borderless)
+      }.font(.system(size: 12))
+      if !item.tags.isEmpty {
+        let names = item.tags.joined(separator: " · ")
+        Text(names).font(.system(size: 11)).foregroundStyle(.secondary)
+          .lineLimit(2).help(names).accessibilityLabel("标签，\(names)")
+      }
+    }
   }
 
   /// 多选时右边这一栏：已选几张、各几个多大，底下是能一起做的那几件
@@ -271,6 +339,7 @@ struct ShotHistoryView: View {
         }
         row("拼图或合并 PDF…", "square.grid.2x2") { model.actions.compose(model.chosen) }
           .disabled(!model.canCompose)
+        row("编辑标签…", "tag") { editTags(model.chosen) }
         row("在访达中显示", "folder", key: "⇧⌘R") { model.revealSelection() }
         row("删除", "trash", key: "⌫", danger: true) { model.deleteSelection() }
       }
@@ -338,6 +407,7 @@ struct ShotHistoryView: View {
       }
       Button("拼图或合并 PDF…") { model.actions.compose(model.chosen) }
         .disabled(!model.canCompose)
+      Button("编辑所选标签…") { editTags(model.chosen) }
       Button("在访达中显示") { model.reveal(chosen) }
       Divider()
       Button("删除 \(chosen.count) 项", role: .destructive) {
@@ -358,6 +428,9 @@ struct ShotHistoryView: View {
         Button(job.title) { model.actions.convert(item, job) }
       }
     }
+    if chosen.count <= 1 || !chosen.contains(where: { $0.id == item.id }) {
+      Button("编辑标签…") { editTags([item]) }
+    }
     Button("在访达中显示") { model.reveal(item) }
       .disabled(!model.hasFile(item))
     Divider()
@@ -371,6 +444,53 @@ struct ShotHistoryView: View {
   }
 }
 
+/// 标签菜单可查找名称，常规条件与当前标签一起生效。
+struct ShotHistoryTagPicker: View {
+  let names: [String]
+  let selection: String?
+  let choose: (String?) -> Void
+  @State private var tagQuery = ""
+
+  var body: some View {
+    let query = ShotTags.key(tagQuery.trimmingCharacters(in: .whitespacesAndNewlines))
+    let tags = names.filter { query.isEmpty || ShotTags.key($0).contains(query) }
+    return VStack(alignment: .leading, spacing: 8) {
+      TextField("查找标签", text: $tagQuery)
+      Button("所有标签") { choose(nil) }.buttonStyle(.borderless)
+      Hairline()
+      if tags.isEmpty {
+        Text(query.isEmpty ? "还没有标签" : "没有匹配的标签").foregroundStyle(.secondary)
+      } else {
+        ScrollView {
+          LazyVStack(alignment: .leading, spacing: 3) {
+            ForEach(tags.prefix(80), id: \.self) { tag in
+              Button {
+                choose(tag)
+              } label: {
+                HStack {
+                  Text(tag).lineLimit(1)
+                  Spacer()
+                  if selection.map(ShotTags.key) == ShotTags.key(tag) {
+                    Image(systemName: "checkmark").accessibilityHidden(true)
+                  }
+                }.contentShape(.rect)
+              }
+              .buttonStyle(.plain).help(tag)
+              .accessibilityAddTraits(
+                selection.map(ShotTags.key) == ShotTags.key(tag) ? .isSelected : []
+              )
+              .padding(.vertical, 4)
+            }
+          }
+        }.frame(height: min(220, CGFloat(tags.count) * 27))
+        if tags.count > 80 { Text("输入名称以查看其余标签").font(.footnote).foregroundStyle(.secondary) }
+      }
+    }
+    .padding(12).frame(width: 240)
+  }
+
+}
+
 /// 网格里的一张卡：单独一个视图，换选中时只有受影响的那两张重画（整片网格重画会卡，
 /// 2026-10-26 用户手测报的）。单击和双击都用 simultaneousGesture：
 /// 叠着两个 onTapGesture 的话，单击要等双击判定超时才落地，看着就是「点了半天才高亮」
@@ -382,6 +502,7 @@ private struct ShotCard: View {
   /// 不把代数摆进卡片的值里，LazyVGrid 就认为这一格没变、不重画
   /// （2026-10-26 用户手测：右边的预览变了、左边的列表没变）
   let generation: Int
+  let activeTag: String?
   let select: () -> Void
   let edit: () -> Void
   /// 拖开 6 pt 时调一次：起 AppKit 拖放会话（选中的几张一起拖，ShotHistoryModel.beginDrag），之后的鼠标事件归它
@@ -422,9 +543,16 @@ private struct ShotCard: View {
         RoundedRectangle(cornerRadius: Style.Radius.card, style: .continuous)
           .strokeBorder(chosen ? Style.brand : .clear, lineWidth: 2)
       }
-      Text(item.createdAt.formatted(date: .omitted, time: .shortened))
-        .font(.system(size: 11))
-        .foregroundStyle(.secondary)
+      HStack(spacing: 6) {
+        Text(item.createdAt.formatted(date: .omitted, time: .shortened))
+        if let tag = activeTag.flatMap(matchingName) ?? item.tags.first {
+          Spacer(minLength: 0)
+          Label(tag, systemImage: "tag").lineLimit(1)
+          if item.tags.count > 1 { Text("+\(item.tags.count - 1)").monospacedDigit() }
+        }
+      }
+      .frame(width: ShotHistoryView.cardWidth)
+      .font(.system(size: 11)).foregroundStyle(.secondary)
     }
     .contentShape(.rect)
     .simultaneousGesture(TapGesture(count: 2).onEnded { edit() })
@@ -438,7 +566,14 @@ private struct ShotCard: View {
     )
     .accessibilityElement(children: .combine)
     .accessibilityLabel("\(item.kind.title)，\(ShotHistoryModel.caption(item))")
+    .accessibilityValue(item.tags.isEmpty ? "" : "标签，\(item.tags.joined(separator: "、"))")
     .accessibilityAddTraits(chosen ? [.isSelected, .isButton] : .isButton)
+  }
+
+  /// 筛选时优先显示命中的标签，保留这条记录原来的拼写。
+  private func matchingName(_ tag: String) -> String? {
+    let key = ShotTags.key(tag)
+    return item.tags.first { ShotTags.key($0) == key }
   }
 }
 

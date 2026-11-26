@@ -127,6 +127,146 @@ struct ShotHistoryTests {
     #expect(history.items.first?.pinnedAt != nil)
   }
 
+  /// 缺少标签列的旧库能原地打开，标签保留到重启并随历史清理，外部文件仍归用户。
+  @Test func tagsMigrateReopenAndPruneWithTheirRecord() async throws {
+    let (history, root) = try makeHistory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let db = try Database(path: root.appending(path: "test.sqlite").path)
+    let shots = root.appending(path: "shots")
+    let original = try #require(await history.record(image(), scale: 2, source: "Safari"))
+    let originalData = try Data(contentsOf: history.url(for: original))
+    try db.execute("ALTER TABLE shots DROP COLUMN tags")
+    let migrated = try ShotHistory(db: db, directory: shots)
+    migrated.defaults = history.defaults
+    #expect(migrated.item(original)?.tags == [])
+    let file = root.appending(path: "recording.mp4")
+    try Data("fake-recording".utf8).write(to: file)
+    let recording = try #require(await migrated.record(file: file, poster: nil, kind: .video))
+    #expect(
+      try migrated.applyTags(
+        to: [original, recording], adding: [" 验收 ", "QA", "qa"], removing: []) == 2)
+    let reopened = try ShotHistory(db: db, directory: shots)
+    reopened.defaults = history.defaults
+    #expect(reopened.item(original)?.tags == ["验收", "QA"])
+    #expect(reopened.item(recording)?.tags == ["验收", "QA"])
+    #expect(try Data(contentsOf: reopened.url(for: original)) == originalData)
+    var old = try #require(reopened.item(recording))
+    old.createdAt = .now.addingTimeInterval(-2 * 86400)
+    try db.execute(
+      "UPDATE shots SET created_at = ? WHERE id = ?",
+      [old.createdAt.timeIntervalSinceReferenceDate, recording.uuidString])
+    reopened.seed(reopened.items.map { $0.id == recording ? old : $0 })
+    reopened.defaults.set(1, forKey: Prefs.shotHistoryDays)
+    reopened.prune()
+    #expect(reopened.item(recording) == nil && FileManager.default.fileExists(atPath: file.path))
+    let names = try db.query("SELECT tags FROM shots") { $0.text(0) }
+    #expect(names.count == 1 && names.first??.contains("验收") == true)
+  }
+
+  /// 跨 SQL 批次的完整事务在最后一项失败时一并回滚且不刷新内存；重试覆盖全部记录。
+  @Test func tagBatchRollsBackAcrossSQLiteChunks() throws {
+    let (fixture, root) = try makeHistory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let db = try Database(path: root.appending(path: "test.sqlite").path)
+    let ids = (0..<257).map { _ in UUID() }
+    try db.transaction {
+      for id in ids {
+        try db.execute(
+          "INSERT INTO shots(id, kind, created_at, pixel_width, pixel_height, scale) VALUES (?, 'shot', ?, 10, 10, 1)",
+          [id.uuidString, Date.now.timeIntervalSinceReferenceDate])
+      }
+    }
+    let history = try ShotHistory(db: db, directory: root.appending(path: "shots"))
+    history.defaults = fixture.defaults
+    try db.execute("CREATE TEMP TABLE tag_attempts(n INTEGER)")
+    try db.execute(
+      """
+      CREATE TEMP TRIGGER reject_last_tag BEFORE UPDATE OF tags ON shots BEGIN
+        INSERT INTO tag_attempts VALUES (1);
+        SELECT CASE WHEN (SELECT COUNT(*) FROM tag_attempts) = 257 THEN RAISE(ABORT, 'shot tag rollback probe') END;
+      END
+      """)
+    let revision = history.revision
+    #expect(throws: Database.Failure.self) {
+      try history.applyTags(to: ids, adding: ["跨组"], removing: [])
+    }
+    #expect(history.revision == revision && history.items.allSatisfy { $0.tags.isEmpty })
+    #expect(try db.query("SELECT COUNT(*) FROM shots WHERE tags IS NOT NULL") { $0.int(0) } == [0])
+    try db.execute("DROP TRIGGER reject_last_tag")
+    #expect(try history.applyTags(to: ids, adding: ["跨组"], removing: []) == 257)
+    #expect(history.revision == revision + 1 && history.items.allSatisfy { $0.tags == ["跨组"] })
+  }
+
+  /// 从模型的多选、批量打标和精确筛选走到隔离导出目录，核对实际 PNG 和选区边界。
+  @Test func taggedSelectionFindsAndExportsOnlyMatchingItems() async throws {
+    let (history, root) = try makeHistory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let first = try #require(await history.record(image(), scale: 2, source: "Safari"))
+    let second = try #require(
+      await history.record(image(width: 420), scale: 2, kind: .scroll, source: "Terminal"))
+    let other = try #require(await history.record(image(width: 440), scale: 2, source: "Notes"))
+    try history.applyTags(to: [first], adding: ["只留第一张"], removing: [])
+    try history.applyTags(to: [other], adding: ["验收补充"], removing: [])
+    var exported: [ShotHistory.Item] = []
+    var actions = ShotActions()
+    actions.saveMany = { exported = $0 }
+    let model = ShotHistoryModel(history: history, actions: actions)
+    model.pick(first)
+    model.toggle(second)
+    let edit = ShotTagEdit(items: model.chosen)
+    #expect(edit.tags.first?.count == 1)
+    #expect(try model.applyTags(edit.targets, adding: ["验收"], removing: []) == 2)
+    #expect(history.item(first)?.tags == ["只留第一张", "验收"] && history.item(second)?.tags == ["验收"])
+    model.pickAll()
+    model.setTagFilter("验收")
+    #expect(model.picked == [first, second])
+    model.search = "Terminal"
+    #expect(model.shown.map(\.id) == [second])
+    model.search = "验收"
+    model.filter = .shot
+    #expect(model.shown.map(\.id) == [first])
+    model.filter = .all
+    model.saveSelection()
+    #expect(exported.map(\.id) == model.shown.map(\.id))
+    let folder = root.appending(path: "export")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    for item in exported {
+      let composed = try #require(await history.composed(item))
+      let data = try #require(await ScreenshotOutput.png(composed, scale: item.scale))
+      let url = folder.appending(path: item.id.uuidString + ".png")
+      try await ScreenshotOutput.write(data, to: url, options: .withoutOverwriting)
+      let source = try #require(CGImageSourceCreateWithURL(url as CFURL, nil))
+      #expect(CGImageSourceCreateImageAtIndex(source, 0, nil)?.width == Int(item.pixelSize.width))
+    }
+    #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path).count == 2)
+    try model.applyTags([first], adding: [], removing: ["验收"])
+    #expect(model.picked == [second] && model.shown.map(\.id) == [second])
+  }
+
+  /// 超限和目标失效均拒绝整个编辑，同时保持现有标签和数据版本。
+  @Test func tagsValidateBeforeWriting() async throws {
+    let (history, root) = try makeHistory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let first = try #require(await history.record(image(), scale: 2))
+    let second = try #require(await history.record(image(), scale: 2))
+    let names = (0..<ShotTags.maximumPerItem).map { "组\($0)" }
+    try history.applyTags(to: [first], adding: names, removing: [])
+    let revision = history.revision
+    #expect(throws: ShotTags.Failure.tooMany) {
+      try history.applyTags(to: [first, second], adding: ["额外"], removing: [])
+    }
+    #expect(throws: ShotTags.Failure.missingItems) {
+      try history.applyTags(to: [second, UUID()], adding: ["额外"], removing: [])
+    }
+    #expect(throws: ShotTags.Failure.invalidName) {
+      try history.applyTags(to: [second], adding: ["标签\0无效"], removing: [])
+    }
+    #expect(history.revision == revision && history.item(second)?.tags == [])
+    #expect(try history.applyTags(to: [first, second], adding: ["额外"], removing: [names[0]]) == 2)
+    #expect(history.item(first)?.tags == Array(names.dropFirst()) + ["额外"])
+    #expect(history.item(second)?.tags == ["额外"])
+  }
+
   /// 删一条连图一起删；清空之后目录里什么都不剩
   @Test func removesFiles() async throws {
     let (history, root) = try makeHistory()

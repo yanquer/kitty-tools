@@ -36,6 +36,7 @@ import SwiftUI
   let history: ShotHistory
   var search = ""
   var filter = Filter.all
+  private(set) var tagFilter: String?
   /// 选中的那几条（多选，2026-10-27 用户要的）：空 = 没选中。
   /// 右边正好一条时是预览，多条时是「已选 N 张」+ 能一起做的那几件
   var picked: Set<UUID> = []
@@ -75,11 +76,11 @@ import SwiftUI
   /// 按历史的版本号、搜索词、筛选和今天是哪天记一份（P2：原来每次画都筛一遍、排一遍、按天分一遍）
   var groups: [Group] {
     let key = GroupKey(
-      revision: history.revision, search: search, filter: filter,
+      revision: history.revision, search: search, filter: filter, tag: tagFilter,
       day: Calendar.current.startOfDay(for: .now))
     if let memo, memo.key == key { return memo.groups }
     let groups = Self.group(
-      Self.filtered(history.items, search: search, filter: filter), now: .now)
+      Self.filtered(history.items, search: search, filter: filter, tag: tagFilter), now: .now)
     memo = (key, groups)
     return groups
   }
@@ -88,6 +89,7 @@ import SwiftUI
     let revision: Int
     let search: String
     let filter: Filter
+    let tag: String?
     let day: Date
   }
   @ObservationIgnored private var memo: (key: GroupKey, groups: [Group])?
@@ -98,21 +100,72 @@ import SwiftUI
     var id: String { title }
   }
 
-  var selected: ShotHistory.Item? { selection.flatMap(history.item) }
+  var selected: ShotHistory.Item? {
+    let visible = chosen
+    return visible.count == 1 ? visible.first : nil
+  }
 
-  /// 搜的是来源 App 和种类（截图里没有文字可搜，拍板「搜图里的文字」留到以后）。纯函数，配单测
-  static func filtered(_ items: [ShotHistory.Item], search: String, filter: Filter)
+  /// 标签筛选精确匹配，兼容现有的类型条件和普通关键字搜索。
+  static func filtered(
+    _ items: [ShotHistory.Item], search: String, filter: Filter, tag: String? = nil
+  )
     -> [ShotHistory.Item]
   {
     let needle = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let tagNeedle = ShotTags.key(needle)
+    let tagKey = tag.map(ShotTags.key)
     return items.filter { item in
       guard filter.matches(item.kind) else { return false }
+      if let tagKey, !item.tags.contains(where: { ShotTags.key($0) == tagKey }) { return false }
       guard !needle.isEmpty else { return true }
       return (item.source ?? "").lowercased().contains(needle)
         || item.kind.title.lowercased().contains(needle)
         || (item.savedPath.map { ($0 as NSString).lastPathComponent.lowercased().contains(needle) }
           ?? false)
+        || item.tags.contains(where: { ShotTags.key($0).contains(tagNeedle) })
     }
+  }
+
+  @ObservationIgnored private var tagMemo: (revision: Int, names: [String])?
+
+  /// 按历史版本缓存标签菜单，输入查找时不反复遍历全部历史记录。
+  var availableTags: [String] {
+    let revision = history.revision
+    if let tagMemo, tagMemo.revision == revision { return tagMemo.names }
+    var order: [String] = []
+    var seen = Set<String>()
+    for item in history.items {
+      order.append(contentsOf: item.tags.filter { seen.insert(ShotTags.key($0)).inserted })
+    }
+    let names = order.sorted {
+      $0.localizedStandardCompare($1) == .orderedAscending
+    }
+    tagMemo = (revision, names)
+    return names
+  }
+
+  /// 应用或清除精确标签筛选，隐藏的记录不参与后续操作。
+  func setTagFilter(_ tag: String?) {
+    tagFilter = tag
+    reconcileSelection()
+  }
+
+  /// 类型、搜索和标签变更后，选区与锚点只保留可见记录。
+  func reconcileSelection() {
+    guard !picked.isEmpty || anchor != nil else { return }
+    let visible = Set(shown.map(\.id))
+    let current = picked.intersection(visible)
+    if current != picked { picked = current }
+    if let anchor, !visible.contains(anchor) { self.anchor = chosen.first?.id }
+  }
+
+  /// 标签编辑应用于打开编辑器时的编号快照，导出仍从当前筛选后的选区读取。
+  @discardableResult func applyTags(_ ids: [UUID], adding: [String], removing: [String]) throws
+    -> Int
+  {
+    let count = try history.applyTags(to: ids, adding: adding, removing: removing)
+    if count > 0 { reconcileSelection() }
+    return count
   }
 
   /// 按天分组（新的在前；今天、昨天写成字，更早的写日期）。纯函数，配单测
@@ -266,6 +319,7 @@ import SwiftUI
   /// 选中的那几条，按现在列出来的顺序（批量动作都拿它）
   var chosen: [ShotHistory.Item] {
     let ids = picked
+    guard !ids.isEmpty else { return [] }
     return shown.filter { ids.contains($0.id) }
   }
 
@@ -336,7 +390,7 @@ import SwiftUI
   // ⌘A 之后紧接着按 ⌘C，那一下会按「只选着一条」走（2026-10-27 写多选时被这个咬过）
 
   /// 能不能拷（选中了就行，录制的那几条拷的是文件）
-  var canCopy: Bool { !picked.isEmpty }
+  var canCopy: Bool { !chosen.isEmpty }
   /// 能不能存（选中的里面有图才行：录制的那几条本来就是文件）
   var canSave: Bool { chosen.contains { $0.filePath == nil } }
   /// 拼图只接受 2–20 张截图；混选录制时明确禁用，不静默漏掉选中项。
@@ -419,7 +473,7 @@ import SwiftUI
   static func handlesKeyDown(_ event: NSEvent, in window: NSWindow, model: ShotHistoryModel)
     -> Bool
   {
-    guard event.window === window else { return false }
+    guard event.window === window, !(window.firstResponder is NSTextView) else { return false }
     let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
     // ⇧ + 方向键：从锚点连着选过去
     if flags == .shift, let step = Self.arrowStep(event.keyCode, columns: model.columnsPerRow) {
