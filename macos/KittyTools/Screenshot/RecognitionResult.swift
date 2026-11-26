@@ -4,12 +4,100 @@ import AppKit
 import OSLog
 import SwiftUI
 
+/// 一条原始识别行在 Vision 坐标系中的位置，以原始识别顺序区分重复文本。
+struct RecognitionLocation: Equatable {
+  let line: Int
+  let box: CGRect
+}
+
+/// 将原始行框附在未经改写的 UTF-16 区间上，跟随 NSTextStorage 实际编辑移动。
+private struct RecognitionLocations {
+  private struct Span {
+    var range: NSRange
+    let location: RecognitionLocation
+  }
+
+  private var spans: [Span] = []
+  private var length = 0
+
+  /// 行之间和 OCR 的逐行文本使用同一个换行符，非法行框只丢位置、不丢文字。
+  init(lines: [OCR.Line] = []) {
+    let image = CGRect(x: 0, y: 0, width: 1, height: 1)
+    for (index, line) in lines.enumerated() {
+      let count = line.text.utf16.count
+      if index > 0 { length += 1 }
+      let box = line.box
+      if count > 0, box.minX.isFinite, box.minY.isFinite, box.maxX.isFinite, box.maxY.isFinite {
+        let clipped = box.intersection(image)
+        if !clipped.isEmpty {
+          spans.append(
+            Span(
+              range: NSRange(location: length, length: count),
+              location: RecognitionLocation(line: index + 1, box: clipped)))
+        }
+      }
+      length += count
+    }
+  }
+
+  /// 触及原识别区间的编辑让该区间失效，其余位置按实际位移调整。
+  mutating func edited(_ range: NSRange, delta: Int, newLength: Int) {
+    let oldCount = range.length - delta
+    guard range.location != NSNotFound, range.location >= 0, oldCount >= 0,
+      length + delta == newLength, range.location <= length, oldCount <= length - range.location
+    else {
+      spans.removeAll()
+      length = newLength
+      return
+    }
+    let oldEnd = range.location + oldCount
+    spans = spans.compactMap { span in
+      if NSMaxRange(span.range) <= range.location { return span }
+      guard span.range.location >= oldEnd else { return nil }
+      var moved = span
+      moved.range.location += delta
+      return moved
+    }
+    length = newLength
+  }
+
+  /// 光标或选区须落在单个可确认区间内，跨行、新增文字及不完整组字都没有定位。
+  func location(for selection: NSRange, in text: NSString) -> RecognitionLocation? {
+    let start = selection.location
+    guard text.length == length, start != NSNotFound, start >= 0, start <= length,
+      selection.length <= length - start
+    else { return nil }
+    // 选区频繁变化，用已排序的区间二分查找，不扫描全部识别行。
+    var low = 0
+    var high = spans.count
+    while low < high {
+      let middle = (low + high) / 2
+      if spans[middle].range.location <= start { low = middle + 1 } else { high = middle }
+    }
+    guard low > 0 else { return nil }
+    let span = spans[low - 1]
+    let end = NSMaxRange(span.range)
+    let endOfSelectedLine = end < length && text.character(at: end) == 10 ? end + 1 : end
+    if start < end && NSMaxRange(selection) <= endOfSelectedLine { return span.location }
+    if selection.length == 0, start == end,
+      start == length || text.character(at: start) == 10
+    {
+      return span.location
+    }
+    return nil
+  }
+}
+
 /// 识字面板的短期状态，不持久化识别内容或选中文字。
 @Observable final class RecognitionModel {
   var image: CGImage?
   var text = ""
   var selectedText = ""
   private(set) var originalText = ""
+  private(set) var location: RecognitionLocation?
+  private(set) var documentRevision = 0
+  @ObservationIgnored private var originalLocations = RecognitionLocations()
+  @ObservationIgnored private var currentLocations = RecognitionLocations()
   var canUndo = false
   var canRedo = false
   var editNotice: String?
@@ -26,12 +114,47 @@ import SwiftUI
 
   /// 接收原始识别结果，纠错与恢复始终使用同一份原文快照。
   func accept(_ value: String) {
+    documentRevision &+= 1
+    originalLocations = RecognitionLocations()
+    restoreLocations()
     originalText = value
     text = value
     selectedText = ""
     canUndo = false
     canRedo = false
     editNotice = nil
+  }
+
+  /// 采纳扫描结果时同时建立原始正文与原图行框。
+  func accept(lines: [OCR.Line]) {
+    accept(OCR.text(lines, joined: false))
+    originalLocations = RecognitionLocations(lines: lines)
+    restoreLocations()
+  }
+
+  /// 只在加载、恢复原文或确认为完整的撤销时重新采用原始区间。
+  func restoreLocations() {
+    currentLocations = originalLocations
+    clearLocation()
+  }
+
+  /// 记录原生存储实际发生的变化，以区间而非文字匹配保留来源。
+  func recordLocationEdit(_ range: NSRange, delta: Int, newLength: Int) {
+    currentLocations.edited(range, delta: delta, newLength: newLength)
+  }
+
+  /// 用真实选区更新选中文字和来源，避免正文纠错时显示旧原图高亮。
+  func select(_ range: NSRange, in value: NSString) {
+    selectedText =
+      range.location >= 0 && range.location != NSNotFound && range.location <= value.length
+        && range.length <= value.length - range.location ? value.substring(with: range) : ""
+    let next = currentLocations.location(for: range, in: value)
+    if next != location { location = next }
+  }
+
+  /// 组字、替换结果或关闭时收起高亮。
+  func clearLocation() {
+    if location != nil { location = nil }
   }
 
   /// 恢复原始识别结果；存在编辑器时作为一次可撤销的普通编辑执行。
@@ -42,6 +165,7 @@ import SwiftUI
       text = originalText
       selectedText = ""
     }
+    if text == originalText { restoreLocations() }
   }
 
   /// 所有复制入口经 Paster 写入并记录用户主动留下的新文字。
@@ -54,9 +178,12 @@ import SwiftUI
 
   /// 收起时释放图像和文字，取消的任务不能再回填内容。
   func clear() {
+    documentRevision &+= 1
     image = nil
     text = ""
     originalText = ""
+    originalLocations = RecognitionLocations()
+    restoreLocations()
     selectedText = ""
     canUndo = false
     canRedo = false
@@ -114,7 +241,7 @@ final class RecognitionPanel {
         do {
           let lines = try await scan(image)
           if requested?.generation == ticket {
-            model.accept(OCR.text(lines, joined: false))
+            model.accept(lines: lines)
             model.working = false
           }
           Log.clipboard.notice(
@@ -170,15 +297,8 @@ struct RecognitionResultView: View {
       Hairline()
       HStack(spacing: 0) {
         if model.compares, let image = model.image {
-          GeometryReader { proxy in
-            Image(decorative: image, scale: 1)
-              .resizable().aspectRatio(contentMode: .fit)
-              .frame(width: proxy.size.width, height: proxy.size.height)
-              .accessibilityLabel("识别的原图")
-          }
-          .padding(16)
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
-          .background(.quaternary.opacity(0.3))
+          RecognitionImagePreview(image: image, location: model.location)
+            .id(ObjectIdentifier(image))
           Divider()
         }
         result.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -215,7 +335,7 @@ struct RecognitionResultView: View {
         Text("原图仍可在左侧查看").foregroundStyle(.secondary)
       }.padding(20)
     } else {
-      RecognitionTextView(model: model).padding(12)
+      RecognitionTextView(model: model).id(model.documentRevision).padding(12)
     }
   }
 }
@@ -246,7 +366,9 @@ struct RecognitionTextView: NSViewRepresentable {
     text.autoresizingMask = [.width]
     text.textContainer?.widthTracksTextView = true
     text.setAccessibilityLabel("识别出的文字")
+    text.string = model.text
     text.delegate = context.coordinator
+    text.textStorage?.delegate = context.coordinator
     text.write = { [weak model] in model?.write($0) }
     text.onSettled = { [weak coordinator = context.coordinator, weak text] in
       if let text { coordinator?.changed(text) }
@@ -254,7 +376,7 @@ struct RecognitionTextView: NSViewRepresentable {
     model.undo = { [weak text, weak coordinator = context.coordinator] in
       text?.breakUndoCoalescing()
       text?.undoManager?.undo()
-      if let text { coordinator?.changed(text) }
+      if let text { coordinator?.changed(text, finishingUndo: true) }
     }
     model.redo = { [weak text, weak coordinator = context.coordinator] in
       text?.undoManager?.redo()
@@ -279,9 +401,7 @@ struct RecognitionTextView: NSViewRepresentable {
   func updateNSView(_ scroll: NSScrollView, context: Context) {
     guard let text = scroll.documentView as? RecognitionText else { return }
     if text.string != model.text, !text.hasMarkedText() {
-      text.string = model.text
-      text.history.removeAllActions()
-      text.onSettled()
+      context.coordinator.installText(in: text)
     }
   }
 
@@ -291,6 +411,7 @@ struct RecognitionTextView: NSViewRepresentable {
       text.onSettled = {}
       text.history.removeAllActions()
       text.delegate = nil
+      text.textStorage?.delegate = nil
     }
     scroll.documentView = nil
   }
@@ -298,12 +419,35 @@ struct RecognitionTextView: NSViewRepresentable {
   /// 保存选中文字，供按钮与系统复制命令共用。
   func makeCoordinator() -> Coordinator { Coordinator(model: model) }
 
-  /// 仅监听选区变化，不接管系统按键和文本排版。
-  final class Coordinator: NSObject, NSTextViewDelegate {
+  /// 监听文字存储和选区，不替换系统编辑、组字及撤销行为。
+  final class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate {
     private let model: RecognitionModel
+    private var installingText = false
 
     /// 绑定当前面板模型。
     init(model: RecognitionModel) { self.model = model }
+
+    /// 新识别结果的区间随模型一起提供，更新编辑器时不把加载当成用户改写。
+    func installText(in text: RecognitionText) {
+      installingText = true
+      defer { installingText = false }
+      text.string = model.text
+      text.history.removeAllActions()
+      text.setSelectedRange(NSRange(location: 0, length: 0))
+    }
+
+    /// 原生存储同步报告已提交到存储的字符差异，属性更新不影响来源。
+    nonisolated func textStorage(
+      _ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions,
+      range editedRange: NSRange, changeInLength delta: Int
+    ) {
+      guard editedMask.contains(.editedCharacters) else { return }
+      let newLength = textStorage.length
+      MainActor.assumeIsolated {
+        guard !installingText else { return }
+        model.recordLocationEdit(editedRange, delta: delta, newLength: newLength)
+      }
+    }
 
     /// 原生文本变化回写当前正文，组字期间不反向覆盖输入中的候选文本。
     func textDidChange(_ notification: Notification) {
@@ -311,12 +455,14 @@ struct RecognitionTextView: NSViewRepresentable {
     }
 
     /// 同步文字、选区与撤销状态，按钮和快捷键复制均使用当前编辑内容。
-    func changed(_ text: RecognitionText) {
-      guard !text.hasMarkedText() else { return }
+    func changed(_ text: RecognitionText, finishingUndo: Bool = false) {
+      guard !installingText else { return }
+      guard !text.hasMarkedText() else { return model.clearLocation() }
       model.text = text.string
-      let range = text.selectedRange()
-      let value = text.string as NSString
-      model.selectedText = NSMaxRange(range) <= value.length ? value.substring(with: range) : ""
+      if finishingUndo || text.history.isUndoing, model.text == model.originalText {
+        model.restoreLocations()
+      }
+      model.select(text.selectedRange(), in: text.string as NSString)
       model.canUndo = text.history.canUndo
       model.canRedo = text.history.canRedo
     }
@@ -340,10 +486,9 @@ struct RecognitionTextView: NSViewRepresentable {
 
     /// 拖选、全选与键盘选区变化都回写同一份选中内容。
     func textViewDidChangeSelection(_ notification: Notification) {
-      guard let view = notification.object as? NSTextView else { return }
-      let string = view.string as NSString
-      let range = view.selectedRange()
-      model.selectedText = NSMaxRange(range) <= string.length ? string.substring(with: range) : ""
+      guard !installingText, let view = notification.object as? NSTextView else { return }
+      guard !view.hasMarkedText() else { return model.clearLocation() }
+      model.select(view.selectedRange(), in: view.string as NSString)
     }
   }
 }
@@ -384,7 +529,7 @@ final class RecognitionText: NSTextView {
   /// 组字确认或取消后立即同步，避免没有额外文本通知时保留旧正文。
   override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
     super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
-    if !hasMarkedText() { onSettled() }
+    onSettled()
   }
 
   /// 失去组字状态后让复制入口看到已提交文字。

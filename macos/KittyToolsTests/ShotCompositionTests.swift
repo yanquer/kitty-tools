@@ -79,16 +79,33 @@ struct ShotCompositionTests {
       return result.map { OCR.Line(text: $0.text, box: $0.box) }
     }
     panel.request(try image(1, 0))
-    try await Task.sleep(for: .milliseconds(30))
+    for _ in 0..<150 {
+      if await probe.started >= 1 { break }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    try #require(await probe.started == 1)
     panel.request(try image(0, 1, size: CGSize(width: 200, height: 60)))
-    try await Task.sleep(for: .milliseconds(330))
+    for _ in 0..<150 where panel.model.working { try await Task.sleep(for: .milliseconds(10)) }
     #expect(panel.model.text == "200")
+    panel.model.select(NSRange(location: 0, length: 1), in: panel.model.text as NSString)
+    #expect(panel.model.location?.line == 1)
     #expect(await probe.maximumConcurrent == 1)
     panel.request(try image(1, 0))
-    try await Task.sleep(for: .milliseconds(20))
+    for _ in 0..<150 {
+      if await probe.started >= 3 { break }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    try #require(await probe.started == 3)
     panel.hide()
-    try await Task.sleep(for: .milliseconds(160))
-    #expect(panel.model.text.isEmpty && panel.model.image == nil && !panel.model.working)
+    for _ in 0..<150 {
+      if await probe.finished >= 3 { break }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    try #require(await probe.finished == 3)
+    await Task.yield()
+    #expect(
+      panel.model.text.isEmpty && panel.model.image == nil && !panel.model.working
+        && panel.model.location == nil)
   }
 
   @Test func layoutsKeepOrderAspectAndBudget() throws {
@@ -930,13 +947,19 @@ struct ShotCompositionTests {
 /// 模拟不会立即完成的 Vision 请求，记录并发数，不触发真实识别或屏幕读取。
 private actor CodeScanProbe {
   private var running = 0
+  private(set) var started = 0
+  private(set) var finished = 0
   private(set) var maximumConcurrent = 0
 
   /// 按输入图宽返回内容，区分旧选区与新选区的扫描结果。
   func scan(_ image: CGImage) async throws -> [OCR.Code] {
+    started += 1
     running += 1
     maximumConcurrent = max(maximumConcurrent, running)
-    defer { running -= 1 }
+    defer {
+      running -= 1
+      finished += 1
+    }
     try await Task.sleep(for: .milliseconds(120))
     return [OCR.Code(text: "\(image.width)", box: CGRect(x: 0.2, y: 0.2, width: 0.4, height: 0.4))]
   }

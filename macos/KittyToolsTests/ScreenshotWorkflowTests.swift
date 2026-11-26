@@ -87,6 +87,107 @@ struct ScreenshotWorkflowTests {
     #expect(!window.isKeyWindow)
   }
 
+  /// 重复文本通过原始区间区分，光标移动、插入和删除后不按行号或内容猜测来源。
+  @Test func recognitionLocationFollowsUnchangedNativeRanges() throws {
+    let model = RecognitionModel()
+    model.image = try image()
+    let lines: [OCR.Line] = [
+      .init(text: "相同订单 A-100", box: CGRect(x: 0.15, y: 0.76, width: 0.62, height: 0.12)),
+      .init(text: "分隔 🐈", box: CGRect(x: 0.11, y: 0.55, width: 0.6, height: 0.1)),
+      .init(text: "相同订单 A-100", box: CGRect(x: 0.15, y: 0.25, width: 0.62, height: 0.12)),
+    ]
+    model.accept(lines: lines)
+    let (window, text) = try editor(model)
+    defer {
+      window.orderOut(nil)
+      window.contentView = nil
+    }
+    let duplicate = lines[0].text
+    let second = (text.string as NSString).range(of: duplicate, options: .backwards)
+    text.setSelectedRange(NSRange(location: second.location + 2, length: 0))
+    #expect(model.location == .init(line: 3, box: lines[2].box))
+    let firstLine = (text.string as NSString).range(of: duplicate + "\n")
+    text.setSelectedRange(firstLine)
+    #expect(model.location?.line == 1)
+    let inserted = "相同订单 A-100\n"
+    text.insertText(inserted, replacementRange: NSRange(location: 0, length: 0))
+    settle()
+    text.setSelectedRange(NSRange(location: 2, length: 3))
+    #expect(model.location == nil)
+    let insertedCount = (inserted as NSString).length
+    text.setSelectedRange(NSRange(location: insertedCount + 2, length: 3))
+    #expect(model.location?.line == 1)
+    let moved = (text.string as NSString).range(of: duplicate, options: .backwards)
+    text.setSelectedRange(moved)
+    #expect(model.location?.line == 3 && model.selectedText == duplicate)
+    text.insertText("改字", replacementRange: NSRange(location: moved.location, length: 2))
+    settle()
+    text.setSelectedRange(NSRange(location: moved.location + 1, length: 0))
+    #expect(model.location == nil)
+    let separator = (text.string as NSString).range(of: lines[1].text + "\n")
+    text.insertText("", replacementRange: separator)
+    settle()
+    text.setSelectedRange(NSRange(location: insertedCount + 3, length: 0))
+    #expect(model.location?.line == 1)
+    text.setSelectedRange(NSRange(location: 0, length: (text.string as NSString).length))
+    #expect(model.location == nil)
+    model.restoreOriginal()
+    settle()
+    text.setSelectedRange(second)
+    #expect(model.location?.line == 3 && model.text == model.originalText && !window.isKeyWindow)
+  }
+
+  /// 原地处于组字时撤下高亮，原生撤销回到完整原文后可重新定位。
+  @Test func recognitionLocationHandlesCompositionAndUndo() throws {
+    let model = RecognitionModel()
+    let lines: [OCR.Line] = [
+      .init(text: "第一行 🐈", box: CGRect(x: 0.1, y: 0.7, width: 0.4, height: 0.1)),
+      .init(text: "第二行", box: CGRect(x: 0.1, y: 0.3, width: 0.4, height: 0.1)),
+    ]
+    model.accept(lines: lines)
+    let (window, text) = try editor(model)
+    defer {
+      window.orderOut(nil)
+      window.contentView = nil
+    }
+    let row = (text.string as NSString).range(of: "第二行")
+    text.setSelectedRange(row)
+    #expect(model.location?.line == 2)
+    text.setMarkedText(
+      "zhong", selectedRange: NSRange(location: 5, length: 0), replacementRange: row)
+    #expect(text.hasMarkedText() && model.location == nil && model.text == model.originalText)
+    text.insertText("中文", replacementRange: NSRange(location: NSNotFound, length: 0))
+    text.breakUndoCoalescing()
+    settle()
+    text.setSelectedRange(NSRange(location: row.location, length: 1))
+    #expect(model.location == nil && model.text.hasSuffix("中文"))
+    model.undo()
+    settle()
+    text.setSelectedRange(row)
+    #expect(model.text == model.originalText && model.location?.line == 2)
+    model.redo()
+    settle()
+    text.setSelectedRange(NSRange(location: row.location, length: 1))
+    #expect(model.location == nil)
+  }
+
+  /// 保持 Vision 坐标方向、中心留白和 Retina 的实际像素换算一致。
+  @Test func recognitionImageLayoutProjectsAndRevealsBoxes() {
+    let box = CGRect(x: 0.5, y: 0.1, width: 0.4, height: 0.1)
+    let pixels = CGSize(width: 1000, height: 3000)
+    let viewport = CGSize(width: 320, height: 300)
+    let fit = RecognitionImageLayout(
+      pixels: pixels, viewport: viewport, displayScale: 2, actualPixels: false)
+    #expect(fit.image == CGRect(x: 110, y: 0, width: 100, height: 300))
+    #expect(fit.offset(for: box) == .zero)
+    let actual = RecognitionImageLayout(
+      pixels: pixels, viewport: viewport, displayScale: 2, actualPixels: true)
+    #expect(actual.document == CGSize(width: 500, height: 1500))
+    let frame = actual.frame(for: box)
+    #expect(abs(frame.minY - 1200) < 0.001 && frame.minX == 250)
+    #expect(actual.offset(for: box) == CGPoint(x: 180, y: 1125))
+  }
+
   /// 删除全部文字后保留原编辑器，并能恢复同一份原始识别结果。
   @Test func deletingAllKeepsEditorAndCanRestoreOriginal() throws {
     let model = RecognitionModel()

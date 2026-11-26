@@ -1373,7 +1373,7 @@ struct ScreenshotSnapshotTests {
       window.orderFront(nil)
       defer { window.orderOut(nil) }
       hud.layoutSubtreeIfNeeded()
-      let control = try #require(round11Subview(ScrollPreviewScrubber.self, in: hud))
+      let control = try #require(firstSubview(ScrollPreviewScrubber.self, in: hud))
       hud.updatePreview(stitcher: stitcher, scale: 2)
       #expect(!control.isHidden && window.canBecomeKey == false)
       hud.onBrowse = { [weak hud] in hud?.updatePreview(stitcher: stitcher, scale: 2) }
@@ -1427,7 +1427,7 @@ struct ScreenshotSnapshotTests {
         eventNumber: 0, trackingNumber: 0, userData: nil))
     pin.mouseEntered(with: hover)
     let close = try #require(
-      round11Subview(NSButton.self, in: pin, matching: { $0.toolTip == "关闭" }))
+      firstSubview(NSButton.self, in: pin, matching: { $0.toolTip == "关闭" }))
     for _ in 0..<80 where close.isHiddenOrHasHiddenAncestor {
       try await Task.sleep(for: .milliseconds(20))
     }
@@ -1461,13 +1461,13 @@ struct ScreenshotSnapshotTests {
   }
 
   /// 查找真实 AppKit 子视图，用于屏外调用产品控件。
-  private func round11Subview<View: NSView>(
+  private func firstSubview<View: NSView>(
     _ type: View.Type, in root: NSView,
     matching: (View) -> Bool = { _ in true }
   ) -> View? {
     if let found = root as? View, matching(found) { return found }
     for child in root.subviews {
-      if let found = round11Subview(type, in: child, matching: matching) { return found }
+      if let found = firstSubview(type, in: child, matching: matching) { return found }
     }
     return nil
   }
@@ -1665,6 +1665,97 @@ struct ScreenshotSnapshotTests {
     try shoot(pin, "pin-miniature")
     pin.setMiniature(false)
     try shoot(pin, "pin-expanded")
+  }
+
+  /// 用 Vision 实际识别合成表格，再经原生选区和实际像素按钮核对原图滚动。
+  @Test(.enabled(if: directory != nil)) func renderRecognitionLocations() async throws {
+    for (rows, row, zoom, name) in [
+      (12, 7, false, "recognition-location-table"), (46, 42, true, "recognition-location-long"),
+    ] {
+      let image = try recognitionTable(rows: rows)
+      let lines = try await OCR.inspectLines(in: image)
+      let expected = String(format: "ORD-%04d", row)
+      let index = try #require(lines.firstIndex { $0.text.contains(expected) })
+      let box = lines[index].box
+      let rowCenter = 1 - (CGFloat(row - 1) * 42 + 45) / CGFloat(image.height)
+      #expect(abs(box.midY - rowCenter) < 20 / CGFloat(image.height))
+      let model = RecognitionModel()
+      model.image = image
+      model.accept(lines: lines)
+      try enhancement(
+        RecognitionResultView(model: model),
+        size: NSSize(width: zoom ? 700 : 780, height: zoom ? 460 : 540), name: name, dark: zoom
+      ) { host in
+        let editor = try #require(recognitionEditor(in: host))
+        let match = (editor.string as NSString).range(of: expected)
+        try #require(match.location != NSNotFound)
+        editor.setSelectedRange(match)
+        editor.scrollRangeToVisible(match)
+        RunLoop.main.run(until: Date.now.addingTimeInterval(0.12))
+        #expect(
+          model.location == .init(line: index + 1, box: box) && host.window?.isKeyWindow == false)
+        if zoom {
+          let action = try #require(compositionButton(in: host, label: "实际像素"))
+          #expect(action() == true)
+          RunLoop.main.run(until: Date.now.addingTimeInterval(0.28))
+          let imageScroll = try #require(
+            firstSubview(
+              NSScrollView.self, in: host,
+              matching: {
+                $0 !== editor.enclosingScrollView
+                  && ($0.documentView?.bounds.height ?? 0) > $0.contentSize.height
+              }))
+          #expect(imageScroll.contentView.bounds.minY > 400)
+          #expect(compositionButton(in: host, label: "适合窗口") != nil)
+          let nearTop = (editor.string as NSString).range(of: "ORD-0002")
+          try #require(nearTop.location != NSNotFound)
+          editor.setSelectedRange(nearTop)
+          RunLoop.main.run(until: Date.now.addingTimeInterval(0.16))
+          #expect(imageScroll.contentView.bounds.minY < 150)
+          editor.setSelectedRange(match)
+          editor.scrollRangeToVisible(match)
+          RunLoop.main.run(until: Date.now.addingTimeInterval(0.16))
+          #expect(imageScroll.contentView.bounds.minY > 400)
+        }
+      }
+    }
+  }
+
+  /// 绘制一张可由 Vision 实际识别的小字表格，行号和列位置可验证且没有用户内容。
+  private func recognitionTable(rows: Int) throws -> CGImage {
+    let width = 1180
+    let height = rows * 42 + 46
+    let bitmap = try #require(
+      NSBitmapImageRep(
+        bitmapDataPlanes: nil, pixelsWide: width,
+        pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+        isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+    NSGraphicsContext.saveGraphicsState()
+    defer { NSGraphicsContext.restoreGraphicsState() }
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+    NSColor.white.setFill()
+    NSRect(x: 0, y: 0, width: width, height: height).fill()
+    let headerY = height - 27
+    let label: [NSAttributedString.Key: Any] = [
+      .font: NSFont.monospacedSystemFont(ofSize: 24, weight: .medium),
+      .foregroundColor: NSColor.black,
+    ]
+    for (x, title) in [(28, "ORDER NUMBER"), (420, "PICKUP WINDOW"), (842, "PACKAGE STATUS")] {
+      NSAttributedString(string: title, attributes: label).draw(at: CGPoint(x: x, y: headerY))
+    }
+    for row in 1...rows {
+      let y = height - 42 * row - 25
+      if row.isMultiple(of: 2) {
+        NSColor(srgbRed: 0.91, green: 0.94, blue: 0.99, alpha: 1).setFill()
+        NSRect(x: 0, y: y - 6, width: width, height: 41).fill()
+      }
+      let order = String(format: "ORD-%04d", row)
+      NSAttributedString(string: order, attributes: label).draw(at: CGPoint(x: 28, y: y))
+      NSAttributedString(string: "09:30 - 10:15", attributes: label).draw(at: CGPoint(x: 420, y: y))
+      NSAttributedString(string: row.isMultiple(of: 3) ? "Packed" : "Pending", attributes: label)
+        .draw(at: CGPoint(x: 842, y: y))
+    }
+    return try #require(bitmap.cgImage)
   }
 
   /// 图片导入与锁定钉图在假数据、屏外窗口中检查空态、长文件名、失败与浅深色。

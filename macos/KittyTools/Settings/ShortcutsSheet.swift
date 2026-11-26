@@ -485,6 +485,7 @@ struct ShortcutsSheet: View {
           Entry(key(.record), text: "录屏（选区不变；有标注时不切）", needs: .record),
           Entry(key(.recognize), text: "识字并拷贝"),
           Entry(key(.inspect), text: "查看识字结果"),
+          Entry(text: "识字结果中点选文字定位原图，可切换到实际像素查看"),
         ]),
       // mac-overlay-panel §10 长截图；代码在 ScrollCapturePanel.keyDown
       Group(
