@@ -1812,8 +1812,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     case .imageEditFile: editExternalImage(fromClipboard: false)
     case .imageEditClipboard: editExternalImage(fromClipboard: true)
     case .imageCompose:
-      if compositionPanel == nil { compositionPanel = ShotCompositionPanel(history: shotHistory) }
-      compositionPanel?.showFiles()
+      compositionWindow().showFiles()
     case .windowSwitch, .windowSwitchPrevious, .appWindowSwitch, .appWindowSwitchPrevious:
       if builtWindowSwitcher?.isOpen != true {
         builtClipboardPanel?.hide()
@@ -2972,8 +2971,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     actions.compose = { [unowned self] items in
       guard Feature.screenshot.isOn else { return }
-      if compositionPanel == nil { compositionPanel = ShotCompositionPanel(history: shotHistory) }
-      compositionPanel?.show(items)
+      compositionWindow().show(items)
     }
     actions.notice = { [unowned self] text, warning in
       island.show(text, tone: warning ? .warning : .info)
@@ -3128,17 +3126,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     editor.show()
   }
 
+  /// 统一绑定拼图的两个入口，标注成品复用同一遮罩和出图链路。
+  private func compositionWindow() -> ShotCompositionPanel {
+    if let compositionPanel { return compositionPanel }
+    let panel = ShotCompositionPanel(history: shotHistory) { [weak self] image, screen in
+      guard let self, Feature.screenshot.isOn, !isCapturing, !isReadingSelection else {
+        return false
+      }
+      openAnnotate(image, scale: 1, name: "拼图", strictOutput: true, screen: screen)
+      return true
+    }
+    compositionPanel = panel
+    return panel
+  }
+
   /// 长图标注（2026-10-26 拍板）：拼好的长图在自己的窗口里标注，出图走截图那条路、用刘海说结果（同钉图，不飞卡片：
   /// 这时选区多半已经不在眼前了）。一次只开一扇，再开一次就把前一扇换掉。
   /// history：它在历史里是哪一条（刚拼好的长截图是并行记的，出图时等它记完拿编号，R6）
   private func openAnnotate(
     _ image: CGImage, scale: CGFloat, history: (() async -> UUID?)? = nil,
-    annotations: [Annotation] = [], name: String = "长截图", strictOutput: Bool = false
+    annotations: [Annotation] = [], name: String = "长截图", strictOutput: Bool = false,
+    screen: NSScreen? = nil
   ) {
     annotateOverlay?.close()
     let originalInput = image
     let editor = AnnotateOverlay(
-      image: image, scale: scale, annotations: annotations, strictOutput: strictOutput
+      image: image, scale: scale, annotations: annotations, screen: screen,
+      strictOutput: strictOutput
     ) {
       [unowned self] action, image, scale, annotations in
       // 改完的标注回写到历史那一条（拍板 C4：更新同一条，不新建），缩略图照这张成品缩、不再读原图重合成（R6）。

@@ -747,6 +747,152 @@ struct ShotCompositionTests {
     try #require(!model.exporting, "逐张导出未在测试时限内完成")
   }
 
+  /// 两张对比图按最终像素送入实际标注画布，使用原生箭头、说明和严格出图命令。
+  @Test func composedAnnotationUsesFullSizeSnapshotAndKeepsOriginalLayout() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let original = CGSize(width: 900, height: 600)
+    let first = try await source(
+      image(0, 0.8, size: original), at: folder.appending(path: "before.png"))
+    let second = try await source(
+      image(0, 0.4, size: original), at: folder.appending(path: "after.png"))
+    let model = ShotCompositionModel()
+    defer { model.clear() }
+    model.sources = [first, second]
+    model.options = .init(
+      layout: .horizontal, spacing: 24, margin: 12, widthMode: .custom, customWidth: 1600)
+    let order = model.sources.map(\.id)
+    let options = model.options
+    model.refreshPreview()
+    try await settlePreview(model)
+    #expect(model.preview?.width == 1000 && model.canAnnotateComposition)
+    let previous = folder.appending(path: "previous.png")
+    model.exported = previous
+    var snapshot: CGImage?
+    model.openAnnotation = {
+      snapshot = $0
+      return true
+    }
+    model.annotateComposition()
+    #expect(model.preparingAnnotation && !model.canImport)
+    try await settleCompositionAnnotation(model)
+    let base = try #require(snapshot)
+    let unmarked = folder.appending(path: "unmarked.png")
+    try await ShotComposition.export([first, second], options: options, pdf: false, to: unmarked)
+    let baseline = try readPNG(unmarked)
+    #expect(base.width == 1600 && base.width == baseline.width && base.height == baseline.height)
+    #expect(
+      try pixel(base, at: CGPoint(x: 200, y: 180)) == pixel(baseline, at: CGPoint(x: 200, y: 180)))
+
+    var result: CGImage?
+    var savedAnnotations: [Annotation] = []
+    let editor = AnnotateOverlay(image: base, scale: 1, strictOutput: true) {
+      action, marked, scale, annotations in
+      #expect(action == .copy && scale == 1)
+      result = marked
+      savedAnnotations = annotations
+    }
+    defer { editor.close() }
+    let view = try #require(editor.panel.contentView as? AnnotateOverlayView)
+    let canvas = try #require(annotationCanvas(in: view))
+    canvas.tool = .arrow
+    canvas.style = .init(color: .red, weight: .large)
+    let y = CGFloat(base.height) * 0.45
+    let start = CGPoint(x: 480, y: y)
+    let end = CGPoint(x: 1100, y: y)
+    canvas.mouseDown(with: try annotationMouse(.leftMouseDown, at: start, in: canvas))
+    canvas.mouseDragged(with: try annotationMouse(.leftMouseDragged, at: end, in: canvas))
+    canvas.mouseUp(with: try annotationMouse(.leftMouseUp, at: end, in: canvas))
+    let caption = "调整前 → 调整后"
+    canvas.beginEditing(at: CGPoint(x: 520, y: y + 72))
+    let field = try #require(canvas.subviews.compactMap { $0 as? EditorField }.first)
+    field.insertText(caption, replacementRange: NSRange(location: 0, length: 0))
+    #expect(canvas.endEditing())
+    let event = try #require(
+      NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+        windowNumber: 0, context: nil, characters: "\r", charactersIgnoringModifiers: "\r",
+        isARepeat: false, keyCode: UInt16(kVK_Return)))
+    view.keyDown(with: event)
+    let marked = try #require(result)
+    #expect(savedAnnotations.map(\.tool) == [.arrow, .text])
+    #expect(
+      savedAnnotations.contains {
+        if case .text(let value, _) = $0.shape { return value == caption }
+        return false
+      })
+    let png = try #require(await ScreenshotOutput.png(marked, scale: 1))
+    let output = folder.appending(path: "annotated.png")
+    try await ScreenshotOutput.write(png, to: output, options: .withoutOverwriting)
+    let roundTrip = try readPNG(output)
+    #expect(roundTrip.width == base.width && roundTrip.height == base.height)
+    let point = CGPoint(x: 780, y: Int(y))
+    let before = try pixel(base, at: point)
+    let after = try pixel(roundTrip, at: point)
+    #expect(Int(after[0]) > Int(before[0]) + 100 && after[3] == 255)
+    #expect(
+      model.sources.map(\.id) == order && model.options == options && model.exported == previous
+        && model.canAnnotateComposition)
+    #expect(!editor.panel.isKeyWindow)
+  }
+
+  /// 源文件失效和会话关闭都不会把旧预览交给标注编辑器。
+  @Test func composedAnnotationHandlesFailureAndClosedSessions() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let first = try await source(image(1, 0), at: folder.appending(path: "before.png"))
+    let second = try await source(image(0, 1), at: folder.appending(path: "after.png"))
+    let model = ShotCompositionModel()
+    defer { model.clear() }
+    model.sources = [first, second]
+    model.refreshPreview()
+    try await settlePreview(model)
+    var opened = 0
+    model.openAnnotation = { _ in
+      opened += 1
+      return true
+    }
+    model.pdf = true
+    model.annotateComposition()
+    #expect(!model.preparingAnnotation)
+    model.pdf = false
+    try FileManager.default.removeItem(at: second.url)
+    model.annotateComposition()
+    try await settleCompositionAnnotation(model)
+    #expect(model.error?.contains("无法解码") == true && opened == 0)
+    #expect(model.preview != nil && model.sources.count == 2)
+    model.annotateComposition()
+    model.clear()
+    try await Task.sleep(for: .milliseconds(120))
+    #expect(opened == 0 && model.error == nil && !model.preparingAnnotation)
+  }
+
+  /// 原生标注视图内查找画布，无需展示全屏遮罩。
+  private func annotationCanvas(in view: NSView) -> ScrollCanvas? {
+    if let canvas = view as? ScrollCanvas { return canvas }
+    for child in view.subviews { if let canvas = annotationCanvas(in: child) { return canvas } }
+    return nil
+  }
+
+  /// 将画布坐标换成当前窗口坐标，直接把事件交给视图。
+  private func annotationMouse(_ type: NSEvent.EventType, at point: CGPoint, in view: NSView) throws
+    -> NSEvent
+  {
+    try #require(
+      NSEvent.mouseEvent(
+        with: type, location: view.convert(point, to: nil), modifierFlags: [],
+        timestamp: 0, windowNumber: view.window?.windowNumber ?? 0, context: nil, eventNumber: 0,
+        clickCount: 1, pressure: 1))
+  }
+
+  /// 等待后台准备进入成功或失败状态。
+  private func settleCompositionAnnotation(_ model: ShotCompositionModel) async throws {
+    for _ in 0..<300 where model.preparingAnnotation {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    try #require(!model.preparingAnnotation, "拼图标注未在测试时限内准备完成")
+  }
+
   /// 像素对齐的小范围保留细节，转向前后的裁剪框往返不漂移；无效范围明确拒绝。
   @Test func cropGeometryAndQuarterTurnsRemainReversible() async throws {
     let folder = try directory()

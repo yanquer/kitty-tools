@@ -36,6 +36,7 @@ struct ShotCompositionInsertion: Equatable {
   var preparing = false
   var rendering = false
   var exporting = false
+  private(set) var preparingAnnotation = false
   var error: String?
   var exported: URL? { didSet { exportedImageCount = nil } }
   private(set) var exportedImageCount: Int?
@@ -47,14 +48,18 @@ struct ShotCompositionInsertion: Equatable {
   private var cropTask: Task<Void, Never>?
   private var thumbnailWorker: Task<Void, Never>?
   private var pendingThumbnails: [UUID: ShotComposition.Source] = [:]
-  var canImport: Bool { !preparing && !exporting && !choosing && cropTarget == nil }
+  var canImport: Bool {
+    !preparing && !exporting && !preparingAnnotation && !choosing && cropTarget == nil
+  }
   var outputPlan: ShotComposition.Plan? {
     try? ShotComposition.plan(sizes: sources.map { try $0.adjustedSize() }, options: options)
   }
   @ObservationIgnored var close: () -> Void = {}
+  @ObservationIgnored var openAnnotation: (CGImage) -> Bool = { _ in false }
   private var loadingTask: Task<Void, Never>?
   private var previewTask: Task<Void, Never>?
   private var exportTask: Task<Void, Never>?
+  private var annotationTask: Task<Void, Never>?
   private var generation = 0
   private var filePanel: NSSavePanel?
   private var undoEdits: [[ShotComposition.Source]] = []
@@ -514,11 +519,64 @@ struct ShotCompositionInsertion: Equatable {
     }
   }
 
+  /// 合版输出和成品标注都要求已有可用的预览及完整的合版输入。
+  var canExportComposition: Bool {
+    canImport && reorderingID == nil && !rendering && preview != nil && sources.count >= 2
+  }
+
+  var canAnnotateComposition: Bool { !pdf && canExportComposition }
+
+  /// 用最终 PNG 的渲染入口准备独立编辑底图，完成前固定这一轮的来源与排版。
+  func annotateComposition() {
+    guard canAnnotateComposition else { return }
+    let sources = sources
+    let options = options
+    let ticket = generation
+    let operation = UUID().uuidString
+    let began = ContinuousClock.now
+    error = nil
+    preparingAnnotation = true
+    Log.storage.notice("拼图成品标注准备开始 operation=\(operation, privacy: .public) count=\(sources.count)")
+    annotationTask = Task { [weak self] in
+      do {
+        let image = try await ShotComposition.render(sources, options: options)
+        guard !Task.isCancelled, let self, generation == ticket else {
+          Log.storage.notice("拼图成品标注准备已取消 operation=\(operation, privacy: .public)")
+          return
+        }
+        annotationTask = nil
+        preparingAnnotation = false
+        if openAnnotation(image) {
+          Log.storage.notice(
+            "拼图成品标注已打开 operation=\(operation, privacy: .public) width=\(image.width) height=\(image.height) elapsed=\(String(describing: began.duration(to: .now)), privacy: .public)"
+          )
+        } else {
+          error = "当前无法打开拼图标注，请稍后再试。"
+          Log.storage.notice("拼图成品标注未打开 operation=\(operation, privacy: .public) stage=handoff")
+        }
+      } catch {
+        guard !Task.isCancelled, let self, generation == ticket else {
+          Log.storage.notice("拼图成品标注准备已取消 operation=\(operation, privacy: .public)")
+          return
+        }
+        annotationTask = nil
+        preparingAnnotation = false
+        self.error = error.localizedDescription
+        let underlying = error as NSError
+        let reason = sources.reduce(error.localizedDescription) { value, source in
+          guard !source.label.isEmpty else { return value }
+          return value.replacingOccurrences(of: source.label, with: "当前图片")
+        }
+        Log.storage.error(
+          "拼图成品标注准备失败 operation=\(operation, privacy: .public) stage=render domain=\(underlying.domain, privacy: .public) code=\(underlying.code) reason=\(String(reason.prefix(240)), privacy: .public)"
+        )
+      }
+    }
+  }
+
   /// 用户确认保存路径后固定参数执行导出；取消关闭不会显示成功或留下半成品。
   func save() {
-    guard canImport, reorderingID == nil, !rendering, preview != nil, sources.count >= 2 else {
-      return
-    }
+    guard canExportComposition else { return }
     exporting = true
     error = nil
     exported = nil
@@ -629,9 +687,11 @@ struct ShotCompositionInsertion: Equatable {
     loadingTask?.cancel()
     previewTask?.cancel()
     exportTask?.cancel()
+    annotationTask?.cancel()
     loadingTask = nil
     previewTask = nil
     exportTask = nil
+    annotationTask = nil
     sources = []
     previewSourceID = nil
     for directory in directories { ImageImport.discard(directory) }
@@ -642,6 +702,7 @@ struct ShotCompositionInsertion: Equatable {
     preparing = false
     rendering = false
     exporting = false
+    preparingAnnotation = false
     error = nil
     exported = nil
   }
@@ -664,7 +725,13 @@ final class ShotCompositionPanel {
   }
 
   /// 依赖当前截图历史，不自行创建数据库或读取其他用户目录。
-  init(history: ShotHistory) { self.history = history }
+  init(history: ShotHistory, openAnnotation: @escaping (CGImage, NSScreen?) -> Bool) {
+    self.history = history
+    model.openAnnotation = { [weak self] image in
+      guard let panel = self?.surface.panel, panel.isVisible else { return false }
+      return openAnnotation(image, panel.screen)
+    }
+  }
 
   /// 以当前多选内容打开面板，加载阶段明确提示。
   func show(_ items: [ShotHistory.Item]) {
@@ -770,8 +837,16 @@ struct ShotCompositionView: View {
         if model.pdf, !model.sources.isEmpty {
           pageNavigation
         } else if !model.sources.isEmpty, let plan = model.outputPlan {
-          Text("输出：\(Int(plan.size.width)) × \(Int(plan.size.height)) 像素")
-            .font(.system(size: 12)).monospacedDigit().foregroundStyle(.secondary)
+          HStack(spacing: 10) {
+            Text("输出：\(Int(plan.size.width)) × \(Int(plan.size.height)) 像素")
+              .font(.system(size: 12)).monospacedDigit().foregroundStyle(.secondary)
+            Button(
+              "标注拼图…", systemImage: "pencil.tip.crop.circle", action: model.annotateComposition
+            )
+            .controlSize(.small)
+            .help("在拼图成品上添加标注，可直接复制或保存")
+            .disabled(!model.canAnnotateComposition)
+          }
           if plan.isLimited {
             Text(
               "受尺寸或像素预算限制，输出已按比例缩小；目标宽度 \(model.options.requestedWidth.map { String(Int($0)) } ?? "自动")。"
@@ -1064,6 +1139,9 @@ struct ShotCompositionView: View {
       if model.exporting {
         ProgressView().controlSize(.small)
         Text("正在导出…").font(.system(size: 12))
+      } else if model.preparingAnnotation {
+        ProgressView().controlSize(.small)
+        Text("正在准备拼图标注…").font(.system(size: 12))
       } else if let error = model.error {
         Text(error).font(.system(size: 12)).foregroundStyle(Style.danger).lineLimit(3)
       } else if let url = model.exported {
@@ -1081,9 +1159,7 @@ struct ShotCompositionView: View {
         .disabled(!model.canExportIndividualPNGs)
       Button(model.pdf ? "导出 PDF…" : "导出 PNG…", action: model.save)
         .buttonStyle(BrandButtonStyle())
-        .disabled(
-          !model.canImport || model.reorderingID != nil || model.rendering || model.preview == nil
-            || model.sources.count < 2)
+        .disabled(!model.canExportComposition)
     }
   }
 }

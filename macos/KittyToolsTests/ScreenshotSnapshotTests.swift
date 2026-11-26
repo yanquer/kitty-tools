@@ -2420,6 +2420,65 @@ struct ScreenshotSnapshotTests {
     }
   }
 
+  /// 屏外按下实际入口，核对交给标注的最终尺寸，并保存一张带箭头与说明的假成品。
+  @Test(.enabled(if: directory != nil)) func renderCompositionAnnotation() async throws {
+    let folder = FileManager.default.temporaryDirectory.appending(
+      path: "kitty-compose-annotation-shots-\(UUID())")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let model = ShotCompositionModel()
+    defer {
+      model.clear()
+      try? FileManager.default.removeItem(at: folder)
+    }
+    let desktop = try Self.desktop()
+    let files = try ["调整前.png", "调整后.png"].enumerated().map { index, name in
+      let url = folder.appending(path: name)
+      let picture = try #require(
+        desktop.cropping(to: CGRect(x: index * 380, y: 20, width: 1120, height: 720)))
+      try write(picture, to: url.path)
+      return url
+    }
+    model.importFiles(files)
+    try await waitForComposition(model)
+    model.options = .init(
+      layout: .horizontal, spacing: 48, margin: 24, widthMode: .custom, customWidth: 1600)
+    model.refreshPreview()
+    try await waitForComposition(model)
+    var received: CGImage?
+    model.openAnnotation = {
+      received = $0
+      return true
+    }
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 820, height: 620),
+      name: "composition-annotate-entry"
+    ) { host in
+      let button = try #require(compositionButton(in: host, label: "标注拼图…"))
+      #expect(button() == true && model.preparingAnnotation)
+    }
+    for _ in 0..<200 where model.preparingAnnotation {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    let base = try #require(received)
+    #expect(base.width == 1600 && model.preview?.width == 1000)
+    let canvas = ScrollCanvas(image: base, scale: 1)
+    let y = CGFloat(base.height) * 0.3
+    canvas.annotations = [
+      .init(
+        shape: .arrow(from: CGPoint(x: 560, y: y), to: CGPoint(x: 1040, y: y)),
+        style: .init(color: .red, weight: .large)),
+      .init(
+        shape: .text("调整前 → 调整后", origin: CGPoint(x: 740, y: y + 56)),
+        style: .init(color: .red, weight: .large, option: 2, fontSize: 24)),
+    ]
+    let result = try #require(canvas.composedStrictly())
+    let output = try #require(Self.directory)
+    try write(result, to: "\(output)/shot-composition-annotated-result.png")
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 720, height: 520),
+      name: "composition-annotate-return", dark: true)
+  }
+
   /// 等待实际导入与预览，不把尚未产生图片的加载界面当作完成。
   private func waitForComposition(_ model: ShotCompositionModel) async throws {
     for _ in 0..<400
