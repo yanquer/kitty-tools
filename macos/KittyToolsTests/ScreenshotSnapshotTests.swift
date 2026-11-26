@@ -1940,6 +1940,156 @@ struct ScreenshotSnapshotTests {
       name: "composition-width-limited")
   }
 
+  /// 核对插入线和撤销按钮在面板中的最终位置，调用真实的本进程按钮动作。
+  @Test(.enabled(if: directory != nil)) func renderCompositionHistory() async throws {
+    let folder = FileManager.default.temporaryDirectory.appending(
+      path: "kitty-compose-order-shots-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let model = ShotCompositionModel()
+    defer {
+      model.clear()
+      try? FileManager.default.removeItem(at: folder)
+    }
+    let desktop = try Self.desktop()
+    let urls = try (0..<3).map { index in
+      let name = index == 0 ? "项目评审-较长文件名排序与撤销核对.png" : "参考图-\(index).png"
+      let url = folder.appending(path: name)
+      let box = CGRect(x: index * 360, y: 0, width: 760, height: 520)
+      try write(try #require(desktop.cropping(to: box)), to: url.path)
+      return url
+    }
+    model.pdf = true
+    model.importFiles(urls)
+    try await waitForComposition(model)
+    let order = model.sources.map(\.id)
+    model.showPage(2)
+    try await waitForComposition(model)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 820, height: 620),
+      name: "composition-reorder-insertion"
+    ) { host in
+      try compositionDrag(in: host, from: order[2], to: order[0], commit: false)
+      #expect(model.reorderInsertion == .init(anchor: order[0], before: true))
+      #expect(model.sources.map(\.id) == order && host.window?.isKeyWindow == false)
+    }
+    model.cancelReorder()
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 820, height: 620),
+      name: "composition-reorder-commit"
+    ) { host in
+      try compositionDrag(in: host, from: order[2], to: order[0], commit: true)
+      #expect(model.sources.first?.id == order[2] && model.previewPage == 0)
+    }
+    try await waitForComposition(model)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 820, height: 620),
+      name: "composition-reorder-undo"
+    ) { host in
+      let action = compositionButton(in: host, label: "撤销拼图编辑")
+      #expect(action != nil && action?() == true)
+      #expect(model.sources.map(\.id) == order && model.previewPage == 2)
+    }
+    try await waitForComposition(model)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 720, height: 520),
+      name: "composition-reorder-redo", dark: true
+    ) { host in
+      let action = compositionButton(in: host, label: "重做拼图编辑")
+      #expect(action != nil && action?() == true)
+      #expect(model.sources.first?.id == order[2] && model.previewPage == 0)
+    }
+    try await waitForComposition(model)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 720, height: 520),
+      name: "composition-reorder-compact", dark: true)
+  }
+
+  /// 将构造的鼠标序列直接交给屏外原生缩略图，不向系统事件队列发送事件。
+  private func compositionDrag(in host: NSView, from: UUID, to: UUID, commit: Bool) throws {
+    let source = try #require(compositionGrip(in: host, id: from))
+    let target = try #require(compositionGrip(in: host, id: to))
+    let start = source.convert(CGPoint(x: source.bounds.midX, y: source.bounds.midY), to: nil)
+    let end = target.convert(CGPoint(x: target.bounds.midX, y: target.bounds.midY - 8), to: nil)
+    source.mouseDown(with: try compositionMouse(.leftMouseDown, at: start, in: host))
+    source.mouseDragged(with: try compositionMouse(.leftMouseDragged, at: end, in: host))
+    if commit { source.mouseUp(with: try compositionMouse(.leftMouseUp, at: end, in: host)) }
+  }
+
+  /// 构造仅供本进程视图直接调用的 AppKit 输入事件。
+  private func compositionMouse(_ type: NSEvent.EventType, at point: CGPoint, in host: NSView)
+    throws -> NSEvent
+  {
+    try #require(
+      NSEvent.mouseEvent(
+        with: type, location: point, modifierFlags: [], timestamp: 0,
+        windowNumber: host.window?.windowNumber ?? 0, context: nil, eventNumber: 1,
+        clickCount: 1, pressure: 1))
+  }
+
+  /// 真实滚动容器在指针停在边缘时继续移动，直到第 12 张可作为落点。
+  @Test(.enabled(if: directory != nil)) func renderCompositionEdgeScroll() async throws {
+    let folder = FileManager.default.temporaryDirectory.appending(
+      path: "kitty-compose-scroll-shots-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let model = ShotCompositionModel()
+    defer {
+      model.clear()
+      try? FileManager.default.removeItem(at: folder)
+    }
+    let url = folder.appending(path: "参考图.png")
+    let pixels = try #require(
+      Self.desktop().cropping(to: CGRect(x: 0, y: 0, width: 760, height: 520)))
+    try write(pixels, to: url.path)
+    let original = try await ShotComposition.source(id: UUID(), url: url, label: "参考图")
+    model.sources = (1...12).map { index in
+      ShotComposition.Source(
+        id: UUID(), url: original.url, size: original.size, label: "参考图 \(index).png",
+        thumbnail: original.thumbnail)
+    }
+    model.pdf = true
+    model.showPage(0)
+    try await waitForComposition(model)
+    let size = NSSize(width: 820, height: 620)
+    let host = NSHostingView(
+      rootView: ShotCompositionView(model: model)
+        .frame(width: size.width, height: size.height).background(
+          Color(nsColor: .windowBackgroundColor)))
+    host.frame = CGRect(origin: .zero, size: size)
+    let window = offscreen(host)
+    window.orderFront(nil)
+    defer { window.orderOut(nil) }
+    try await Task.sleep(for: .milliseconds(200))
+    let order = model.sources.map(\.id)
+    let grip = try #require(compositionGrip(in: host, id: order[0]))
+    let scroll = try #require(grip.enclosingScrollView)
+    let clip = scroll.contentView.convert(scroll.contentView.bounds, to: nil)
+    let center = CGPoint(x: grip.bounds.midX, y: grip.bounds.midY)
+    let start = grip.convert(center, to: nil)
+    let edge = CGPoint(x: start.x, y: clip.minY + 10)
+    #expect(clip.contains(start) && window.canBecomeKey == false)
+    grip.mouseDown(with: try compositionMouse(.leftMouseDown, at: start, in: host))
+    grip.mouseDragged(with: try compositionMouse(.leftMouseDragged, at: edge, in: host))
+    let target = ShotCompositionInsertion(anchor: order[11], before: false)
+    for _ in 0..<200 where model.reorderInsertion != target {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    try await Task.sleep(for: .milliseconds(150))
+    #expect(grip.convert(center, to: nil).y > start.y + 80)
+    #expect(model.reorderInsertion == target && model.sources.map(\.id) == order)
+    let bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+    host.cacheDisplay(in: host.bounds, to: bitmap)
+    let out = try #require(Self.directory)
+    try write(try #require(bitmap.cgImage), to: "\(out)/shot-composition-reorder-scroll.png")
+    grip.mouseUp(with: try compositionMouse(.leftMouseUp, at: edge, in: host))
+    #expect(model.sources.last?.id == order[0] && model.previewPage == 11 && model.canUndoEdit)
+  }
+
+  /// 通过稳定图片身份定位渲染出来的 AppKit 鼠标目标。
+  private func compositionGrip(in view: NSView, id: UUID) -> ShotCompositionDragView? {
+    if let grip = view as? ShotCompositionDragView, grip.id == id { return grip }
+    return view.subviews.lazy.compactMap { compositionGrip(in: $0, id: id) }.first
+  }
+
   /// 等待实际导入与预览，不把尚未产生图片的加载界面当作完成。
   private func waitForComposition(_ model: ShotCompositionModel) async throws {
     for _ in 0..<400
@@ -1998,7 +2148,7 @@ struct ScreenshotSnapshotTests {
   /// 只在不可成为 key 的屏外窗口中检查布局，背景使用当前系统窗口色。
   private func enhancement(
     _ view: some View, size: NSSize, name: String, dark: Bool = false,
-    prepare: ((NSView) -> Void)? = nil
+    prepare: ((NSView) throws -> Void)? = nil
   ) throws {
     let window = NSWindow(
       contentRect: NSRect(origin: NSPoint(x: -20000, y: -20000), size: size),
@@ -2011,14 +2161,14 @@ struct ScreenshotSnapshotTests {
     window.contentView = host
     window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
     window.orderFront(nil)
+    defer { window.orderOut(nil) }
     for _ in 0..<5 { RunLoop.main.run(until: Date.now.addingTimeInterval(0.1)) }
-    prepare?(host)
+    try prepare?(host)
     RunLoop.main.run(until: Date.now.addingTimeInterval(0.1))
     let bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
     host.cacheDisplay(in: host.bounds, to: bitmap)
     let out = try #require(Self.directory)
     try write(try #require(bitmap.cgImage), to: "\(out)/shot-\(name)\(dark ? "-dark" : "").png")
-    window.orderOut(nil)
   }
 
   private func write(_ image: CGImage, to path: String) throws {

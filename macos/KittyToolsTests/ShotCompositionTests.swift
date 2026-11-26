@@ -388,6 +388,171 @@ struct ShotCompositionTests {
     try #require(!model.rendering, "预览未在测试时限内完成")
   }
 
+  /// 模拟 12 张图跨滚动区拖动，导出后逐项核对 PNG 像素与 PDF 页序。
+  @Test func reorderedAlbumKeepsPreviewAndMatchesBothExports() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    var items: [ShotComposition.Source] = []
+    var colors: [[UInt8]] = []
+    for index in 0..<12 {
+      let picture = try image(
+        CGFloat(index) / 11, 1, size: CGSize(width: 100, height: 32 + 4 * index))
+      colors.append(try pixel(picture, at: CGPoint(x: 50, y: 15)))
+      try await items.append(source(picture, at: folder.appending(path: "原图-\(index).png")))
+    }
+    let model = ShotCompositionModel()
+    defer { model.clear() }
+    model.sources = items
+    model.pdf = true
+    model.options = ShotComposition.Options(spacing: 0, margin: 0, pdfMargin: 0)
+    model.showPage(11)
+    let order = items.map(\.id)
+    let viewport = CGRect(x: 100, y: 100, width: 240, height: 150)
+    let rows = Dictionary(
+      uniqueKeysWithValues: order.enumerated().map { index, id in
+        (id, CGRect(x: 110, y: 100 + 46 * index, width: 210, height: 46))
+      })
+    model.beginReorder(order[11])
+    model.previewReorder(
+      at: ShotCompositionInsertion.at(
+        CGPoint(x: 120, y: 108), viewport: viewport, rows: rows, order: order))
+    #expect(model.reorderInsertion == .init(anchor: order[0], before: true))
+    #expect(model.sources.map(\.id) == order && !model.canUndoEdit)
+    model.previewReorder(
+      at: ShotCompositionInsertion.at(
+        CGPoint(x: 120, y: 92), viewport: viewport, rows: rows, order: order))
+    model.finishReorder()
+    #expect(model.sources.map(\.id) == order && !model.canUndoEdit)
+    model.beginReorder(order[11])
+    model.previewReorder(at: .init(anchor: order[10], before: false))
+    model.finishReorder()
+    #expect(!model.canUndoEdit)
+    model.beginReorder(order[11])
+    model.previewReorder(at: .init(anchor: order[0], before: true))
+    model.finishReorder()
+    let expected = [items[11]] + items.dropLast()
+    #expect(model.sources.map(\.id) == expected.map(\.id))
+    #expect(model.previewSourceID == order[11] && model.previewPage == 0)
+    model.undoEdit()
+    #expect(model.sources.map(\.id) == order && model.previewPage == 11)
+    model.redoEdit()
+    try await settlePreview(model)
+    #expect(model.previewSourceID == order[11] && model.previewPage == 0)
+    let png = folder.appending(path: "调整顺序.png")
+    let pdf = folder.appending(path: "调整顺序.pdf")
+    try await ShotComposition.export(model.sources, options: model.options, pdf: false, to: png)
+    try await ShotComposition.export(model.sources, options: model.options, pdf: true, to: pdf)
+    let input = try #require(CGImageSourceCreateWithURL(png as CFURL, nil))
+    let composite = try #require(CGImageSourceCreateImageAtIndex(input, 0, nil))
+    let document = try #require(CGPDFDocument(pdf as CFURL))
+    #expect(document.numberOfPages == items.count)
+    var top = CGFloat(composite.height)
+    for (index, source) in expected.enumerated() {
+      let page = try #require(document.page(at: index + 1))
+      #expect(page.getBoxRect(.mediaBox).size == source.size)
+      let color = try pixel(composite, at: CGPoint(x: 50, y: top - source.size.height / 2))
+      let reference = colors[index == 0 ? 11 : index - 1]
+      #expect(
+        zip(color, reference).allSatisfy { abs(Int($0) - Int($1)) <= 3 },
+        "第 \(index + 1) 张读取 \(color)，原图像素 \(reference)")
+      top -= source.size.height
+    }
+  }
+
+  /// 从真实裁剪草稿开始验证每一步恢复，同时隔离焦点在输入框里的文本撤销。
+  @Test func historyRestoresCropRotationAndRemovedImage() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let first = try await source(image(1, 0), at: folder.appending(path: "first.png"))
+    let second = try await source(image(0, 1), at: folder.appending(path: "second.png"))
+    let model = ShotCompositionModel()
+    defer { model.clear() }
+    model.sources = [first, second]
+    model.beginCrop(second.id)
+    try await settleCrop(model)
+    model.applyCrop()
+    #expect(!model.canUndoEdit)
+    model.beginCrop(second.id)
+    try await settleCrop(model)
+    let draft = try #require(model.cropDraft)
+    draft.selection = CGRect(x: 0, y: 0, width: 0.5, height: 1)
+    model.applyCrop()
+    let crop = model.sources[1].edit
+    #expect(crop.crop.width == 0.5)
+    model.rotate(second.id, by: 1)
+    let rotated = model.sources[1].edit
+    model.restore(second.id)
+    #expect(model.sources[1].edit.isIdentity)
+    model.undoEdit()
+    #expect(model.sources[1].edit == rotated)
+    model.remove(second.id)
+    #expect(model.sources.map(\.id) == [first.id] && !model.canRedoEdit)
+    model.undoEdit()
+    #expect(model.sources[1].id == second.id && model.sources[1].edit == rotated)
+    model.redoEdit()
+    #expect(model.sources.map(\.id) == [first.id])
+    model.undoEdit()
+
+    let window = NSWindow(
+      contentRect: CGRect(x: -20000, y: -20000, width: 200, height: 100),
+      styleMask: .borderless, backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    let field = NSTextView(frame: window.contentLayoutRect)
+    window.contentView = field
+    #expect(window.makeFirstResponder(field))
+    let undo = try #require(
+      NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+        windowNumber: window.windowNumber, context: nil, characters: "z",
+        charactersIgnoringModifiers: "z",
+        isARepeat: false, keyCode: UInt16(kVK_ANSI_Z)))
+    #expect(!model.handleHistoryShortcut(undo, in: window) && model.sources[1].edit == rotated)
+    #expect(window.makeFirstResponder(nil))
+    #expect(model.handleHistoryShortcut(undo, in: window) && model.sources[1].edit == crop)
+    model.undoEdit()
+    #expect(!model.canUndoEdit && model.sources[1].edit.isIdentity)
+    model.redoEdit()
+    #expect(model.sources[1].edit == crop)
+    try await settlePreview(model)
+    #expect(model.preview != nil && model.error == nil)
+  }
+
+  /// 文件导入失败保留在手的编辑记录，成功替换后设立新基线，关闭时清空会话。
+  @Test func historyRespectsImportAndSessionBoundaries() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let first = try await source(image(1, 0), at: folder.appending(path: "first.png"))
+    let second = try await source(image(0, 1), at: folder.appending(path: "second.png"))
+    let model = ShotCompositionModel()
+    defer { model.clear() }
+    model.importFiles([first.url, second.url])
+    try await settleImport(model)
+    let firstID = try #require(model.sources.first?.id)
+    model.rotate(firstID, by: 1)
+    model.rotate(firstID, by: 1)
+    model.undoEdit()
+    model.importFiles([folder.appending(path: "missing.png")], replacing: firstID)
+    try await settleImport(model)
+    #expect(model.error != nil && model.canUndoEdit && model.canRedoEdit)
+    #expect(model.sources.first?.edit.turns == 1)
+    model.importFiles([second.url], replacing: firstID)
+    try await settleImport(model)
+    #expect(model.error == nil && !model.canUndoEdit && !model.canRedoEdit)
+    #expect(model.sources.first?.id == firstID && model.sources.first?.edit.isIdentity == true)
+    for _ in 0..<31 { model.rotate(firstID, by: 1) }
+    for _ in 0..<30 { model.undoEdit() }
+    #expect(!model.canUndoEdit && model.canRedoEdit && model.sources.first?.edit.turns == 1)
+    model.beginReorder(firstID)
+    model.clear()
+    #expect(model.reorderingID == nil && !model.canUndoEdit && !model.canRedoEdit)
+  }
+
+  /// 等到文件导入提交或明确失败，避免把仍在进行的任务计作结果。
+  private func settleImport(_ model: ShotCompositionModel) async throws {
+    for _ in 0..<300 where model.preparing { try await Task.sleep(for: .milliseconds(20)) }
+    try #require(!model.preparing, "图片导入未在测试时限内完成")
+  }
+
   /// 单张裁剪和旋转同时进入 PNG、PDF 与缩略图，原文件内容保持不变。
   @Test func perImageEditsReachBothExportsWithoutChangingFiles() async throws {
     let folder = try directory()

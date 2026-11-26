@@ -1,9 +1,26 @@
 // 截图历史多选后的简单拼图面板：调整顺序、横竖拼接与网格，或每图一页导出 PDF。
 
 import AppKit
+import Carbon.HIToolbox
 import OSLog
 import SwiftUI
 import UniformTypeIdentifiers
+
+/// 一次本地拖动的插入位置，按可见行的上半或下半定位，不依赖文件路径。
+struct ShotCompositionInsertion: Equatable {
+  let anchor: UUID
+  let before: Bool
+
+  /// 只在滚动区与有效图片行重叠时接受落点，外部松手不改变顺序。
+  static func at(
+    _ point: CGPoint, viewport: CGRect, rows: [UUID: CGRect], order: [UUID]
+  ) -> Self? {
+    guard viewport.contains(point),
+      let id = order.first(where: { rows[$0]?.contains(point) == true }), let row = rows[id]
+    else { return nil }
+    return Self(anchor: id, before: point.y < row.midY)
+  }
+}
 
 /// 面板只持有文件快照与缩小的预览，原图逐张解码，不跨任务缓存。
 @Observable final class ShotCompositionModel {
@@ -39,6 +56,12 @@ import UniformTypeIdentifiers
   private var exportTask: Task<Void, Never>?
   private var generation = 0
   private var filePanel: NSSavePanel?
+  private var undoEdits: [[ShotComposition.Source]] = []
+  private var redoEdits: [[ShotComposition.Source]] = []
+  private(set) var reorderingID: UUID?
+  private(set) var reorderInsertion: ShotCompositionInsertion?
+  var canUndoEdit: Bool { canImport && reorderingID == nil && !undoEdits.isEmpty }
+  var canRedoEdit: Bool { canImport && reorderingID == nil && !redoEdits.isEmpty }
 
   /// 先固定用户提交的那批图片，后续预览和导出始终读取同一批已合成标注的快照。
   func prepare(_ items: [ShotHistory.Item], history: ShotHistory) {
@@ -96,7 +119,7 @@ import UniformTypeIdentifiers
 
   /// 添加或替换整批成功才改变列表；失败保持原图片、原顺序与预览。
   func importFiles(_ urls: [URL], replacing id: UUID? = nil) {
-    guard canImport, !urls.isEmpty else { return }
+    guard canImport, reorderingID == nil, !urls.isEmpty else { return }
     let count = id == nil ? sources.count + urls.count : sources.count
     guard count <= ShotComposition.maximumCount,
       id == nil || (urls.count == 1 && sources.contains(where: { $0.id == id }))
@@ -118,6 +141,8 @@ import UniformTypeIdentifiers
           return
         }
         adopt(batch, replacing: id)
+        undoEdits.removeAll()
+        redoEdits.removeAll()
         preparing = false
         refreshPreview()
       } catch {
@@ -130,7 +155,7 @@ import UniformTypeIdentifiers
 
   /// 文件选择由用户按钮发起；取消或面板已关闭时不改变当前会话。
   func chooseFiles(replacing id: UUID? = nil) {
-    guard canImport else { return }
+    guard canImport, reorderingID == nil else { return }
     choosing = true
     let ticket = generation
     Task { [weak self] in
@@ -151,9 +176,10 @@ import UniformTypeIdentifiers
 
   /// 移除只影响本次输出，不删除外部原文件或截图历史。
   func remove(_ id: UUID) {
-    guard canImport, sources.contains(where: { $0.id == id }) else { return }
-    let index = sources.firstIndex { $0.id == id } ?? 0
-    sources.removeAll { $0.id == id }
+    guard canImport, let index = sources.firstIndex(where: { $0.id == id }) else { return }
+    recordEdit()
+    pendingThumbnails.removeValue(forKey: id)
+    sources.remove(at: index)
     if previewSourceID == id {
       previewSourceID = sources.isEmpty ? nil : sources[min(index, sources.count - 1)].id
     }
@@ -206,18 +232,137 @@ import UniformTypeIdentifiers
     refreshPreview(contentsChanged: false)
   }
 
-  /// 用明确的上移、下移按钮调整顺序，同时保留稳定图片身份。
+  /// 上下按钮与拖动共用同一排序入口，保持原来正在看的 PDF 图片。
   func move(_ id: UUID, by step: Int) {
     guard canImport, let from = sources.firstIndex(where: { $0.id == id }) else { return }
-    let to = from + step
-    guard sources.indices.contains(to) else { return }
-    sources.swapAt(from, to)
+    let (to, overflow) = from.addingReportingOverflow(step)
+    guard !overflow, to != from, sources.indices.contains(to) else { return }
+    reorder(id, to: ShotCompositionInsertion(anchor: sources[to].id, before: to < from))
+  }
+
+  /// 开始会话内拖动，仅记录身份；直到有效落点提交才改变列表。
+  func beginReorder(_ id: UUID) {
+    guard canImport, sources.count > 1, sources.contains(where: { $0.id == id }) else { return }
+    reorderingID = id
+    reorderInsertion = nil
+  }
+
+  /// 只显示有实际变化的插入线，包含拖离面板、落回原位或目标失效的情况。
+  func previewReorder(at insertion: ShotCompositionInsertion?) {
+    guard let id = reorderingID else { return }
+    let valid = insertion.flatMap { target in moveIndices(id, to: target).map { _ in target } }
+    if reorderInsertion != valid { reorderInsertion = valid }
+  }
+
+  /// 一次松手最多提交一次排序，插入位置按图片身份重新核对。
+  func finishReorder() {
+    let id = reorderingID
+    let target = reorderInsertion
+    cancelReorder()
+    if let id, let target { reorder(id, to: target) }
+  }
+
+  /// 清理临时拖动状态，不记入历史。
+  func cancelReorder() {
+    reorderingID = nil
+    reorderInsertion = nil
+  }
+
+  /// 将行间位置换算为移除来源后的插入索引，拒绝原位和失效目标。
+  private func moveIndices(_ id: UUID, to insertion: ShotCompositionInsertion) -> (Int, Int)? {
+    guard let from = sources.firstIndex(where: { $0.id == id }),
+      let anchor = sources.firstIndex(where: { $0.id == insertion.anchor })
+    else { return nil }
+    let slot = anchor + (insertion.before ? 0 : 1)
+    let to = slot > from ? slot - 1 : slot
+    return to == from ? nil : (from, to)
+  }
+
+  /// 按插入边界移动单张图片，中间各张保持相对顺序。
+  private func reorder(_ id: UUID, to insertion: ShotCompositionInsertion) {
+    guard canImport, let (from, to) = moveIndices(id, to: insertion) else { return }
+    recordEdit()
+    let source = sources.remove(at: from)
+    sources.insert(source, at: to)
     refreshPreview()
+    Log.storage.notice(
+      "拼图排序采用 source=\(id.uuidString, privacy: .public) from=\(from + 1) to=\(to + 1)")
+  }
+
+  /// 历史共享会话副本与原始小图，跳过可重新生成的调整缓存。
+  private func editSnapshot() -> [ShotComposition.Source] {
+    sources.map {
+      ShotComposition.Source(
+        id: $0.id, url: $0.url, size: $0.size, label: $0.label, thumbnail: $0.thumbnail,
+        edit: $0.edit)
+    }
+  }
+
+  /// 设置撤销上限，新提交的编辑会结束原来的重做分支。
+  private func recordEdit() {
+    cancelReorder()
+    undoEdits.append(editSnapshot())
+    if undoEdits.count > 30 { undoEdits.removeFirst() }
+    redoEdits.removeAll()
+  }
+
+  /// 撤销当前拼图会话的最后一次列表编辑。
+  func undoEdit() {
+    guard canUndoEdit, let snapshot = undoEdits.popLast() else { return }
+    redoEdits.append(editSnapshot())
+    restoreEdit(snapshot, redo: false)
+  }
+
+  /// 重做刚撤销的列表编辑。
+  func redoEdit() {
+    guard canRedoEdit, let snapshot = redoEdits.popLast() else { return }
+    undoEdits.append(editSnapshot())
+    restoreEdit(snapshot, redo: true)
+  }
+
+  /// 保留同版本缩略图和仍在列表中的预览页，只为恢复的不同版本发出新请求。
+  private func restoreEdit(_ snapshot: [ShotComposition.Source], redo: Bool) {
+    let current = Dictionary(uniqueKeysWithValues: sources.map { ($0.id, $0) })
+    let index = previewPage
+    sources = snapshot.map { source in
+      if let previous = current[source.id], previous.url == source.url, previous.edit == source.edit
+      {
+        return previous
+      }
+      return source
+    }
+    if !sources.contains(where: { $0.id == previewSourceID }) {
+      previewSourceID = sources.isEmpty ? nil : sources[min(index, sources.count - 1)].id
+    }
+    pendingThumbnails.removeAll()
+    for source in sources where !source.edit.isIdentity && source.thumbnailEdit != source.edit {
+      requestThumbnail(source.id)
+    }
+    refreshPreview()
+    Log.storage.notice("拼图编辑历史 redo=\(redo) count=\(self.sources.count)")
+  }
+
+  /// 局部快捷键交给当前面板；自定义宽度输入时仍由原来的字段撤销栈处理。
+  func handleHistoryShortcut(_ event: NSEvent, in window: NSWindow) -> Bool {
+    let flags = event.modifierFlags.intersection([.command, .shift, .control, .option])
+    guard !(window.firstResponder is NSTextView), Int(event.keyCode) == kVK_ANSI_Z,
+      flags == .command || flags == [.command, .shift]
+    else { return false }
+    if flags.contains(.shift) {
+      guard canRedoEdit else { return false }
+      redoEdit()
+    } else {
+      guard canUndoEdit else { return false }
+      undoEdit()
+    }
+    return true
   }
 
   /// 只加载当前图片的有界整图预览，取消或关闭后不回填旧编辑器。
   func beginCrop(_ id: UUID) {
-    guard canImport, let source = sources.first(where: { $0.id == id }) else { return }
+    guard canImport, reorderingID == nil, let source = sources.first(where: { $0.id == id }) else {
+      return
+    }
     cropTask?.cancel()
     cropTarget = id
     cropDraft = nil
@@ -255,6 +400,11 @@ import UniformTypeIdentifiers
     }
     do {
       let edit = try draft.appliedEdit()
+      guard edit != sources[index].edit else {
+        cancelCrop()
+        return
+      }
+      recordEdit()
       sources[index].edit = edit
       requestThumbnail(sources[index].id)
       if pdf { previewSourceID = sources[index].id }
@@ -284,7 +434,10 @@ import UniformTypeIdentifiers
 
   /// 单张正交旋转仅修改元数据，PNG 与 PDF 后续读取同一调整结果。
   func rotate(_ id: UUID, by step: Int) {
-    guard canImport, let index = sources.firstIndex(where: { $0.id == id }) else { return }
+    guard canImport, step % 4 != 0, let index = sources.firstIndex(where: { $0.id == id }) else {
+      return
+    }
+    recordEdit()
     sources[index].edit.turns = (sources[index].edit.turns + step % 4 + 4) % 4
     requestThumbnail(id)
     if pdf { previewSourceID = id }
@@ -295,7 +448,10 @@ import UniformTypeIdentifiers
 
   /// 恢复读取会话中的未修改副本，同时清除裁剪与旋转，不重新读取外部原文件。
   func restore(_ id: UUID) {
-    guard canImport, let index = sources.firstIndex(where: { $0.id == id }) else { return }
+    guard canImport, let index = sources.firstIndex(where: { $0.id == id }),
+      !sources[index].edit.isIdentity
+    else { return }
+    recordEdit()
     sources[index].edit = .init()
     sources[index].editedThumbnail = nil
     sources[index].thumbnailEdit = nil
@@ -358,7 +514,9 @@ import UniformTypeIdentifiers
 
   /// 用户确认保存路径后固定参数执行导出；取消关闭不会显示成功或留下半成品。
   func save() {
-    guard canImport, !rendering, preview != nil, sources.count >= 2 else { return }
+    guard canImport, reorderingID == nil, !rendering, preview != nil, sources.count >= 2 else {
+      return
+    }
     exporting = true
     error = nil
     exported = nil
@@ -399,6 +557,9 @@ import UniformTypeIdentifiers
   func clear() {
     generation &+= 1
     cancelCrop()
+    cancelReorder()
+    undoEdits.removeAll()
+    redoEdits.removeAll()
     thumbnailWorker?.cancel()
     thumbnailWorker = nil
     pendingThumbnails = [:]
@@ -435,6 +596,10 @@ final class ShotCompositionPanel {
       size: NSSize(width: 820, height: 620), autoHide: .clickOutside, isPinned: { true },
       content: ShotCompositionView(model: model))
     panel.onHide = { [weak self] in self?.model.clear() }
+    panel.keyEquivalentHandler = { [weak self, weak panel] event in
+      guard let self, let panel else { return false }
+      return model.handleHistoryShortcut(event, in: panel)
+    }
     return panel
   }
 
@@ -466,15 +631,24 @@ final class ShotCompositionPanel {
 struct ShotCompositionView: View {
   @Bindable var model: ShotCompositionModel
   @State private var dropTargeted = false
+  @State private var rowFrames: [UUID: CGRect] = [:]
+  @State private var viewport = CGRect.null
+  @State private var scrollPosition = ScrollPosition()
+  @State private var scrollOffset: CGFloat = 0
+  @State private var dragPoint: CGPoint?
 
   var body: some View {
     VStack(spacing: 0) {
       HStack {
-        Label("拼图与 PDF", systemImage: "square.grid.2x2").font(.headline)
+        Label("拼图与 PDF", systemImage: "square.grid.2x2").labelStyle(.titleAndIcon).font(.headline)
         Spacer()
+        Button("撤销拼图编辑", systemImage: "arrow.uturn.backward", action: model.undoEdit)
+          .disabled(!model.canUndoEdit).help("撤销拼图编辑（⌘Z）")
+        Button("重做拼图编辑", systemImage: "arrow.uturn.forward", action: model.redoEdit)
+          .disabled(!model.canRedoEdit).help("重做拼图编辑（⇧⌘Z）")
         Button("关闭", systemImage: "xmark", action: model.close)
-          .labelStyle(.iconOnly).buttonStyle(.plain).help("关闭（Esc）")
-      }.padding(16)
+          .help("关闭（Esc）")
+      }.labelStyle(.iconOnly).buttonStyle(.plain).padding(16)
       Hairline()
       HStack(spacing: 0) {
         preview.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -483,7 +657,7 @@ struct ShotCompositionView: View {
               .stroke(dropTargeted ? Style.brand : .clear, lineWidth: 2).padding(8)
           }
           .dropDestination(for: URL.self) { urls, _ in
-            guard model.canImport, !urls.isEmpty else { return false }
+            guard model.canImport, model.reorderingID == nil, !urls.isEmpty else { return false }
             model.importFiles(urls)
             return true
           } isTargeted: {
@@ -497,6 +671,9 @@ struct ShotCompositionView: View {
     }
     .onChange(of: model.options) { _, _ in model.refreshPreview() }
     .onChange(of: model.pdf) { _, _ in model.refreshPreview() }
+    .onChange(of: model.reorderingID) { _, id in
+      if id == nil { dragPoint = nil }
+    }
     .appAccent()
   }
 
@@ -608,18 +785,102 @@ struct ShotCompositionView: View {
           Text("图片 \(model.sources.count)/20").font(.system(size: 13, weight: .semibold))
           Spacer()
           Button("添加…", systemImage: "plus") { model.chooseFiles() }
-            .disabled(model.sources.count >= ShotComposition.maximumCount)
+            .disabled(
+              model.reorderingID != nil || model.sources.count >= ShotComposition.maximumCount)
         }
-        VStack(spacing: 10) {
-          ForEach(model.sources) { source in orderRow(source) }
+        VStack(spacing: 0) {
+          ForEach(model.sources) { source in
+            orderRow(source)
+              .padding(.vertical, 5)
+              .overlay(alignment: model.reorderInsertion?.before == true ? .top : .bottom) {
+                if model.reorderInsertion?.anchor == source.id {
+                  Capsule().fill(Style.brand).frame(height: 2)
+                    .allowsHitTesting(false).accessibilityHidden(true)
+                }
+              }
+              .onGeometryChange(for: CGRect.self) {
+                $0.frame(in: .global)
+              } action: { frame in
+                rowFrames[source.id] = frame
+                if let dragPoint { updateReorder(at: dragPoint) }
+              }
+          }
         }
+        .padding(.vertical, model.sources.isEmpty ? 0 : -5)
         Text("最多 20 张静态图片，单张 64 MB，会话累计 256 MB；拼图最长边 8192 像素，超过上限等比缩小。PDF 每页图片最长边 4096 像素。")
           .font(.system(size: 11)).foregroundStyle(.secondary)
           .fixedSize(horizontal: false, vertical: true)
       }
       .padding(16)
     }
+    .scrollPosition($scrollPosition)
+    .onScrollGeometryChange(for: CGFloat.self) { geometry in
+      max(0, geometry.contentOffset.y + geometry.contentInsets.top)
+    } action: { _, y in
+      scrollOffset = y
+    }
+    .onGeometryChange(for: CGRect.self) {
+      $0.frame(in: .global)
+    } action: { frame in
+      viewport = frame
+      if let dragPoint { updateReorder(at: dragPoint) }
+    }
+    .onChange(of: model.sources.map(\.id)) { _, ids in
+      let current = Set(ids)
+      rowFrames = rowFrames.filter { current.contains($0.key) }
+    }
+    .task(id: edgeScrollStep) { await scrollWhileReordering() }
     .disabled(!model.canImport)
+  }
+
+  /// 图片列表靠近滚动区边缘时逐步滚动；到第一张或最后一张时停止。
+  private var edgeScrollStep: CGFloat {
+    guard model.reorderingID != nil, let point = dragPoint, viewport.contains(point),
+      let first = model.sources.first.flatMap({ rowFrames[$0.id] }),
+      let last = model.sources.last.flatMap({ rowFrames[$0.id] }),
+      point.x >= first.minX, point.x <= first.maxX
+    else { return 0 }
+    if point.y <= viewport.minY + 28, first.minY < viewport.minY - 1 { return -12 }
+    if point.y >= viewport.maxY - 28, last.maxY > viewport.maxY + 1 { return 12 }
+    return 0
+  }
+
+  /// 仅在拖动触边时推进滚动，几何更新会重新计算插入线；手势结束随任务一起取消。
+  private func scrollWhileReordering() async {
+    let step = edgeScrollStep
+    guard step != 0 else { return }
+    while !Task.isCancelled, edgeScrollStep == step {
+      scrollPosition.scrollTo(y: max(0, scrollOffset + step))
+      do { try await Task.sleep(for: .milliseconds(25)) } catch { return }
+    }
+  }
+
+  /// 指针和行都使用面板中的同一坐标空间，滚动时用最新几何复算落点。
+  private func updateReorder(at point: CGPoint) {
+    model.previewReorder(
+      at: ShotCompositionInsertion.at(
+        point, viewport: viewport, rows: rowFrames, order: model.sources.map(\.id)))
+  }
+
+  /// 恢复图标与滚动状态，取消手势或离开面板不会提交排序。
+  private func endReorder() {
+    dragPoint = nil
+    model.cancelReorder()
+  }
+
+  /// 把原生把手的局部坐标转换到行几何使用的坐标系，只有松手才提交。
+  private func dragThumbnail(_ id: UUID, at point: CGPoint, ending: Bool) {
+    if !ending, dragPoint == nil { model.beginReorder(id) }
+    guard model.reorderingID == id else {
+      if ending { endReorder() }
+      return
+    }
+    dragPoint = point
+    updateReorder(at: point)
+    if ending {
+      model.finishReorder()
+      endReorder()
+    }
   }
 
   /// 宽度预设和自定义共用唯一生效模式，高度由排版比例决定。
@@ -681,14 +942,7 @@ struct ShotCompositionView: View {
     let index = model.sources.firstIndex(where: { $0.id == source.id }) ?? 0
     return HStack(spacing: 6) {
       Text("\(index + 1)").monospacedDigit().foregroundStyle(.secondary).frame(width: 20)
-      if let thumbnail = source.adjustedThumbnail {
-        Image(decorative: thumbnail, scale: 1).resizable().aspectRatio(contentMode: .fit)
-          .frame(width: 36, height: 36).accessibilityHidden(true)
-      } else {
-        Image(systemName: "photo").frame(width: 36, height: 36).foregroundStyle(.secondary)
-          .accessibilityLabel(source.thumbnailError == nil ? "缩略图尚未就绪" : "缩略图生成失败")
-          .help(source.thumbnailError ?? "正在生成调整后的缩略图")
-      }
+      orderThumbnail(source)
       VStack(alignment: .leading, spacing: 3) {
         Text(source.label).font(.system(size: 12)).lineLimit(2).help(source.label)
         if !source.edit.isIdentity {
@@ -715,6 +969,35 @@ struct ShotCompositionView: View {
     .labelStyle(.iconOnly).buttonStyle(.borderless)
   }
 
+  /// 缩略图既是拖动把手也是状态反馈，键盘与旁白仍可用旁边的上下按钮。
+  private func orderThumbnail(_ source: ShotComposition.Source) -> some View {
+    Group {
+      if let thumbnail = source.adjustedThumbnail {
+        Image(decorative: thumbnail, scale: 1).resizable().aspectRatio(contentMode: .fit)
+          .accessibilityHidden(true)
+      } else {
+        Image(systemName: "photo").foregroundStyle(.secondary)
+          .accessibilityLabel(source.thumbnailError == nil ? "缩略图尚未就绪" : "缩略图生成失败")
+      }
+    }
+    .frame(width: 36, height: 36)
+    .opacity(model.reorderingID == source.id ? 0.45 : 1)
+    .overlay {
+      GeometryReader { proxy in
+        let origin = proxy.frame(in: .global).origin
+        ShotCompositionGrip(
+          id: source.id, enabled: model.sources.count > 1 && model.canImport,
+          help: source.thumbnailError ?? "拖动缩略图调整顺序",
+          move: { point, ending in
+            dragThumbnail(
+              source.id, at: CGPoint(x: origin.x + point.x, y: origin.y + point.y),
+              ending: ending)
+          })
+      }
+      .accessibilityHidden(true)
+    }
+  }
+
   /// 错误、处理中与成功分别展示，保存失败可以在原面板重新尝试。
   private var footer: some View {
     HStack(spacing: 12) {
@@ -734,8 +1017,90 @@ struct ShotCompositionView: View {
       Button(model.pdf ? "导出 PDF…" : "导出 PNG…", action: model.save)
         .buttonStyle(BrandButtonStyle())
         .disabled(
-          !model.canImport || model.rendering || model.preview == nil
+          !model.canImport || model.reorderingID != nil || model.rendering || model.preview == nil
             || model.sources.count < 2)
     }
+  }
+}
+
+/// 缩略图内的拖动把手只处理本窗口鼠标，和系统文件拖入及面板背景移动分开。
+private struct ShotCompositionGrip: NSViewRepresentable {
+  let id: UUID
+  let enabled: Bool
+  let help: String
+  let move: (CGPoint, Bool) -> Void
+
+  /// 为每张图片建立独立鼠标目标，滚动只移动同一个目标的位置。
+  func makeNSView(context: Context) -> ShotCompositionDragView {
+    ShotCompositionDragView(id: id)
+  }
+
+  /// 每次滚动后同步最新坐标和操作许可。
+  func updateNSView(_ view: ShotCompositionDragView, context: Context) {
+    view.enabled = enabled
+    view.toolTip = help
+    view.move = move
+  }
+
+  /// 拆除时只释放 AppKit 状态，面板关闭由模型清理，不能回写正在销毁的 SwiftUI 视图。
+  static func dismantleNSView(_ view: ShotCompositionDragView, coordinator: ()) {
+    view.endTracking()
+    view.move = { _, _ in }
+  }
+}
+
+/// 使用 AppKit 的本地鼠标序列，拖动时即使缩略图滚出可见范围也继续接收事件。
+final class ShotCompositionDragView: NSView {
+  let id: UUID
+  var enabled = false {
+    didSet {
+      if oldValue != enabled { window?.invalidateCursorRects(for: self) }
+    }
+  }
+  var move: (CGPoint, Bool) -> Void = { _, _ in }
+  private var start: CGPoint?
+  private var dragging = false
+
+  /// 绑定稳定行身份，排序后仍使用同一个 AppKit 视图。
+  init(id: UUID) {
+    self.id = id
+    super.init(frame: .zero)
+  }
+
+  required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+  override var isFlipped: Bool { true }
+  override var mouseDownCanMoveWindow: Bool { false }
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+  /// 可拖动时在缩略图范围显示抓手光标，交给系统管理其生命周期。
+  override func resetCursorRects() {
+    if enabled { addCursorRect(bounds, cursor: .openHand) }
+  }
+
+  /// 按下只记录起点，普通点击不改变顺序。
+  override func mouseDown(with event: NSEvent) {
+    if enabled { start = event.locationInWindow }
+  }
+
+  /// 移动超过四个点才开始拖动，坐标使用视图当前滚动位置。
+  override func mouseDragged(with event: NSEvent) {
+    guard enabled, let start else { return }
+    let point = event.locationInWindow
+    guard dragging || hypot(point.x - start.x, point.y - start.y) >= 4 else { return }
+    dragging = true
+    move(convert(point, from: nil), false)
+  }
+
+  /// 松手仅提交一次，窗外落点由排序模型判断。
+  override func mouseUp(with event: NSEvent) {
+    let wasDragging = dragging
+    endTracking()
+    if wasDragging { move(convert(event.locationInWindow, from: nil), true) }
+  }
+
+  /// 退出窗口或卸载时撤下拖动，不造成列表变更。
+  func endTracking() {
+    dragging = false
+    start = nil
   }
 }
