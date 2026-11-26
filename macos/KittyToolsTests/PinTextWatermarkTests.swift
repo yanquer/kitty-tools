@@ -121,6 +121,8 @@ struct PinTextWatermarkTests {
   @Test func pinMenuAndWindowDispatchKeepImageOperations() async throws {
     let image = try picture()
     let board = PinBoard()
+    var imageCopies: [CGImage] = []
+    board.copyAsFile = { image, _ in imageCopies.append(image) }
     let pin = PinPanel(
       image: image, frame: CGRect(x: -20000, y: -20000, width: 240, height: 240), board: board)
     defer {
@@ -153,6 +155,11 @@ struct PinTextWatermarkTests {
         charactersIgnoringModifiers: "c", isARepeat: false, keyCode: UInt16(kVK_ANSI_C)))
     pin.sendEvent(copy)
     #expect(copies == ["Alpha"] && pin.image === image)
+    let file = try #require(sharedMenu.items.first { $0.title == "拷贝为 PNG 文件" })
+    #expect(file.isEnabled)
+    #expect(NSApp.sendAction(try #require(file.action), to: file.target, from: file))
+    #expect(imageCopies.count == 1 && imageCopies.first === image)
+    #expect(copies == ["Alpha"])
     let escape = try #require(
       NSEvent.keyEvent(
         with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,

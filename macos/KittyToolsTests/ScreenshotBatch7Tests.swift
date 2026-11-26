@@ -365,12 +365,15 @@ struct ScreenshotBatch7Tests {
 
   // MARK: C9 D17 钉图的按键与右键菜单
 
-  // 右键菜单：拷贝 / 识字并拷贝 O / 翻译 / 存储到「X」⌘S / 另存为… ⇧⌘S ｜ 透明度 / 原始大小 ⌘0 ｜ 关闭 ⌘W
+  // 右键的普通拷贝与 PNG 文件动作分别分派，保留输出、图像操作和关闭的分组。
   @Test func pinMenuMatchesShotOutputs() throws {
     let board = PinBoard()
     var outputs: [RegionSelector.Action] = []
+    var fileCopies: [(CGImage, CGFloat)] = []
     board.output = { action, _, _ in outputs.append(action) }
-    board.pin(Self.image, frame: CGRect(x: -20000, y: -20000, width: 200, height: 100))
+    board.copyAsFile = { fileCopies.append(($0, $1)) }
+    let image = Self.image
+    board.pin(image, frame: CGRect(x: -20000, y: -20000, width: 200, height: 100), scale: 2)
     defer { board.closeAll() }
     let view = try #require(board.panels.first?.contentView)
     let event = try #require(
@@ -381,6 +384,9 @@ struct ScreenshotBatch7Tests {
     let folder = FileManager.default.displayName(atPath: ScreenshotOutput.saveDirectory.path)
     let outputItems = ["拷贝", "识字并拷贝", "查看识字结果", "翻译", "存储到「\(folder)」", "另存为…"]
     #expect(menu.items.map(\.title).filter(outputItems.contains) == outputItems)
+    #expect(Array(menu.items.prefix(3).map(\.title)) == ["拷贝", "拷贝为 PNG 文件", "识字并拷贝"])
+    #expect(menu.items.filter(\.isSeparatorItem).count == 2)
+    #expect(menu.items.last?.title == "关闭")
     #expect(menu.items.first { $0.title == "透明度" }?.submenu != nil)
     let keys: [(String, String, NSEvent.ModifierFlags)] = [
       ("拷贝", "c", .command), ("识字并拷贝", "o", []), ("查看识字结果", "o", .shift),
@@ -397,6 +403,27 @@ struct ScreenshotBatch7Tests {
       NSApp.sendAction(try #require(item.action), to: item.target, from: item)
     }
     #expect(outputs == [.copy, .recognize, .inspect, .translate, .save, .saveAs])
+    #expect(fileCopies.isEmpty)
+
+    // 缩放与锁定收纳只影响查看，明确拷贝文件使用应用编辑后的完整图和原倍率。
+    let panel = try #require(board.panels.first)
+    let edited = try #require(image.cropping(to: CGRect(x: 0, y: 0, width: 240, height: 120)))
+    panel.applyEdits(image: edited, annotations: [])
+    panel.transform(.right)
+    let busy = try #require(view.menu(for: event)?.items.first { $0.title == "拷贝为 PNG 文件" })
+    #expect(panel.isTransforming && !busy.isEnabled)
+    #expect(NSApp.sendAction(try #require(busy.action), to: busy.target, from: busy))
+    #expect(fileCopies.isEmpty)
+    panel.cancelTransform()
+    for mode in ["局部放大", "收起为小卡片", "锁定钉图"] {
+      let action = try #require(view.menu(for: event)?.items.first { $0.title == mode })
+      #expect(NSApp.sendAction(try #require(action.action), to: action.target, from: action))
+      let file = try #require(
+        view.menu(for: event)?.items.first { $0.title == "拷贝为 PNG 文件" })
+      #expect(file.isEnabled && file.keyEquivalent.isEmpty)
+      #expect(NSApp.sendAction(try #require(file.action), to: file.target, from: file))
+    }
+    #expect(fileCopies.count == 3 && fileCopies.allSatisfy { $0.0 === edited && $0.1 == 2 })
     // 按键和菜单查同一张表（performKeyEquivalent 要钉图真是 key，经 keyDown 走同一个查表）：
     // ⌘C 拷贝、⌘S 快速保存、⇧⌘S 另存为、单键 O 识字并拷贝；按住不放不反复执行
     outputs = []
@@ -417,6 +444,7 @@ struct ScreenshotBatch7Tests {
     try press(kVK_ANSI_O, "o")
     try press(kVK_ANSI_O, "o", repeating: true)
     #expect(outputs == [.copy, .save, .saveAs, .save, .recognize])
+    #expect(fileCopies.count == 3)
   }
 
   // 透明度（2026-10-03 用户要求，原来点一下换一档）：右键「透明度 ▸」里是一行 10–100% 的滑块，拖到哪钉图就是多少（按整数

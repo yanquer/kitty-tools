@@ -1,7 +1,7 @@
 // 钉图：把截图钉在原位置当参考。不激活本 App、出现时不抢键盘（修旧版钉图抢焦点，§11 #48）；
 // 拖动移动，滚轮 / 双指捏合以鼠标为锚点缩放，双击或 Esc 关闭（Esc、按键要先点一下钉图）。
 // 按键和截图出图一致（体检 C9 D17）：⌘C 拷贝、O 识字并拷贝、⌘S 存储到快速保存的文件夹、⇧⌘S 另存为…、⌘0 原始大小、⌘W 关闭；
-// 右键菜单：拷贝 / 识字并拷贝 / 翻译 / 存储到「桌面」/ 另存为… ｜ 透明度 / 原始大小 ｜ 关闭，VoiceOver 的自定义动作同一份（B45）。
+// 右键菜单含「拷贝为 PNG 文件」，VoiceOver 的自定义动作同一份（B45）。
 // 透明度是 10–100% 的滑块（2026-10-03 用户要求，原来点一下换一档；对标 CleanShot 的钉图）：悬停圆钮点开、右键「透明度 ▸」里是同一行，
 // 拖动实时改变合成图片层，按钮和缩放提示保持原来的对比度。长截图时和选区相交的钉图临时整窗让位（B40：不接鼠标，
 // 不透明度最多 0.3，滚轮和自动滚动落到下面的窗口）。菜单栏可隐藏 / 显示、关闭全部。
@@ -28,6 +28,9 @@ import UniformTypeIdentifiers
   @ObservationIgnored var output: @MainActor (RegionSelector.Action, CGImage, CGFloat) -> Void = {
     _, _, _ in
   }
+
+  /// 单次拷贝完整钉图为 PNG 文件，由 AppDelegate 接到截图文件输出。
+  @ObservationIgnored var copyAsFile: (CGImage, CGFloat) -> Void = { _, _ in }
 
   /// 继续标注由 AppDelegate 接到同一套标注遮罩。
   @ObservationIgnored var edit: (PinPanel) -> Void = { _ in }
@@ -972,13 +975,16 @@ private final class PinView: NSView {
     let action: Selector
   }
 
-  /// 拷贝 / 识字并拷贝 / 翻译 / 存储到「桌面」/ 另存为… / 原始大小 / 关闭（体检 B41 C9 D17：截图家族同名同键）
+  /// 按输出、图像操作和关闭排列，截图家族的共用动作同名同键。
   private var commands: [Command] {
     [
       Command(
         title: textSelection.isEnabled ? "复制所选文字" : "拷贝", key: "c", keyCode: kVK_ANSI_C,
         modifiers: .command,
         action: #selector(copyImage)),
+      Command(
+        title: "拷贝为 PNG 文件", key: "", keyCode: nil, modifiers: [],
+        action: #selector(copyImageAsFile)),
       Command(
         title: "识字并拷贝", key: "o", keyCode: kVK_ANSI_O, modifiers: [],
         action: #selector(recognizeText)),
@@ -1061,11 +1067,12 @@ private final class PinView: NSView {
       item.keyEquivalentModifierMask = command.modifiers
       item.target = self
       item.isEnabled = commandIsEnabled(command.action)
-      // 翻译这个功能关着（Feature）：藏起来（不从列表里拿掉——下面按位置分组）
+      // 翻译功能关闭时隐藏对应动作。
       item.isHidden = command.action == #selector(translateImage) && !Feature.translate.isOn
       return item
     }
-    items[0..<6].forEach(menu.addItem)
+    let outputs = items.prefix { $0.action != #selector(editImage) }
+    outputs.forEach(menu.addItem)
     if let selecting = items.first(where: { $0.action == #selector(toggleTextSelection) }) {
       selecting.state = textSelection.isEnabled ? .on : .off
       menu.addItem(selecting)
@@ -1074,7 +1081,7 @@ private final class PinView: NSView {
     let opacity = NSMenuItem(title: "透明度", action: nil, keyEquivalent: "")
     opacity.submenu = opacityMenu()
     menu.addItem(opacity)
-    for item in items[6..<18] { menu.addItem(item) }
+    items.dropFirst(outputs.count).prefix { $0.action != #selector(close) }.forEach(menu.addItem)
     if let zoomItem = menu.items.first(where: { $0.action == #selector(toggleLocalZoom) }) {
       zoomItem.state = localZoom.isEnabled ? .on : .off
       zoomItem.toolTip = "固定窗口大小，滚轮放大、拖动查看；⌥ 拖动移动窗口。复制与保存保留完整图片。"
@@ -1087,7 +1094,7 @@ private final class PinView: NSView {
       }
     }
     menu.addItem(.separator())
-    menu.addItem(items[18])
+    if let close = items.first(where: { $0.action == #selector(close) }) { menu.addItem(close) }
     return menu
   }
 
@@ -1165,6 +1172,12 @@ private final class PinView: NSView {
     } else {
       board.output(.copy, image, scale)
     }
+  }
+
+  /// 锁定、局部放大、收纳与选字时，仍拷贝当前完整合成图。
+  @objc private func copyImageAsFile() {
+    guard commandIsEnabled(#selector(copyImageAsFile)) else { return }
+    board.copyAsFile(image, scale)
   }
 
   /// 用户手动开启实况文本，使用当前已打码的合成图，不改剪贴板或原图。

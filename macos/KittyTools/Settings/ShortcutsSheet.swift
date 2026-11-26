@@ -591,6 +591,7 @@ struct ShortcutsSheet: View {
         globals: [.pinClipboard],
         entries: [
           Entry("⌘C", text: "拷贝"),
+          Entry(text: "右键「拷贝为 PNG 文件」将完整钉图作为一个文件放进剪贴板"),
           Entry("O", text: "识字并拷贝（翻译在右键菜单里）"),
           Entry("⇧O", text: "查看识字结果"),
           Entry("⌘E", text: "继续标注，应用后更新当前钉图"),

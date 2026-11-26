@@ -357,6 +357,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
       }
     }
+    board.copyAsFile = { [unowned self] image, scale in copyPinAsFile(image, scale: scale) }
     board.edit = { [unowned self] panel in editPin(panel) }
     board.problem = { [unowned self] in island.show("图片未变换", detail: $0, tone: .error) }
     return board
@@ -2484,8 +2485,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       // 拷贝 / 存储编好的那份 PNG 历史直接拿去当原图，不再编一遍
       switch capture.action {
       case .copy:
-        // 拷成文件时先占好剪贴板，再飞卡片、编码（按 ⌘C 的那一刻就得写好，见 offerShotFile）
-        let offer = offerShotFile(.image(capture.image, scale: capture.scale))
+        // 拷成文件时先占好剪贴板，再飞卡片、编码（见 ScreenshotOutput.offerFile）
+        let offer = ScreenshotOutput.offerFile(.image(capture.image, scale: capture.scale))
         let land = captured(capture.image, scale: capture.scale, frame: capture.frame)
         guard let png = await encodePNG(capture.image, scale: capture.scale) else { return }
         let remembered = remember(capture, png: png)
@@ -2762,7 +2763,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       // 同截图：先出图、历史在后面并行记，拷贝 / 存储编好的那份历史直接用（R6，长图编一遍要好几百毫秒）
       switch result.action {
       case .copy:
-        let offer = offerShotFile(.image(result.image, scale: result.scale))
+        let offer = ScreenshotOutput.offerFile(.image(result.image, scale: result.scale))
         let land = captured(result.image, scale: result.scale, frame: region)
         guard let png = await encodePNG(result.image, scale: result.scale) else { return }
         let remembered = rememberScroll(result, png: png, region: region)
@@ -3526,36 +3527,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private func copyImage(_ image: CGImage, scale: CGFloat, name: String? = nil) async
     -> ScreenshotOutput.Copied?
   {
-    let offer = offerShotFile(.image(image, scale: scale), name: name)
+    let offer = ScreenshotOutput.offerFile(.image(image, scale: scale), name: name)
     guard let png = await encodePNG(image, scale: scale) else { return nil }
     return await copyPNG(png, name: name, offer: offer)
   }
 
-  /// 设置 › 截图「截图拷贝为」选了 PNG 文件：**按下拷贝的那一刻**就把剪贴板写好（承诺一个文件，谁来读才给，
-  /// ScreenshotOutput.FileOffer），编码、写盘在后面；不是这个设置给 nil。一次拷贝只调一次——跨电脑的剪贴板工具按 ⌘C
-  /// 那一刻就读、剪贴板短时间里连着变几次它就乱（2026-11-06 用户用 USB 对拷线实测）
-  private func offerShotFile(_ source: ScreenshotOutput.FileOffer.Source, name: String? = nil)
-    -> ScreenshotOutput.FileOffer?
-  {
-    guard Prefs.copiesShotAsFile() else { return nil }
-    let offer = ScreenshotOutput.FileOffer(
-      url: ScreenshotOutput.copyFileURL(name: name), source: source)
-    Paster.write(promising: offer)
-    return offer
+  /// 从钉图菜单或旁白立即承诺 PNG 文件，再在后台编码并报告实际结果。
+  private func copyPinAsFile(_ image: CGImage, scale: CGFloat) {
+    let title = "没能拷贝为 PNG 文件"
+    guard let offer = ScreenshotOutput.offerFile(.image(image, scale: scale), fileOnly: true) else {
+      island.show(title, detail: "剪贴板写入失败", tone: .error)
+      return
+    }
+    Task {
+      let copied: ScreenshotOutput.Copied?
+      if let png = await ScreenshotOutput.png(image, scale: scale) {
+        copied = await copyPNG(png, offer: offer)
+      } else {
+        // 接收方可能已提前读到文件，保留已完成的交付结果。
+        copied = await offer.fulfill(nil) ? .file(offer.url) : nil
+      }
+      guard let copied else {
+        island.show(title, detail: "无法生成临时 PNG 文件", tone: .error)
+        return
+      }
+      Log.capture.notice("钉图 PNG 文件拷贝完成 id=\(offer.id, privacy: .public)")
+      island.show("已拷贝为 PNG 文件", detail: copied.detail, leading: Island.thumbnail(of: image))
+    }
   }
 
   /// 截图的每一种「拷贝」都走这里（截图、长截图、钉图、常驻缩略图、晾衣绳 / 历史、存储失败的兜底）：经 Paster 写进剪贴板
   /// （watcher 会跳过），所以自己记进剪贴板历史。设置 › 截图「截图拷贝为」选了 PNG 文件时剪贴板里只有一个文件
-  /// （同在访达里拷贝一个文件，2026-11-06 拍板 Q3）：offer 是按下时已经占好的（offerShotFile），没给就在这里占；
-  /// 写不成文件就改放图像。剪贴板历史两种都记成图片（Q5：临时文件清掉以后这条照样能用）
+  /// （同在访达里拷贝一个文件，2026-11-06 拍板 Q3）：offer 是按下时已经占好的，没给就在这里占。
+  /// 按偏好拷贝时，文件失败会改放图像；显式文件动作返回失败。剪贴板历史两种都记成图片（Q5）。
   @discardableResult
   private func copyPNG(
     _ png: Data, name: String? = nil, offer: ScreenshotOutput.FileOffer? = nil
-  ) async -> ScreenshotOutput.Copied {
+  ) async -> ScreenshotOutput.Copied? {
     var copied = ScreenshotOutput.Copied.image
-    if let offer = offer ?? offerShotFile(.png(png), name: name), await offer.fulfill(png) {
+    if let offer = offer ?? ScreenshotOutput.offerFile(.png(png), name: name),
+      await offer.fulfill(png)
+    {
       copied = .file(offer.url)
     } else {
+      guard offer?.fileOnly != true else { return nil }
       Paster.write([.png: png])
     }
     guard recordsClipboard else { return copied }  // 菜单栏暂停了记录、剪贴板关着

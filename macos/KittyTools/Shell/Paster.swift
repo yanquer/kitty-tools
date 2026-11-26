@@ -18,13 +18,16 @@ enum Paster {
   static var panelCopyChangeCount = -1
 
   /// 一次写完全部 item（每个 item 的多种表示也要一次写完，分两次 declare 会互相清空）
-  static func write(_ items: [NSPasteboardItem], transient: Bool = false) {
-    guard let first = items.first else { return }
+  @discardableResult
+  static func write(
+    _ items: [NSPasteboardItem], transient: Bool = false, to pasteboard: NSPasteboard = .general
+  ) -> Bool {
+    guard let first = items.first else { return false }
     if transient { first.setData(Data(), forType: transientType) }
-    let pasteboard = NSPasteboard.general
     pasteboard.clearContents()
-    pasteboard.writeObjects(items)
-    ownChangeCount = pasteboard.changeCount
+    let accepted = pasteboard.writeObjects(items)
+    if pasteboard.name == .general { ownChangeCount = pasteboard.changeCount }
+    return accepted
   }
 
   /// 单个 item 的多种表示
@@ -42,11 +45,15 @@ enum Paster {
 
   /// 一个文件，先承诺、谁来读才给（截图拷贝成 PNG 文件：ScreenshotOutput.FileOffer）。provider 留在这里，直到下一次承诺
   /// （pasteboard item 不保证留着它；写好之后它只剩一个 URL）
-  static func write(promising provider: some NSPasteboardItemDataProvider) {
+  static func write(
+    promising provider: some NSPasteboardItemDataProvider, to pasteboard: NSPasteboard = .general
+  ) -> Bool {
     let item = NSPasteboardItem()
-    item.setDataProvider(provider, forTypes: [.fileURL])
-    write([item])
-    promised = provider
+    guard item.setDataProvider(provider, forTypes: [.fileURL]), write([item], to: pasteboard) else {
+      return false
+    }
+    if pasteboard.name == .general { promised = provider }
+    return true
   }
   private static var promised: (any NSPasteboardItemDataProvider)?
 

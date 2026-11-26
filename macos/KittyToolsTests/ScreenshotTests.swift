@@ -414,23 +414,49 @@ struct ScreenshotTests {
     let image = try #require(context.makeImage())
     let pasteboard = NSPasteboard(name: .init("kitty-test-offer-\(UUID().uuidString)"))
     defer { pasteboard.releaseGlobally() }
-    let offer = ScreenshotOutput.FileOffer(url: named, source: .image(image, scale: 2))
-    let item = NSPasteboardItem()
-    item.setDataProvider(offer, forTypes: [.fileURL])
-    pasteboard.clearContents()
-    pasteboard.writeObjects([item])
-    #expect(!FileManager.default.fileExists(atPath: named.path))
-    #expect(pasteboard.string(forType: .fileURL) == named.absoluteString)
-    let written = try Data(contentsOf: named)
+    defaults.set("image", forKey: Prefs.screenshotCopyAs)
+    let originalStamp = pasteboard.changeCount
+    #expect(
+      ScreenshotOutput.offerFile(
+        .image(image, scale: 2), defaults: defaults, pasteboard: pasteboard) == nil)
+    #expect(pasteboard.changeCount == originalStamp)
+    let offer = try #require(
+      ScreenshotOutput.offerFile(
+        .image(image, scale: 2), name: named.lastPathComponent, fileOnly: true, defaults: defaults,
+        pasteboard: pasteboard))
+    defer { try? FileManager.default.removeItem(at: offer.url.deletingLastPathComponent()) }
+    let stamp = pasteboard.changeCount
+    #expect(pasteboard.pasteboardItems?.map(\.types) == [[.fileURL]])
+    #expect(!FileManager.default.fileExists(atPath: offer.url.path))
+    #expect(pasteboard.string(forType: .fileURL) == offer.url.absoluteString)
+    let written = try Data(contentsOf: offer.url)
     let source = try #require(CGImageSourceCreateWithData(written as CFData, nil))
     #expect(CGImageSourceGetType(source) as String? == UTType.png.identifier)
+    let decoded = try #require(CGImageSourceCreateImageAtIndex(source, 0, nil))
+    #expect(decoded.width == image.width && decoded.height == image.height)
     #expect(await offer.fulfill(Data([1, 2, 3])))  // 已经写好：不再写
-    #expect(try Data(contentsOf: named) == written)
+    #expect(await offer.fulfill(nil))  // 接收方已拿到文件，后台编码失败也不影响已经交付的结果
+    #expect(pasteboard.changeCount == stamp)
+    #expect(try Data(contentsOf: offer.url) == written)
     // 后台先编好：写的就是这一份
     let png = Data([0x89, 0x50, 0x4E, 0x47])
     let early = ScreenshotOutput.FileOffer(url: fresh, source: .png(png))
     #expect(await early.fulfill(png))
     #expect(try Data(contentsOf: fresh) == png)
+
+    // 把已有文件当成上级目录，验证强制文件动作最终失败后，迟到的读取也拿不到旧承诺。
+    let blockedURL = ScreenshotOutput.copyFileURL(name: "blocked.png")
+    let blockedParent = blockedURL.deletingLastPathComponent()
+    defer { try? FileManager.default.removeItem(at: blockedParent) }
+    try written.write(to: blockedParent)
+    let blocked = ScreenshotOutput.FileOffer(url: blockedURL, source: .png(written), fileOnly: true)
+    #expect(Paster.write(promising: blocked, to: pasteboard))
+    let blockedStamp = pasteboard.changeCount
+    #expect(!(await blocked.fulfill(written)))
+    try FileManager.default.removeItem(at: blockedParent)
+    #expect(pasteboard.string(forType: .fileURL) == nil)
+    #expect(!(await blocked.fulfill(written)))
+    #expect(pasteboard.changeCount == blockedStamp)
 
     let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
     let old = URL(filePath: "/tmp/old")

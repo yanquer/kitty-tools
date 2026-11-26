@@ -6,6 +6,7 @@
 // 文件在拖出目录里，编码、写盘在后面做。
 
 import AppKit
+import OSLog
 import Synchronization
 import UniformTypeIdentifiers
 
@@ -28,6 +29,21 @@ enum ScreenshotOutput {
   static func copyFileURL(name: String?) -> URL {
     let folder = ShotShelf.dragDirectory.appending(path: UUID().uuidString)
     return name.map { folder.appending(path: $0) } ?? availableURL(in: folder)
+  }
+
+  /// 普通拷贝读取全局格式；显式拷贝立即承诺文件，后台编码完成后仍使用同一份承诺。
+  static func offerFile(
+    _ source: FileOffer.Source, name: String? = nil, fileOnly: Bool = false,
+    defaults: UserDefaults = .standard, pasteboard: NSPasteboard = .general
+  ) -> FileOffer? {
+    guard fileOnly || Prefs.copiesShotAsFile(defaults) else { return nil }
+    let offer = FileOffer(url: copyFileURL(name: name), source: source, fileOnly: fileOnly)
+    guard Paster.write(promising: offer, to: pasteboard) else {
+      Log.capture.error("剪贴板拒绝截图文件承诺 id=\(offer.id, privacy: .public)")
+      return nil
+    }
+    if fileOnly { Log.capture.notice("钉图 PNG 文件已承诺 id=\(offer.id, privacy: .public)") }
+    return offer
   }
 
   /// 编码成 PNG（白名单第 1 类，@concurrent）。scale 是像素 / 点，写成 DPI（2x → 144）
@@ -173,18 +189,28 @@ extension ScreenshotOutput {
       case png(Data)
     }
 
-    let url: URL
-    /// 还没写到盘上的那一份；写好了是 nil（同时放掉图）
-    private let pending: Mutex<Source?>
-
-    init(url: URL, source: Source) {
-      self.url = url
-      pending = Mutex(source)
+    /// 写好或显式文件拷贝最终失败后，都释放待编码的图。
+    private enum State {
+      case pending(Source)
+      case written
+      case failed
     }
 
-    /// 后台编好了：用这份写盘（来读时已经当场写过就不再写）。写好了（或早就写好了）返回 true
-    @concurrent func fulfill(_ png: Data) async -> Bool {
-      write { _ in png }
+    let url: URL
+    let fileOnly: Bool
+    /// 同一份承诺的日志标识，不记录文件名或路径。
+    var id: String { url.deletingLastPathComponent().lastPathComponent }
+    private let state: Mutex<State>
+
+    init(url: URL, source: Source, fileOnly: Bool = false) {
+      self.url = url
+      self.fileOnly = fileOnly
+      state = Mutex(.pending(source))
+    }
+
+    /// 采用后台编码结果或已交付的文件；显式文件拷贝在最终失败后停止重试。
+    @concurrent func fulfill(_ png: Data?) async -> Bool {
+      write(stage: "fulfill", terminal: fileOnly) { _ in png }
     }
 
     func pasteboard(
@@ -192,7 +218,7 @@ extension ScreenshotOutput {
       provideDataForType type: NSPasteboard.PasteboardType
     ) {
       // 有人来读、还没写好：当场编码写（只有赶在后台编完之前来读才碰得上，几十到几百毫秒）。写不成就不给
-      let written = write { source in
+      let written = write(stage: "pasteboard-read", terminal: false) { source in
         switch source {
         case .png(let data): data
         case .image(let image, let scale): ScreenshotOutput.encode(image, scale: scale)
@@ -201,15 +227,35 @@ extension ScreenshotOutput {
       if written { item.setString(url.absoluteString, forType: type) }
     }
 
-    /// 没写过才写；拿不到数据、写不成返回 false，留着下次再试
-    private func write(_ data: (Source) -> Data?) -> Bool {
-      pending.withLock { pending in
-        guard let source = pending else { return true }
-        guard let png = data(source) else { return false }
-        try? FileManager.default.createDirectory(
-          at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        guard (try? png.write(to: url, options: .atomic)) != nil else { return false }
-        pending = nil
+    /// 同一承诺只落盘一次，提前读取与后台写入共用这份结果。
+    private func write(stage: String, terminal: Bool, _ data: (Source) -> Data?) -> Bool {
+      state.withLock { state in
+        switch state {
+        case .written: return true
+        case .failed: return false
+        case .pending(let source):
+          let began = ContinuousClock.now
+          guard let png = data(source) else {
+            if terminal { state = .failed }
+            Log.storage.error(
+              "截图文件编码失败 id=\(self.id, privacy: .public) stage=\(stage, privacy: .public)"
+            )
+            return false
+          }
+          do {
+            try FileManager.default.createDirectory(
+              at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try png.write(to: url, options: .atomic)
+          } catch {
+            if terminal { state = .failed }
+            let error = error as NSError
+            Log.storage.error(
+              "截图文件写入失败 id=\(self.id, privacy: .public) stage=\(stage, privacy: .public) domain=\(error.domain, privacy: .public) code=\(error.code) elapsed=\(String(describing: began.duration(to: .now)), privacy: .public)"
+            )
+            return false
+          }
+        }
+        state = .written
         return true
       }
     }

@@ -906,7 +906,10 @@ struct SnapshotProbeTests {
         ShortcutsSheet(page: page), size: NSSize(width: ShortcutsSheet.width, height: 2400),
         dark: false, to: "\(out)/shortcuts-\(page.rawValue).png")
     }
-    for (name, query) in [("shortcuts-search", "删除"), ("shortcuts-search-empty", "没有这种键")] {
+    for (name, query) in [
+      ("shortcuts-search", "删除"), ("shortcuts-search-empty", "没有这种键"),
+      ("shortcuts-search-pin-file", "拷贝为 PNG 文件"),
+    ] {
       try snapshot(
         ShortcutsSheet(query: query), size: sheetSize, dark: false, to: "\(out)/\(name).png")
     }

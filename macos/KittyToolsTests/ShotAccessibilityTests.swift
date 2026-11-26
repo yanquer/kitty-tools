@@ -104,6 +104,8 @@ struct ShotAccessibilityTests {
     let board = PinBoard()
     var outputs: [RegionSelector.Action] = []
     board.output = { action, _, _ in outputs.append(action) }
+    var fileCopies = 0
+    board.copyAsFile = { _, _ in fileCopies += 1 }
     board.pin(
       try #require(context.makeImage()),
       frame: CGRect(x: -20000, y: -20000, width: 200, height: 100))
@@ -120,12 +122,14 @@ struct ShotAccessibilityTests {
     let actions = try #require(view.accessibilityCustomActions())
     #expect(
       actions.map(\.name) == [
-        "拷贝", "识字并拷贝", "查看识字结果", "翻译", ScreenshotOutput.saveTitle, "另存为…", "继续标注", "局部放大", "收起为小卡片",
+        "拷贝", "拷贝为 PNG 文件", "识字并拷贝", "查看识字结果", "翻译", ScreenshotOutput.saveTitle, "另存为…",
+        "继续标注", "局部放大", "收起为小卡片",
         "专注这张钉图", "锁定钉图", "原始大小", "向左旋转 90°", "向右旋转 90°", "水平翻转", "垂直翻转",
         "关闭", "原位选字",
       ])
-    for action in actions.prefix(6) { #expect(action.handler?() == true) }
+    for action in actions.prefix(7) { #expect(action.handler?() == true) }
     #expect(outputs == [.copy, .recognize, .inspect, .translate, .save, .saveAs])
+    #expect(fileCopies == 1)
     let close = try #require(actions.first { $0.name == "关闭" })
     #expect(close.handler?() == true)
     #expect(board.panels.isEmpty)
