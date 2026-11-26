@@ -34,6 +34,7 @@ import SwiftUI
   }
 
   let history: ShotHistory
+  let quickPreview: ShotHistoryPreview
   var search = ""
   var filter = Filter.all
   private(set) var tagFilter: String?
@@ -66,6 +67,7 @@ import SwiftUI
 
   init(history: ShotHistory, actions: ShotActions = ShotActions()) {
     self.history = history
+    quickPreview = ShotHistoryPreview(history: history)
     self.actions = actions
   }
 
@@ -148,7 +150,24 @@ import SwiftUI
   func setTagFilter(_ tag: String?) {
     tagFilter = tag
     reconcileSelection()
+    reconcileQuickPreview()
   }
+
+  /// 大图只浏览当前筛出来的截图和长截图，保持网格当前选择。
+  @discardableResult func openQuickPreview(_ requested: ShotHistory.Item? = nil) -> Bool {
+    guard deleting.isEmpty, let item = requested ?? selected, item.supportsQuickPreview else {
+      return false
+    }
+    return quickPreview.open(item.id, within: previewableIDs)
+  }
+
+  /// 搜索条件、标签或历史发生变化时更新预览集合，不恢复已经隐藏的关联项。
+  func reconcileQuickPreview() {
+    guard quickPreview.isOpen else { return }
+    quickPreview.reconcile(with: previewableIDs)
+  }
+
+  private var previewableIDs: [UUID] { shown.filter(\.supportsQuickPreview).map(\.id) }
 
   /// 类型、搜索和标签变更后，选区与锚点只保留可见记录。
   func reconcileSelection() {
@@ -463,6 +482,7 @@ import SwiftUI
 
   func windowWillClose(_ notification: Notification) {
     removeKeyMonitor()
+    model.quickPreview.close()
     NSApp.leaveDockIfNoWindows(closing: window)
     onClose()
   }
@@ -473,8 +493,27 @@ import SwiftUI
   static func handlesKeyDown(_ event: NSEvent, in window: NSWindow, model: ShotHistoryModel)
     -> Bool
   {
-    guard event.window === window, !(window.firstResponder is NSTextView) else { return false }
+    guard event.window === window, window.attachedSheet == nil,
+      !(window.firstResponder is NSTextView)
+    else { return false }
     let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+    // 这几个键只控制当前预览，原来的历史选区和连选锚点保持在网格上。
+    if model.quickPreview.isOpen {
+      guard flags.isEmpty else { return false }
+      switch Int(event.keyCode) {
+      case kVK_Escape: model.quickPreview.close()
+      case kVK_Space:
+        if !event.isARepeat { model.quickPreview.close() }
+      case kVK_LeftArrow: model.quickPreview.move(by: -1)
+      case kVK_RightArrow: model.quickPreview.move(by: 1)
+      default: return false
+      }
+      return true
+    }
+    if flags.isEmpty, Int(event.keyCode) == kVK_Space {
+      if event.isARepeat { return model.selected?.supportsQuickPreview == true }
+      return model.openQuickPreview()
+    }
     // ⇧ + 方向键：从锚点连着选过去
     if flags == .shift, let step = Self.arrowStep(event.keyCode, columns: model.columnsPerRow) {
       model.move(by: step, extend: true)

@@ -40,6 +40,12 @@ struct ShotHistoryView: View {
       }
       shortcuts
     }
+    .disabled(model.quickPreview.isOpen)
+    .allowsHitTesting(!model.quickPreview.isOpen)
+    .accessibilityHidden(model.quickPreview.isOpen)
+    .overlay {
+      if model.quickPreview.isOpen { ShotHistoryPreviewView(preview: model.quickPreview) }
+    }
     .toolbar {
       ToolbarItem(placement: .principal) {
         Picker("筛选", selection: $model.filter) {
@@ -47,12 +53,14 @@ struct ShotHistoryView: View {
         }
         .pickerStyle(.segmented)
         .frame(width: 280)
+        .disabled(model.quickPreview.isOpen)
       }
       ToolbarItem(placement: .automatic) {
         Button("标签筛选", systemImage: model.tagFilter == nil ? "tag" : "tag.fill") {
           showsTagFilter.toggle()
         }
         .accessibilityValue(model.tagFilter ?? "所有标签")
+        .disabled(model.quickPreview.isOpen)
         .help("按标签筛选")
         .popover(isPresented: $showsTagFilter, arrowEdge: .bottom) {
           ShotHistoryTagPicker(names: model.availableTags, selection: model.tagFilter) { name in
@@ -64,15 +72,18 @@ struct ShotHistoryView: View {
     }
     .searchable(text: $model.search, prompt: "搜来源、种类、文件名或标签")
     .searchFocused($searching)
-    .onChange(of: model.search) { _, _ in model.reconcileSelection() }
-    .onChange(of: model.filter) { _, _ in model.reconcileSelection() }
+    .onChange(of: model.search) { _, _ in reconcileAfterFilter() }
+    .onChange(of: model.filter) { _, _ in reconcileAfterFilter() }
+    .onChange(of: model.history.revision) { _, _ in model.reconcileQuickPreview() }
     .sheet(item: $tagEdit) { edit in
       ShotHistoryTagEditor(edit: edit) { ids, adding, removing in
         try model.applyTags(ids, adding: adding, removing: removing)
       }
     }
     .onKeyPress(.delete) {
-      guard !searching, tagEdit == nil, !showsTagFilter, !model.chosen.isEmpty else {
+      guard !searching, tagEdit == nil, !showsTagFilter, !model.quickPreview.isOpen,
+        !model.chosen.isEmpty
+      else {
         return .ignored
       }
       model.deleteSelection()
@@ -95,6 +106,17 @@ struct ShotHistoryView: View {
     }
     .symbolEffectsRemoved(reduceMotion)
     .appAccent()
+  }
+
+  /// 刷新过滤后的网格选区和预览范围，两个游标仍各自独立。
+  private func reconcileAfterFilter() {
+    model.reconcileSelection()
+    model.reconcileQuickPreview()
+  }
+
+  /// 从详情或菜单明确打开预览时结束搜索输入，方向键与 Esc 才归预览。
+  private func openQuickPreview(_ item: ShotHistory.Item) {
+    if model.openQuickPreview(item) { searching = false }
   }
 
   /// 筛选条件显示在结果上方，长标签可查看完整名称并一键清除。
@@ -287,6 +309,9 @@ struct ShotHistoryView: View {
       }
       .frame(height: 180)
       .onDrag { model.dragProvider(for: item) }
+      if item.supportsQuickPreview {
+        row("快速预览", "magnifyingglass", key: "空格") { openQuickPreview(item) }
+      }
       Text(ShotHistoryModel.caption(item)).font(.system(size: 12))
       let details = ShotHistoryModel.details(item)
       if !details.isEmpty {
@@ -414,6 +439,7 @@ struct ShotHistoryView: View {
         model.deleting = chosen.map(\.id)
       }
     } else if item.filePath == nil {
+      if item.supportsQuickPreview { Button("快速预览") { openQuickPreview(item) } }
       Button("改标注") { edit(item) }
       Button("拷贝") { model.actions.copy(item) }
       Button(ScreenshotOutput.saveTitle) { model.actions.save(item) }

@@ -2479,6 +2479,85 @@ struct ScreenshotSnapshotTests {
       name: "composition-annotate-return", dark: true)
   }
 
+  /// 核对历史中的完整成品、实际像素与返回网格，使用不可成为 key 的屏外窗口。
+  @Test(.enabled(if: directory != nil)) func renderShotHistoryQuickPreview() async throws {
+    let folder = FileManager.default.temporaryDirectory.appending(
+      path: "kitty-history-preview-shots-\(UUID())")
+    let history = try ShotHistory(db: Database(path: ":memory:"), directory: folder)
+    let domain = "kitty-history-preview-pref-\(UUID())"
+    let prefs = try #require(UserDefaults(suiteName: domain))
+    prefs.set(true, forKey: Prefs.shotHistory)
+    history.defaults = prefs
+    let model = ShotHistoryModel(history: history)
+    defer {
+      model.quickPreview.close()
+      prefs.removePersistentDomain(forName: domain)
+      try? FileManager.default.removeItem(at: folder)
+    }
+    let long = try ScreenshotTests.render((1...30).map { "验收条目 \($0)   Review item \($0)" })
+    let original = try #require(
+      await history.record(
+        long, scale: 2, kind: .scroll,
+        annotations: [
+          Annotation(
+            shape: .rectangle(CGRect(x: 8, y: 1680, width: 400, height: 84)),
+            style: .init(color: .red, weight: .large))
+        ], source: "Safari"))
+    let regular = try #require(await history.record(try Self.desktop(), scale: 2, source: "备忘录"))
+    try history.applyTags(to: [original, regular], adding: ["验收"], removing: [])
+    model.setTagFilter("验收")
+    model.pick(original)
+    #expect(model.openQuickPreview())
+    for _ in 0..<250 where model.quickPreview.image == nil && model.quickPreview.error == nil {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    try #require(model.quickPreview.image?.height == long.height)
+    try enhancement(
+      ShotHistoryView(model: model).defaultAppStorage(prefs), size: NSSize(width: 960, height: 620),
+      name: "history-quick-preview-fit")
+    try enhancement(
+      ShotHistoryView(model: model).defaultAppStorage(prefs), size: NSSize(width: 720, height: 420),
+      name: "history-quick-preview-actual", dark: true
+    ) { host in
+      let actual = try #require(compositionButton(in: host, label: "实际像素"))
+      #expect(actual() == true)
+      RunLoop.main.run(until: Date.now.addingTimeInterval(0.20))
+      let scroll = try #require(
+        firstSubview(
+          NSScrollView.self, in: host,
+          matching: {
+            ($0.documentView?.bounds.height ?? 0) > 1200
+          }))
+      #expect((scroll.documentView?.bounds.height ?? 0) > scroll.contentSize.height)
+      #expect(scroll.contentView.bounds.origin.y > 1200)
+      if let bounds = scroll.documentView?.bounds, bounds.width < scroll.contentView.bounds.width {
+        let left = (bounds.width - scroll.contentView.bounds.width) / 2
+        #expect(abs(scroll.contentView.bounds.minX - left) <= 1)
+      }
+      #expect(host.window?.isKeyWindow == false)
+    }
+    model.quickPreview.close()
+    #expect(model.picked == [original])
+    for id in [original, regular] {
+      let item = try #require(history.item(id))
+      _ = try #require(await ShotThumbnails.shared.image(for: item, in: history))
+    }
+    defer { for id in [original, regular] { ShotThumbnails.shared.forget(id) } }
+    try enhancement(
+      ShotHistoryView(model: model).defaultAppStorage(prefs), size: NSSize(width: 960, height: 620),
+      name: "history-quick-preview-return"
+    ) { host in
+      #expect(compositionButton(in: host, label: "快速预览") != nil)
+    }
+    try enhancement(
+      ShotHistoryView(model: model).defaultAppStorage(prefs), size: NSSize(width: 720, height: 420),
+      name: "history-quick-preview-reopen"
+    ) { host in
+      let open = try #require(compositionButton(in: host, label: "快速预览"))
+      #expect(open() == true && model.quickPreview.item?.id == original)
+    }
+  }
+
   /// 等待实际导入与预览，不把尚未产生图片的加载界面当作完成。
   private func waitForComposition(_ model: ShotCompositionModel) async throws {
     for _ in 0..<400

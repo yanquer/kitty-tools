@@ -521,6 +521,7 @@ struct ShortcutsSheet: View {
           Entry("⌘F", text: "搜索（搜来源 App 和种类）"),
           Entry("⌘1", "⌘4", text: "换筛选：⌘1 全部、⌘2 截图、⌘3 长截图、⌘4 录制"),
           Entry(text: "单条或多选后可编辑标签，工具栏的标签按钮可按名称筛选"),
+          Entry("空格", "Esc", text: "预览截图成品 / 关闭预览。预览内用 ← → 切换当前筛选的图片"),
           Entry("⌫", text: "删掉选中的那条"),
           Entry("拖出去", text: "发一份到别的 App 或文件夹（历史里那条还在）"),
         ]),

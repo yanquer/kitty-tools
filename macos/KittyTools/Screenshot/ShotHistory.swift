@@ -84,6 +84,8 @@ import UniformTypeIdentifiers
     var bytes: Int = 0
     /// 本机标签跟着历史编号和清理策略，与文件路径无关。
     var tags: [String] = []
+
+    var supportsQuickPreview: Bool { filePath == nil && (kind == .shot || kind == .scroll) }
   }
 
   /// 新的在前
@@ -541,6 +543,70 @@ import UniformTypeIdentifiers
   func composed(_ item: Item) async -> CGImage? {
     guard let original = await image(for: item.id) else { return nil }
     return Self.compose(original, annotations: item.annotations, scale: item.scale)
+  }
+
+  /// 预览按图像版本识别结果，编辑包括已写入原图的打码，即使标注数组最后又相同。
+  func previewVersion(for id: UUID) -> Int? {
+    _ = revision
+    guard item(id)?.supportsQuickPreview == true else { return nil }
+    return versions[id] ?? 0
+  }
+
+  /// 预览明确区分原图读取、像素限制与标注合成失败。
+  nonisolated enum PreviewFailure: LocalizedError {
+    case changed, unreadable, pixelLimit, composition
+
+    var errorDescription: String? {
+      switch self {
+      case .changed: "截图已变化，请重新预览。"
+      case .unreadable: "无法读取截图像素。"
+      case .pixelLimit: "截图像素超过预览上限。"
+      case .composition: "无法生成包含标注的成品。"
+      }
+    }
+  }
+
+  /// 只读一张原图。读盘和解码留在后台，实际合成前由预览确认仍要显示这一张。
+  func quickPreviewOriginal(for id: UUID) async throws -> CGImage {
+    try await Self.decodePreview(url(for: id))
+  }
+
+  /// 用当前版本严格合成。带标注时，失败不能返回可能包含未打码内容的原图。
+  func composeQuickPreview(_ original: CGImage, id: UUID, expectedVersion: Int) throws -> CGImage {
+    guard previewVersion(for: id) == expectedVersion, let item = item(id) else {
+      throw PreviewFailure.changed
+    }
+    guard !item.annotations.isEmpty else { return original }
+    let size = CGSize(width: original.width, height: original.height)
+    guard item.scale.isFinite, item.scale > 0,
+      let image = Annotation.render(
+        item.annotations, over: original,
+        pixelRect: CGRect(origin: .zero, size: size),
+        viewSize: CGSize(width: size.width / item.scale, height: size.height / item.scale))
+    else { throw PreviewFailure.composition }
+    return image
+  }
+
+  /// 保留本机文件的读错误，验证元信息后才解码有界的单张图。
+  @concurrent nonisolated private static func decodePreview(_ url: URL) async throws -> CGImage {
+    let fileSize = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+    guard fileSize <= ImageStore.maxPixels * 5 else { throw PreviewFailure.pixelLimit }
+    let bytes = try Data(contentsOf: url, options: .mappedIfSafe)
+    guard bytes.count <= ImageStore.maxPixels * 5 else { throw PreviewFailure.pixelLimit }
+    guard let input = CGImageSourceCreateWithData(bytes as CFData, nil),
+      CGImageSourceGetCount(input) == 1, CGImageSourceGetStatus(input) == .statusComplete,
+      let props = CGImageSourceCopyPropertiesAtIndex(input, 0, nil) as? [CFString: Any],
+      let width = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
+      let height = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue,
+      width.isFinite, height.isFinite, width > 0, height > 0
+    else { throw PreviewFailure.unreadable }
+    guard width * height <= Double(ImageStore.maxPixels) else { throw PreviewFailure.pixelLimit }
+    guard
+      let image = CGImageSourceCreateImageAtIndex(
+        input, 0,
+        [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
+    else { throw PreviewFailure.unreadable }
+    return image
   }
 
   /// 纯函数：把标注画到原图上（标注的坐标是这张图的点坐标）。

@@ -267,6 +267,115 @@ struct ShotHistoryTests {
     #expect(history.item(second)?.tags == ["额外"])
   }
 
+  /// 原生窗口键路由打开预览，箭头只走当前标签下的静态图片，Esc 保留原选区。
+  @Test func quickPreviewKeysKeepGridSelectionAndFilteredScope() async throws {
+    let (history, root) = try makeHistory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let outside = try #require(await history.record(image(width: 640), scale: 2, source: "其它"))
+    let first = try #require(await history.record(image(width: 900), scale: 2, source: "Safari"))
+    let second = try #require(
+      await history.record(image(width: 1200), scale: 2, kind: .scroll, source: "终端"))
+    let video = try #require(
+      await history.record(file: root.appending(path: "sample.mp4"), poster: nil, kind: .video))
+    try history.applyTags(to: [first, second, video], adding: ["验收"], removing: [])
+    try history.applyTags(to: [outside], adding: ["其它"], removing: [])
+    let model = ShotHistoryModel(history: history)
+    model.setTagFilter("验收")
+    let candidates = model.shown.filter(\.supportsQuickPreview)
+    let start = try #require(candidates.first)
+    let next = try #require(candidates.last)
+    model.pick(start.id)
+    let window = NSWindow(
+      contentRect: CGRect(x: -20000, y: -20000, width: 720, height: 420),
+      styleMask: .borderless, backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    func send(_ code: Int, repeatKey: Bool = false) throws -> Bool {
+      let event = try #require(
+        NSEvent.keyEvent(
+          with: .keyDown, location: .zero,
+          modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil,
+          characters: "", charactersIgnoringModifiers: "", isARepeat: repeatKey,
+          keyCode: UInt16(code)))
+      return ShotHistoryWindow.handlesKeyDown(event, in: window, model: model)
+    }
+    let editor = NSTextView(frame: CGRect(x: 0, y: 0, width: 100, height: 30))
+    window.contentView = editor
+    #expect(window.makeFirstResponder(editor))
+    #expect(try !send(kVK_Space) && !model.quickPreview.isOpen)
+    #expect(window.makeFirstResponder(nil))
+    #expect(try send(kVK_Space))
+    #expect(model.quickPreview.count == 2 && model.quickPreview.item?.id == start.id)
+    #expect(try send(kVK_Space, repeatKey: true) && model.quickPreview.isOpen)
+    #expect(try send(kVK_RightArrow))
+    #expect(
+      model.quickPreview.item?.id == next.id && model.picked == [start.id]
+        && model.anchor == start.id)
+    try await waitUntil { model.quickPreview.image != nil }
+    #expect(model.quickPreview.image?.width == Int(next.pixelSize.width))
+    #expect(try send(kVK_RightArrow) && model.quickPreview.item?.id == next.id)
+    #expect(try send(kVK_Escape) && !model.quickPreview.isOpen && model.picked == [start.id])
+    #expect(!window.isKeyWindow)
+    model.pick(video)
+    #expect(try !send(kVK_Space))
+  }
+
+  /// 带标注的版本改变后旧图立即失效；重读后呈现成品，不以原图代替合成失败。
+  @Test func quickPreviewHonorsAnnotationVersionAndStrictFailure() async throws {
+    let (history, root) = try makeHistory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let id = try #require(await history.record(image(width: 800, height: 600), scale: 2))
+    let model = ShotHistoryModel(history: history)
+    model.pick(id)
+    #expect(model.openQuickPreview())
+    try await waitUntil { model.quickPreview.image != nil }
+    let plain = try #require(model.quickPreview.image)
+    try await update(
+      history, id,
+      [
+        Annotation(
+          shape: .rectangle(CGRect(x: 20, y: 20, width: 360, height: 260)),
+          style: .init(color: .red, weight: .large))
+      ])
+    #expect(model.quickPreview.image == nil)
+    model.reconcileQuickPreview()
+    try await waitUntil { model.quickPreview.image != nil && history.edits[id] == nil }
+    let marked = try #require(model.quickPreview.image)
+    #expect(marked.width == plain.width && marked.height == plain.height)
+    #expect(Self.redness(of: marked) > Self.redness(of: plain) + 0.01)
+    var invalid = try #require(history.item(id))
+    invalid.scale = 0
+    history.seed([invalid])
+    model.quickPreview.retry()
+    try await waitUntil { model.quickPreview.error != nil }
+    #expect(model.quickPreview.image == nil && model.quickPreview.error?.contains("标注") == true)
+    model.setTagFilter("隐藏这条记录")
+    #expect(!model.quickPreview.isOpen)
+  }
+
+  /// 用可控的解码结果验证快速换图只读取最后一个待处理目标，关闭后不再回填。
+  @Test func quickPreviewCoalescesReadsAndDiscardsLatePictures() async throws {
+    let (history, root) = try makeHistory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    var ids: [UUID] = []
+    for _ in 0..<3 { ids.append(try #require(await history.record(image(), scale: 2))) }
+    let read = PreviewReadProbe(image: image())
+    defer { read.finish() }
+    let preview = ShotHistoryPreview(history: history, loadOriginal: read.load)
+    #expect(preview.open(ids[0], within: ids))
+    try await waitUntil { read.called.count == 1 }
+    try #require(read.called == [ids[0]])
+    preview.move(by: 1)
+    preview.move(by: 1)
+    #expect(preview.item?.id == ids[2] && preview.image == nil)
+    read.release()
+    try await waitUntil { read.called.count == 2 }
+    #expect(read.called == [ids[0], ids[2]] && preview.image == nil)
+    preview.close()
+    read.release()
+    await Task.yield()
+    #expect(!preview.isOpen && preview.image == nil && preview.error == nil)
+  }
+
   /// 删一条连图一起删；清空之后目录里什么都不剩
   @Test func removesFiles() async throws {
     let (history, root) = try makeHistory()
@@ -1204,5 +1313,35 @@ struct ShotHistoryTests {
 private final class Offscreen: NSWindow {
   override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
     frameRect
+  }
+}
+
+/// 让测试明确决定某次解码何时返回，避免用等待时间猜测换图顺序。
+@MainActor private final class PreviewReadProbe {
+  let image: CGImage
+  private(set) var called: [UUID] = []
+  private var waiting: [CheckedContinuation<CGImage, Never>] = []
+  private var finished = false
+
+  init(image: CGImage) { self.image = image }
+
+  /// 记录已启动的读取，等测试释放，不访问真实历史文件。
+  func load(_ id: UUID) async -> CGImage {
+    called.append(id)
+    if finished { return image }
+    return await withCheckedContinuation { waiting.append($0) }
+  }
+
+  /// 完成最早的读取，让工作循环决定是否采用。
+  func release() {
+    guard !waiting.isEmpty else { return }
+    waiting.removeFirst().resume(returning: image)
+  }
+
+  /// 测试失败或退出也解除所有等待。
+  func finish() {
+    finished = true
+    for pending in waiting { pending.resume(returning: image) }
+    waiting.removeAll()
   }
 }
