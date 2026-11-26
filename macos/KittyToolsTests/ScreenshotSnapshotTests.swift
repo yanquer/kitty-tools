@@ -1346,6 +1346,132 @@ struct ScreenshotSnapshotTests {
     try write(try #require(bitmap.cgImage), to: "\(out)/shot-pin-zoom.png")
   }
 
+  /// 检查长图跟随、拖动和小面板可读性，以及半透明钉图上实际显示的操作区。
+  @Test(.enabled(if: directory != nil)) func renderScrollAndPinAppearance() async throws {
+    try renderScrollPositions()
+    try await renderPinPictureOpacity()
+  }
+
+  /// 使用实际拼接结果渲染定位控件，直接调用控件的本地鼠标入口。
+  private func renderScrollPositions() throws {
+    let page = try ScreenshotTests.render([
+      "The quick brown fox jumps over the lazy dog", "敏捷的棕色狐狸跳过了懒狗", "日本語のテキスト",
+      "한국어 텍스트", "Привет мир", "Hello World", "第七行", "第八行",
+    ])
+    let first = try #require(page.cropping(to: CGRect(x: 0, y: 0, width: 400, height: 480)))
+    let second = try #require(page.cropping(to: CGRect(x: 0, y: 360, width: 400, height: 480)))
+    var stitcher = try #require(ScrollStitcher(first: first, scrollbarWidth: 8, maxHeight: 30_000))
+    _ = stitcher.add(second)
+    #expect(stitcher.outputHeight > first.height)
+    for (name, height, dark, drag) in [
+      ("scroll-position-following", 360, false, false),
+      ("scroll-position-dragging", 260, true, true),
+    ] {
+      let hud = ScrollCaptureHUD()
+      hud.frame = CGRect(x: 0, y: 0, width: ScrollCaptureHUD.width, height: CGFloat(height))
+      let window = offscreen(hud)
+      window.orderFront(nil)
+      defer { window.orderOut(nil) }
+      hud.layoutSubtreeIfNeeded()
+      let control = try #require(round11Subview(ScrollPreviewScrubber.self, in: hud))
+      hud.updatePreview(stitcher: stitcher, scale: 2)
+      #expect(!control.isHidden && window.canBecomeKey == false)
+      hud.onBrowse = { [weak hud] in hud?.updatePreview(stitcher: stitcher, scale: 2) }
+      hud.show("在选区里滚动，或按空格自动滚动", width: stitcher.width, height: stitcher.outputHeight)
+      if drag {
+        let point = control.convert(
+          CGPoint(x: control.bounds.midX, y: control.bounds.midY), to: nil)
+        let event = try #require(
+          NSEvent.mouseEvent(
+            with: .leftMouseDown, location: point,
+            modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil,
+            eventNumber: 0, clickCount: 1, pressure: 1))
+        control.mouseDown(with: event)
+        #expect(hud.isScrubbing && hud.browseFrom != nil)
+        hud.show("双击预览回到最新", width: stitcher.width, height: stitcher.outputHeight)
+      }
+      window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+      let material = try #require(hud.subviews.first)
+      // 液态玻璃在屏外会拦下整层绘制，直接读取实际承载控件的内容视图。
+      let content: NSView
+      if #available(macOS 26, *), let glass = material as? NSGlassEffectView {
+        content = try #require(glass.contentView)
+      } else {
+        content = material
+      }
+      content.displayIfNeeded()
+      let bitmap = try #require(content.bitmapImageRepForCachingDisplay(in: content.bounds))
+      content.cacheDisplay(in: content.bounds, to: bitmap)
+      let out = try #require(Self.directory)
+      try write(try #require(bitmap.cgImage), to: "\(out)/shot-\(name)\(dark ? "-dark" : "").png")
+    }
+  }
+
+  /// 使用同一张钉图核对 100% 与 10% 的画面变化，确保解锁、关闭和透明度按钮清晰可见。
+  private func renderPinPictureOpacity() async throws {
+    let out = try #require(Self.directory)
+    let board = PinBoard()
+    let desktop = try Self.desktop()
+    let picture = try #require(
+      desktop.cropping(to: CGRect(x: 240, y: 450, width: 640, height: 360)))
+    board.pin(picture, frame: CGRect(x: -20000, y: -20000, width: 320, height: 180))
+    defer { board.closeAll() }
+    let panel = try #require(board.panels.first)
+    let pin = try #require(panel.contentView)
+    panel.finishPopIn()
+    panel.setLocked(true)
+    let hover = try #require(
+      NSEvent.enterExitEvent(
+        with: .mouseEntered, location: .zero,
+        modifierFlags: [], timestamp: 0, windowNumber: panel.windowNumber, context: nil,
+        eventNumber: 0, trackingNumber: 0, userData: nil))
+    pin.mouseEntered(with: hover)
+    let close = try #require(
+      round11Subview(NSButton.self, in: pin, matching: { $0.toolTip == "关闭" }))
+    for _ in 0..<80 where close.isHiddenOrHasHiddenAncestor {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    try await Task.sleep(for: .milliseconds(180))
+    let ancestry = sequence(first: close as NSView, next: { $0.superview }).prefix { $0 !== pin }
+    let description = ancestry.map { "\(type(of: $0)) \($0.isHidden) \($0.alphaValue) \($0.frame)" }
+    #expect(!close.isHiddenOrHasHiddenAncestor, "\(description)")
+    let layer = try #require(pin.layer)
+    for percent in [100, 10] {
+      panel.opacity = CGFloat(percent) / 100
+      CATransaction.flush()
+      let bitmap = try #require(
+        NSBitmapImageRep(
+          bitmapDataPlanes: nil, pixelsWide: 640,
+          pixelsHigh: 360, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+          isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+      let context = try #require(NSGraphicsContext(bitmapImageRep: bitmap)).cgContext
+      context.scaleBy(x: 2, y: 2)
+      context.setFillColor(CGColor(gray: 0.75, alpha: 1))
+      context.fill(pin.bounds)
+      layer.render(in: context)
+      try write(try #require(bitmap.cgImage), to: "\(out)/shot-pin-picture-alpha-\(percent).png")
+      #expect(panel.alphaValue == 1 && !panel.isKeyWindow && close.alphaValue == 1)
+      let buttonPoint = close.convert(
+        CGPoint(x: close.bounds.midX, y: close.bounds.midY), to: pin.superview)
+      let hit = pin.hitTest(buttonPoint)
+      #expect(
+        hit === close || hit?.isDescendant(of: close) == true,
+        "\(String(describing: hit)), \(buttonPoint), \(description)")
+    }
+  }
+
+  /// 查找真实 AppKit 子视图，用于屏外调用产品控件。
+  private func round11Subview<View: NSView>(
+    _ type: View.Type, in root: NSView,
+    matching: (View) -> Bool = { _ in true }
+  ) -> View? {
+    if let found = root as? View, matching(found) { return found }
+    for child in root.subviews {
+      if let found = round11Subview(type, in: child, matching: matching) { return found }
+    }
+    return nil
+  }
+
   // issue #4：剪贴板里的文字钉成卡片——一行、带缩进的几行代码、超过上限截掉的长段（浅 / 深色，2x）
   @Test(.enabled(if: directory != nil)) func renderPinText() throws {
     let out = try #require(Self.directory)

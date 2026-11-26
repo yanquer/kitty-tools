@@ -122,11 +122,12 @@ struct ShotAccessibilityTests {
       actions.map(\.name) == [
         "拷贝", "识字并拷贝", "查看识字结果", "翻译", ScreenshotOutput.saveTitle, "另存为…", "继续标注", "局部放大", "收起为小卡片",
         "专注这张钉图", "锁定钉图", "原始大小", "向左旋转 90°", "向右旋转 90°", "水平翻转", "垂直翻转",
-        "关闭",
+        "关闭", "原位选字",
       ])
     for action in actions.prefix(6) { #expect(action.handler?() == true) }
     #expect(outputs == [.copy, .recognize, .inspect, .translate, .save, .saveAs])
-    #expect(actions.last?.handler?() == true)
+    let close = try #require(actions.first { $0.name == "关闭" })
+    #expect(close.handler?() == true)
     #expect(board.panels.isEmpty)
   }
 

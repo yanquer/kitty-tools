@@ -492,6 +492,7 @@ struct ShortcutsSheet: View {
         features: [.screenshot],
         entries: [
           Entry("空格", text: "自动滚动 / 停下（要辅助功能授权）"),
+          Entry("↑", "↓", text: "回看已拼接的长图，也可以拖动右侧位置条。双击预览回到最新"),
           Entry("A", text: "标注（在长图上画，画完再出图）"),
           Entry("↩", "⌘C", text: "拷贝"),
           Entry("⌘S", text: "快速保存"),

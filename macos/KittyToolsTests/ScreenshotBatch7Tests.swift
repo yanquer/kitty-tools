@@ -51,14 +51,28 @@ struct ScreenshotBatch7Tests {
     settle()
     let (over, aside) = (board.panels[0], board.panels[1])
     over.opacity = 0.6
+    aside.opacity = 0.8
+    let overPicture = try pictureLayer(in: over)
+    let asidePicture = try pictureLayer(in: aside)
     board.suspend(covering: CGRect(x: -19950, y: -19950, width: 400, height: 300))
     #expect(over.ignoresMouseEvents)
-    #expect(abs(over.alphaValue - 0.3) < 0.01)
+    #expect(abs(over.alphaValue - 0.3) < 0.01 && overPicture.opacity == 1)
     #expect(!aside.ignoresMouseEvents && !aside.isSuspended)
-    #expect(abs(aside.alphaValue - 1) < 0.01)
+    #expect(aside.alphaValue == 1 && abs(asidePicture.opacity - 0.8) < 0.01)
+    over.opacity = 0.2
+    #expect(abs(over.alphaValue - 0.3) < 0.01 && overPicture.opacity == 1)
     board.resume()
     #expect(!over.ignoresMouseEvents && !over.isSuspended)
-    #expect(abs(over.alphaValue - 0.6) < 0.01)
+    #expect(over.alphaValue == 1 && abs(overPicture.opacity - 0.2) < 0.01)
+    board.suspend(covering: over.frame)
+    #expect(abs(over.alphaValue - 0.2) < 0.01 && overPicture.opacity == 1)
+    board.resume()
+    #expect(over.alphaValue == 1 && abs(overPicture.opacity - 0.2) < 0.01)
+  }
+
+  /// 定位承载钉图位图的合成层，便于与窗口和控制区的透明度分别核对。
+  private func pictureLayer(in panel: PinPanel) throws -> CALayer {
+    try #require(panel.contentView?.layer?.sublayers?.first { $0.name == "pin-picture" })
   }
 
   // 叠着两张常驻缩略图、选区只盖到最底下那张：收走它后上面那张落进同一格，也要一起收走（不留在选区上挡滚轮）
@@ -113,6 +127,87 @@ struct ScreenshotBatch7Tests {
     #expect(abs(half.height - (box.height - 4) / 2) < 0.01 && abs(half.midY - box.midY) < 0.01)
     // 长图整张都在预览里：不画
     #expect(ScrollCaptureHUD.scrubberFrame(in: box, shown: 0..<200, total: 0..<200) == nil)
+  }
+
+  /// 经屏外 HUD 的原生位置条拖动和键盘入口回看，覆盖两种生长方向与窗外松手。
+  @Test(arguments: [false, true]) func scrollPreviewScrubberMovesToCapturedRows(growingUp: Bool)
+    throws
+  {
+    let page = try ScreenshotTests.render([
+      "A record of captured rows", "Blue clouds glide slowly", "Swift structs and protocols",
+      "敏捷的棕色狐狸跳过了懒狗", "日本語の文書見本", "한국어 텍스트", "Привет мир",
+      "Good afternoon", "Different shapes appear", "Last row of this example",
+    ])
+    let offsets = growingUp ? [720, 480, 240, 0] : [0, 240, 480, 720]
+    let frames = try offsets.map { y in
+      try #require(page.cropping(to: CGRect(x: 0, y: y, width: 400, height: 480)))
+    }
+    var stitcher = try #require(
+      ScrollStitcher(first: frames[0], scrollbarWidth: 8, maxHeight: 30_000))
+    let first = stitcher
+    for frame in frames.dropFirst() { _ = stitcher.add(frame) }
+    #expect(stitcher.outputHeight > 900 && stitcher.isGrowingUp == growingUp)
+
+    let bounds = CGRect(x: 0, y: 0, width: ScrollCaptureHUD.width, height: 420)
+    let window = NSWindow(
+      contentRect: bounds.offsetBy(dx: -20000, dy: -20000),
+      styleMask: .borderless, backing: .buffered, defer: false)
+    let hud = ScrollCaptureHUD()
+    hud.frame = bounds
+    window.contentView = hud
+    hud.layoutSubtreeIfNeeded()
+    let scrubber = try #require(descendants(hud).compactMap { $0 as? ScrollPreviewScrubber }.first)
+    hud.updatePreview(stitcher: first, scale: 2)
+    #expect(scrubber.isHidden)
+    hud.updatePreview(stitcher: stitcher, scale: 2)
+    #expect(!scrubber.isHidden && scrubber.accessibilityLabel() == "长截图预览位置")
+    #expect(scrubber.accessibilityValue() as? Int == (growingUp ? 0 : 100))
+    var requests: [Int?] = []
+    var actions: [ScrollCaptureHUD.Item] = []
+    hud.onAction = { actions.append($0) }
+    hud.onBrowse = {
+      requests.append(hud.browseFrom)
+      hud.updatePreview(stitcher: stitcher, scale: 2)
+    }
+    defer { hud.onBrowse = {} }
+    func mouse(_ type: NSEvent.EventType, y: CGFloat, clicks: Int = 1) throws -> NSEvent {
+      let point = scrubber.convert(CGPoint(x: scrubber.bounds.midX, y: y), to: nil)
+      return try #require(
+        NSEvent.mouseEvent(
+          with: type, location: point, modifierFlags: [],
+          timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 1,
+          clickCount: clicks, pressure: 1))
+    }
+    let start = growingUp ? scrubber.bounds.maxY - 6 : scrubber.bounds.minY + 6
+    let point = scrubber.convert(CGPoint(x: scrubber.bounds.midX, y: start), to: hud)
+    #expect(hud.hitTest(point) === scrubber)
+    scrubber.mouseDown(with: try mouse(.leftMouseDown, y: start))
+    #expect(hud.isScrubbing && requests.isEmpty)
+    scrubber.mouseDragged(with: try mouse(.leftMouseDragged, y: scrubber.bounds.midY))
+    #expect(hud.browseFrom != nil && requests.count == 1)
+    let oppositeEdge = growingUp ? scrubber.bounds.minY - 30 : scrubber.bounds.maxY + 30
+    scrubber.mouseUp(with: try mouse(.leftMouseUp, y: oppositeEdge))
+    #expect(!hud.isScrubbing && requests.count == 2)
+    #expect(scrubber.accessibilityValue() as? Int == (growingUp ? 100 : 0))
+    let arrow = try #require(
+      NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: [],
+        timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "",
+        charactersIgnoringModifiers: "", isARepeat: false,
+        keyCode: UInt16(growingUp ? kVK_UpArrow : kVK_DownArrow)))
+    hud.keyDown(with: arrow)
+    #expect(scrubber.accessibilityValue() as? Int == (growingUp ? 90 : 10))
+    #expect(
+      growingUp
+        ? scrubber.accessibilityPerformDecrement() : scrubber.accessibilityPerformIncrement())
+    #expect(scrubber.accessibilityValue() as? Int == (growingUp ? 80 : 20))
+    scrubber.mouseDown(with: try mouse(.leftMouseDown, y: scrubber.bounds.midY, clicks: 2))
+    #expect(hud.browseFrom == nil && !hud.isScrubbing && actions.isEmpty && !window.isKeyWindow)
+  }
+
+  /// 从原生布局查找目标控件，无需打开可成为前台的窗口。
+  private func descendants(_ view: NSView) -> [NSView] {
+    view.subviews.flatMap { [$0] + descendants($0) }
   }
 
   @Test func scrollStatusTones() {
@@ -284,22 +379,24 @@ struct ScreenshotBatch7Tests {
         context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
     let menu = try #require(view.menu(for: event))
     let folder = FileManager.default.displayName(atPath: ScreenshotOutput.saveDirectory.path)
-    #expect(
-      menu.items.map(\.title) == [
-        "拷贝", "识字并拷贝", "翻译", "存储到「\(folder)」", "另存为…", "", "透明度", "原始大小", "", "关闭",
-      ])
-    let keys = menu.items.map { "\($0.keyEquivalentModifierMask.rawValue):\($0.keyEquivalent)" }
-    let command = NSEvent.ModifierFlags.command.rawValue
-    let shiftCommand = NSEvent.ModifierFlags([.command, .shift]).rawValue
-    #expect(keys[0] == "\(command):c" && keys[1] == "0:o" && keys[3] == "\(command):s")
-    #expect(
-      keys[4] == "\(shiftCommand):s" && keys[7] == "\(command):0" && keys[9] == "\(command):w")
-    // 菜单项点下去走对应的输出
-    for index in 0..<5 {
-      let item = menu.items[index]
+    let outputItems = ["拷贝", "识字并拷贝", "查看识字结果", "翻译", "存储到「\(folder)」", "另存为…"]
+    #expect(menu.items.map(\.title).filter(outputItems.contains) == outputItems)
+    #expect(menu.items.first { $0.title == "透明度" }?.submenu != nil)
+    let keys: [(String, String, NSEvent.ModifierFlags)] = [
+      ("拷贝", "c", .command), ("识字并拷贝", "o", []), ("查看识字结果", "o", .shift),
+      ("存储到「\(folder)」", "s", .command), ("另存为…", "s", [.command, .shift]),
+      ("原始大小", "0", .command), ("关闭", "w", .command),
+    ]
+    for (title, key, modifiers) in keys {
+      let item = try #require(menu.items.first { $0.title == title })
+      #expect(item.keyEquivalent.lowercased() == key && item.keyEquivalentModifierMask == modifiers)
+    }
+    // 通过真实菜单项执行所有输出，后续增删审阅工具不会挪错验证目标。
+    for title in outputItems {
+      let item = try #require(menu.items.first { $0.title == title })
       NSApp.sendAction(try #require(item.action), to: item.target, from: item)
     }
-    #expect(outputs == [.copy, .recognize, .translate, .save, .saveAs])
+    #expect(outputs == [.copy, .recognize, .inspect, .translate, .save, .saveAs])
     // 按键和菜单查同一张表（performKeyEquivalent 要钉图真是 key，经 keyDown 走同一个查表）：
     // ⌘C 拷贝、⌘S 快速保存、⇧⌘S 另存为、单键 O 识字并拷贝；按住不放不反复执行
     outputs = []
@@ -350,10 +447,15 @@ struct ScreenshotBatch7Tests {
     #expect(label.stringValue == "100%" && slider.accessibilityLabel() == "透明度")
     slider.doubleValue = 34.6
     NSApp.sendAction(try #require(slider.action), to: slider.target, from: slider)
-    #expect(abs(panel.opacity - 0.35) < 0.001 && abs(panel.alphaValue - 0.35) < 0.01)
+    let picture = try pictureLayer(in: panel)
+    #expect(panel.opacity == 0.35 && panel.alphaValue == 1 && abs(picture.opacity - 0.35) < 0.01)
     #expect(label.stringValue == "35%" && slider.accessibilityValueDescription() == "35%")
     #expect(view.accessibilityValue() as? String == "200 × 100 点，透明度 35%")
     #expect(try row().0.doubleValue == 35)
+    slider.doubleValue = 10
+    NSApp.sendAction(try #require(slider.action), to: slider.target, from: slider)
+    #expect(abs(picture.opacity - 0.1) < 0.01 && panel.alphaValue == 1)
+    #expect(panel.image === Self.image)
   }
 
   // MARK: D18 截完图放哪（2026-10-26 晾衣绳拍板 B1 起是三选一）

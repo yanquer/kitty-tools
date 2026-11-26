@@ -3,8 +3,8 @@
 // 按键和截图出图一致（体检 C9 D17）：⌘C 拷贝、O 识字并拷贝、⌘S 存储到快速保存的文件夹、⇧⌘S 另存为…、⌘0 原始大小、⌘W 关闭；
 // 右键菜单：拷贝 / 识字并拷贝 / 翻译 / 存储到「桌面」/ 另存为… ｜ 透明度 / 原始大小 ｜ 关闭，VoiceOver 的自定义动作同一份（B45）。
 // 透明度是 10–100% 的滑块（2026-10-03 用户要求，原来点一下换一档；对标 CleanShot 的钉图）：悬停圆钮点开、右键「透明度 ▸」里是同一行，
-// 拖动实时生效。滑块放在菜单里：菜单是自己的窗口，钉图整个窗口按透明度变淡，滑块放进钉图里会跟着一起淡。
-// 长截图时和选区相交的钉图让开（B40：不接鼠标、淡到 0.3，滚轮和自动滚动落到下面的窗口）。菜单栏可隐藏 / 显示、关闭全部。
+// 拖动实时改变合成图片层，按钮和缩放提示保持原来的对比度。长截图时和选区相交的钉图临时整窗让位（B40：不接鼠标，
+// 不透明度最多 0.3，滚轮和自动滚动落到下面的窗口）。菜单栏可隐藏 / 显示、关闭全部。
 // Whisker（mac-whisker §6 钉图）：圆角 10 + 系统阴影；钉上时窗口 1.04 → 1 弹簧回弹（超过半屏的只淡入）；悬停 0.3 s 后右上角淡入透明度 / 关闭两个
 // 22 pt HUD 圆钮；缩放时中央 HUD 显示百分比、停手 0.7 s 淡出；关闭时缩到 0.92 并淡出 0.16 s。
 // 不做点击穿透（穿透要全局抢一个热键才能再点回来）、不做钉图历史；钉图会出现在之后的截图里。
@@ -494,18 +494,24 @@ final class PinPanel: NSPanel {
   override var canBecomeKey: Bool { true }
   override var canBecomeMain: Bool { false }
 
-  /// 用户选的透明度（0.1–1，透明度滑块）：长截图让开时窗口临时淡到 0.3，结束后回到它
+  /// 平时只改变图片层。长截图让位时暂用整窗透明度，保持与原先相同的淡化效果。
   var opacity: CGFloat = 1 {
-    didSet { if !isSuspended { alphaValue = opacity } }
+    didSet { if !isSuspended { updatePictureOpacity() } }
   }
   /// 长截图期间让开着（B40）
   private(set) var isSuspended = false
+
+  /// 在单独的图片层应用浏览透明度，保留按钮和 HUD 的原本对比度。
+  private func updatePictureOpacity() {
+    (contentView as? PinView)?.setPictureOpacity(isSuspended ? 1 : opacity)
+  }
 
   func suspend() {
     guard !isSuspended else { return }
     finishPopIn()
     isSuspended = true
     ignoresMouseEvents = true
+    updatePictureOpacity()
     alphaValue = min(opacity, 0.3)
   }
 
@@ -513,7 +519,8 @@ final class PinPanel: NSPanel {
     guard isSuspended else { return }
     isSuspended = false
     ignoresMouseEvents = false
-    alphaValue = opacity
+    updatePictureOpacity()
+    alphaValue = 1
   }
 
   /// 钉上的回弹：终点（原位）、开始时间、逐帧驱动
@@ -535,7 +542,7 @@ final class PinPanel: NSPanel {
       // 减弱动态效果时 pop 退成 0.2 s easeInOut 淡入（§7）
       context.duration = reduced ? 0.2 : Style.fadeIn
       context.timingFunction = CAMediaTimingFunction(name: reduced ? .easeInEaseOut : .easeOut)
-      animator().alphaValue = opacity
+      animator().alphaValue = 1
     }
     let area = (self.screen ?? NSScreen.main)?.frame.size ?? .zero
     guard !reduced, target.width * target.height <= area.width * area.height / 2,
@@ -610,6 +617,7 @@ final class PinPanel: NSPanel {
 
 private final class PinView: NSView {
   private(set) var image: CGImage
+  private let picture = CALayer()
   let textSelection = PinTextSelection(frame: .zero)
   private var localZoom = PinZoom()
   private var panStart: (point: CGPoint, center: CGPoint)?
@@ -642,6 +650,10 @@ private final class PinView: NSView {
     }
     super.init(frame: CGRect(origin: .zero, size: size))
     wantsLayer = true
+    picture.name = "pin-picture"
+    picture.frame = bounds
+    picture.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+    layer?.insertSublayer(picture, at: 0)
     textSelection.frame = bounds
     textSelection.autoresizingMask = [.width, .height]
     textSelection.acceptsPoint = { [weak self] point in
@@ -740,6 +752,14 @@ private final class PinView: NSView {
 
   override var wantsUpdateLayer: Bool { true }
 
+  /// 调滑块时直接更新合成层，不重建像素、文字选区或操作区。
+  func setPictureOpacity(_ opacity: CGFloat) {
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    picture.opacity = Float(opacity)
+    CATransaction.commit()
+  }
+
   override func updateLayer() {
     let crop = RegionSelector.pixelRect(
       localZoom.viewport,
@@ -749,14 +769,20 @@ private final class PinView: NSView {
     textSelection.viewport =
       localZoom.isEnabled && !miniature
       ? localZoom.viewport : CGRect(x: 0, y: 0, width: 1, height: 1)
-    layer?.contents = localZoom.isEnabled && !miniature ? image.cropping(to: crop) : image
-    layer?.contentsGravity = miniature ? .resizeAspect : .resize
-    layer?.backgroundColor = miniature ? Style.HUD.solidFill.cgColor : nil
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    picture.contentsScale = layer?.contentsScale ?? 1
+    picture.contents = localZoom.isEnabled && !miniature ? image.cropping(to: crop) : image
+    picture.contentsGravity = miniature ? .resizeAspect : .resize
+    picture.backgroundColor = miniature ? Style.HUD.solidFill.cgColor : nil
+    picture.cornerRadius = Style.Radius.card
+    picture.cornerCurve = .continuous
+    picture.borderWidth = Style.HUD.strokeWidth
+    picture.borderColor = NSColor.separatorColor.cgColor
     layer?.cornerRadius = Style.Radius.card
     layer?.cornerCurve = .continuous
     layer?.masksToBounds = true
-    layer?.borderWidth = Style.HUD.strokeWidth
-    layer?.borderColor = NSColor.separatorColor.cgColor
+    CATransaction.commit()
   }
 
   override var acceptsFirstResponder: Bool { true }
