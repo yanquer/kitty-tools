@@ -96,7 +96,7 @@ struct ShotCompositionInsertion: Equatable {
           ImageImport.discard(batch.directory)
           return
         }
-        adopt(batch)
+        try adopt(batch)
         preparing = false
         refreshPreview()
       } catch {
@@ -109,55 +109,88 @@ struct ShotCompositionInsertion: Equatable {
     }
   }
 
-  /// 采用一批完整副本，直到会话关闭才回收，避免正在生成的预览读到被移除的文件。
-  private func adopt(_ batch: ImageImport.Batch, replacing id: UUID? = nil) {
-    directories.append(batch.directory)
-    importedBytes += batch.bytes
-    if let id, let index = sources.firstIndex(where: { $0.id == id }),
-      let first = batch.sources.first
-    {
+  /// 完整采用副本后保留到会话结束。替换保留位置，旧副本可供撤销和在途预览使用。
+  private func adopt(_ batch: ImageImport.Batch, replacing id: UUID? = nil) throws {
+    if let id {
+      guard let index = sources.firstIndex(where: { $0.id == id }),
+        batch.sources.count == 1, let first = batch.sources.first
+      else {
+        ImageImport.discard(batch.directory)
+        throw ShotComposition.Failure(message: "要替换的图片已变化，请重新选择")
+      }
+      recordEdit()
+      pendingThumbnails.removeValue(forKey: id)
       sources[index] = ShotComposition.Source(
         id: id, url: first.url, size: first.size, label: first.label, thumbnail: first.thumbnail,
         originalFilename: first.originalFilename)
     } else {
       sources.append(contentsOf: batch.sources)
+      undoEdits.removeAll()
+      redoEdits.removeAll()
     }
+    directories.append(batch.directory)
+    importedBytes += batch.bytes
   }
 
-  /// 添加或替换整批成功才改变列表；失败保持原图片、原顺序与预览。
-  func importFiles(_ urls: [URL], replacing id: UUID? = nil) {
-    guard canImport, reorderingID == nil, !urls.isEmpty else { return }
+  /// 接收本次导入请求并后台读取。所有副本通过验证后才提交列表变更。
+  @discardableResult func importFiles(_ urls: [URL], replacing id: UUID? = nil) -> Bool {
+    guard canImport, reorderingID == nil, !urls.isEmpty else { return false }
     let count = id == nil ? sources.count + urls.count : sources.count
     guard count <= ShotComposition.maximumCount,
       id == nil || (urls.count == 1 && sources.contains(where: { $0.id == id }))
     else {
       error = id == nil ? "最多只能放 20 张图片，请先移除部分图片" : "请选择一张图片替换当前项"
       Log.storage.notice("导入图片拒绝 stage=selection count=\(urls.count) replacing=\(id != nil)")
-      return
+      return false
     }
     preparing = true
     error = nil
-    exported = nil
+    if id == nil { exported = nil }
     let ticket = generation
     let budget = ImageImport.maximumSessionBytes - importedBytes
+    let operationID = UUID()
+    let operation = operationID.uuidString
+    let began = ContinuousClock.now
+    if let id {
+      Log.storage.notice(
+        "拼图替换开始 operation=\(operation, privacy: .public) source=\(id.uuidString, privacy: .public)"
+      )
+    }
     loadingTask = Task { [weak self] in
+      var stage = "read"
       do {
-        let batch = try await ImageImport.snapshots(urls, remainingBytes: budget)
+        let batch = try await ImageImport.snapshots(
+          urls, remainingBytes: budget, operationID: operationID)
         guard !Task.isCancelled, let self, generation == ticket else {
           ImageImport.discard(batch.directory)
+          Log.storage.notice(
+            "拼图导入未提交 operation=\(operation, privacy: .public) stage=session-changed")
           return
         }
-        adopt(batch, replacing: id)
-        undoEdits.removeAll()
-        redoEdits.removeAll()
+        stage = "adopt"
+        try adopt(batch, replacing: id)
         preparing = false
+        loadingTask = nil
         refreshPreview()
+        if let id {
+          Log.storage.notice(
+            "拼图替换完成 operation=\(operation, privacy: .public) source=\(id.uuidString, privacy: .public) elapsed=\(String(describing: began.duration(to: .now)), privacy: .public)"
+          )
+        }
       } catch {
         guard !Task.isCancelled, let self, generation == ticket else { return }
         preparing = false
+        loadingTask = nil
         self.error = error.localizedDescription
+        if let id {
+          let reason = error as NSError
+          Log.storage.error(
+            "拼图替换未完成 operation=\(operation, privacy: .public) source=\(id.uuidString, privacy: .public) stage=\(stage, privacy: .public) domain=\(reason.domain, privacy: .public) code=\(reason.code) elapsed=\(String(describing: began.duration(to: .now)), privacy: .public)"
+          )
+        }
       }
     }
+    return true
   }
 
   /// 文件选择由用户按钮发起；取消或面板已关闭时不改变当前会话。
@@ -784,9 +817,7 @@ struct ShotCompositionView: View {
               .stroke(dropTargeted ? Style.brand : .clear, lineWidth: 2).padding(8)
           }
           .dropDestination(for: URL.self) { urls, _ in
-            guard model.canImport, model.reorderingID == nil, !urls.isEmpty else { return false }
             model.importFiles(urls)
-            return true
           } isTargeted: {
             dropTargeted = $0
           }
@@ -1106,7 +1137,9 @@ struct ShotCompositionView: View {
 
   /// 缩略图既是拖动把手也是状态反馈，键盘与旁白仍可用旁边的上下按钮。
   private func orderThumbnail(_ source: ShotComposition.Source) -> some View {
-    Group {
+    let canReorder = model.sources.count > 1 && model.canImport
+    let dropHelp = canReorder ? "拖动缩略图调整顺序，拖入文件替换图片" : "拖入文件替换图片"
+    return Group {
       if let thumbnail = source.adjustedThumbnail {
         Image(decorative: thumbnail, scale: 1).resizable().aspectRatio(contentMode: .fit)
           .accessibilityHidden(true)
@@ -1121,13 +1154,15 @@ struct ShotCompositionView: View {
       GeometryReader { proxy in
         let origin = proxy.frame(in: .global).origin
         ShotCompositionGrip(
-          id: source.id, enabled: model.sources.count > 1 && model.canImport,
-          help: source.thumbnailError ?? "拖动缩略图调整顺序",
+          id: source.id, enabled: canReorder,
+          replacementEnabled: model.canImport && model.reorderingID == nil,
+          help: source.thumbnailError ?? dropHelp,
           move: { point, ending in
             dragThumbnail(
               source.id, at: CGPoint(x: origin.x + point.x, y: origin.y + point.y),
               ending: ending)
-          })
+          },
+          replace: { url in model.importFiles([url], replacing: source.id) })
       }
       .accessibilityHidden(true)
     }
@@ -1164,12 +1199,14 @@ struct ShotCompositionView: View {
   }
 }
 
-/// 缩略图内的拖动把手只处理本窗口鼠标，和系统文件拖入及面板背景移动分开。
+/// 缩略图沿用本地鼠标排序，并作为单张外部文件的系统拖放目标。
 private struct ShotCompositionGrip: NSViewRepresentable {
   let id: UUID
   let enabled: Bool
+  let replacementEnabled: Bool
   let help: String
   let move: (CGPoint, Bool) -> Void
+  let replace: (URL) -> Bool
 
   /// 为每张图片建立独立鼠标目标，滚动只移动同一个目标的位置。
   func makeNSView(context: Context) -> ShotCompositionDragView {
@@ -1179,14 +1216,19 @@ private struct ShotCompositionGrip: NSViewRepresentable {
   /// 每次滚动后同步最新坐标和操作许可。
   func updateNSView(_ view: ShotCompositionDragView, context: Context) {
     view.enabled = enabled
+    view.replacementEnabled = replacementEnabled
     view.toolTip = help
     view.move = move
+    view.replace = replace
   }
 
   /// 拆除时只释放 AppKit 状态，面板关闭由模型清理，不能回写正在销毁的 SwiftUI 视图。
   static func dismantleNSView(_ view: ShotCompositionDragView, coordinator: ()) {
     view.endTracking()
+    view.replacementEnabled = false
     view.move = { _, _ in }
+    view.replace = { _ in false }
+    view.unregisterDraggedTypes()
   }
 }
 
@@ -1199,6 +1241,13 @@ final class ShotCompositionDragView: NSView {
     }
   }
   var move: (CGPoint, Bool) -> Void = { _, _ in }
+  var replacementEnabled = false {
+    didSet { if !replacementEnabled { replacementTargeted = false } }
+  }
+  var replace: (URL) -> Bool = { _ in false }
+  private(set) var replacementTargeted = false {
+    didSet { if oldValue != replacementTargeted { needsDisplay = true } }
+  }
   private var start: CGPoint?
   private var dragging = false
 
@@ -1206,12 +1255,70 @@ final class ShotCompositionDragView: NSView {
   init(id: UUID) {
     self.id = id
     super.init(frame: .zero)
+    registerForDraggedTypes([.fileURL])
   }
 
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
   override var isFlipped: Bool { true }
   override var mouseDownCanMoveWindow: Bool { false }
   override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+  /// 强调色边框只标记可接收的这张缩略图，和排序的插入线区分开。
+  override func draw(_ dirtyRect: NSRect) {
+    super.draw(dirtyRect)
+    guard replacementTargeted else { return }
+    let radius = Style.Radius.mini
+    let outline = NSBezierPath(
+      roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: radius, yRadius: radius)
+    NSColor(Style.brand).setStroke()
+    outline.lineWidth = 2
+    outline.stroke()
+  }
+
+  /// 进入或移动时只检查拖放类型和数量，文件内容交给异步导入。
+  override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+    draggingUpdated(sender)
+  }
+
+  /// 只高亮单个允许拷贝的本机文件目标。
+  override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+    replacementTargeted = canReceiveReplacement(sender)
+    return replacementTargeted ? .copy : []
+  }
+
+  /// 离开目标或取消时清除提示。
+  override func draggingExited(_ sender: (any NSDraggingInfo)?) {
+    replacementTargeted = false
+  }
+
+  /// 系统拖放结束后清除提示，包括提交后又离开窗口的情况。
+  override func draggingEnded(_ sender: any NSDraggingInfo) {
+    replacementTargeted = false
+  }
+
+  /// 只有目标仍可用时才允许系统结束这次拖放。
+  override func prepareForDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+    canReceiveReplacement(sender)
+  }
+
+  /// 松手时重新核对拖放对象，只提交一张有效本机文件给导入链路。
+  override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+    replacementTargeted = false
+    guard canReceiveReplacement(sender),
+      let urls = sender.draggingPasteboard.readObjects(
+        forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
+      urls.count == 1, let url = urls.first
+    else { return false }
+    return replace(url)
+  }
+
+  /// 多文件及仅允许移动的拖放保持拒绝，悬停期间无需打开文件。
+  private func canReceiveReplacement(_ sender: any NSDraggingInfo) -> Bool {
+    guard replacementEnabled, sender.draggingSourceOperationMask.contains(.copy),
+      let items = sender.draggingPasteboard.pasteboardItems, items.count == 1
+    else { return false }
+    return items[0].types.contains(.fileURL)
+  }
 
   /// 可拖动时在缩略图范围显示抓手光标，交给系统管理其生命周期。
   override func resetCursorRects() {

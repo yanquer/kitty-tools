@@ -104,12 +104,13 @@ nonisolated enum ImageImport {
 
   /// 逐张生成会话副本；任意文件失败整批不采用，并删除本批半成品。
   @concurrent static func snapshots(
-    _ urls: [URL], labels: [String]? = nil, remainingBytes: Int = maximumSessionBytes
+    _ urls: [URL], labels: [String]? = nil, remainingBytes: Int = maximumSessionBytes,
+    operationID: UUID = UUID()
   ) async throws -> Batch {
     guard !urls.isEmpty, urls.count <= ShotComposition.maximumCount,
       labels == nil || labels?.count == urls.count
     else { throw Failure(message: "一次请选择 1–20 张静态图片") }
-    let operation = UUID().uuidString
+    let operation = operationID.uuidString
     let directory = FileManager.default.temporaryDirectory.appending(
       path: "kitty-image-import-\(operation)", directoryHint: .isDirectory)
     let began = ContinuousClock.now
@@ -144,8 +145,11 @@ nonisolated enum ImageImport {
       )
       return Batch(directory: directory, sources: prepared, bytes: bytes)
     } catch {
+      let reason = error as NSError
+      let underlying = reason.userInfo[NSUnderlyingErrorKey] as? NSError
+      let detail = (error as? Failure)?.message ?? ""
       Log.storage.error(
-        "导入图片未采用 operation=\(operation, privacy: .public) cause=\(String(reflecting: error), privacy: .public)"
+        "导入图片未采用 operation=\(operation, privacy: .public) domain=\(reason.domain, privacy: .public) code=\(reason.code) underlyingDomain=\(underlying?.domain ?? "", privacy: .public) underlyingCode=\(underlying?.code ?? 0) detail=\(detail, privacy: .public)"
       )
       discard(directory)
       throw error

@@ -2269,6 +2269,75 @@ struct ScreenshotSnapshotTests {
         clickCount: 1, pressure: 1))
   }
 
+  /// 用具名拖放剪贴板驱动真实 AppKit 接收视图，并检查悬停、拒绝、替换和撤销后的画面。
+  @Test(.enabled(if: directory != nil)) func renderCompositionReplacementDrop() async throws {
+    let folder = FileManager.default.temporaryDirectory.appending(
+      path: "kitty-compose-replacement-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let model = ShotCompositionModel()
+    let pasteboard = NSPasteboard(name: .init("kitty-composition-drop-\(UUID().uuidString)"))
+    defer {
+      model.clear()
+      pasteboard.releaseGlobally()
+      try? FileManager.default.removeItem(at: folder)
+    }
+    let desktop = try Self.desktop()
+    let urls = try ["截图-初稿", "截图-仅对照", "截图-修订稿"].enumerated().map { index, name in
+      let url = folder.appending(path: name + ".png")
+      let rect = CGRect(x: index * 460, y: 0, width: 520 + index * 80, height: 460)
+      try write(try #require(desktop.cropping(to: rect)), to: url.path)
+      return url
+    }
+    model.pdf = true
+    model.importFiles(Array(urls.prefix(2)))
+    try await waitForComposition(model)
+    let original = try #require(model.sources.first)
+    let order = model.sources.map(\.id)
+    model.rotate(original.id, by: 1)
+    try await waitForComposition(model)
+
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 820, height: 620),
+      name: "composition-replacement-hover"
+    ) { host in
+      let target = try #require(compositionGrip(in: host, id: original.id))
+      let other = try #require(compositionGrip(in: host, id: order[1]))
+      let drop = CompositionDrop(pasteboard: pasteboard)
+      #expect(target.registeredDraggedTypes.contains(.fileURL))
+      pasteboard.clearContents()
+      #expect(pasteboard.writeObjects([urls[1] as NSURL, urls[2] as NSURL]))
+      #expect(target.draggingEntered(drop).isEmpty && !target.performDragOperation(drop))
+      pasteboard.clearContents()
+      #expect(pasteboard.writeObjects([urls[2] as NSURL]))
+      drop.draggingSourceOperationMask = .move
+      #expect(target.draggingUpdated(drop).isEmpty)
+      drop.draggingSourceOperationMask = .copy
+      #expect(other.draggingEntered(drop) == .copy && other.replacementTargeted)
+      other.draggingExited(drop)
+      #expect(!other.replacementTargeted)
+      #expect(target.draggingEntered(drop) == .copy && target.replacementTargeted)
+      #expect(!model.preparing && model.sources.map(\.id) == order)
+      #expect(target.window?.isKeyWindow == false)
+    }
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 720, height: 520),
+      name: "composition-replacement-drop", dark: true
+    ) { host in
+      let target = try #require(compositionGrip(in: host, id: original.id))
+      let drop = CompositionDrop(pasteboard: pasteboard)
+      #expect(target.draggingEntered(drop) == .copy && target.prepareForDragOperation(drop))
+      #expect(target.performDragOperation(drop) && !target.replacementTargeted)
+    }
+    try await waitForComposition(model)
+    #expect(model.sources.map(\.id) == order && model.previewSourceID == original.id)
+    #expect(model.sources.first?.label == urls[2].lastPathComponent && model.canUndoEdit)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 720, height: 520),
+      name: "composition-replacement-result", dark: true)
+    model.undoEdit()
+    #expect(model.sources.first?.url == original.url && model.sources.first?.edit.turns == 1)
+  }
+
   /// 真实滚动容器在指针停在边缘时继续移动，直到第 12 张可作为落点。
   @Test(.enabled(if: directory != nil)) func renderCompositionEdgeScroll() async throws {
     let folder = FileManager.default.temporaryDirectory.appending(
@@ -2797,4 +2866,31 @@ struct ScreenshotSnapshotTests {
     try #require(bitmap.representation(using: .png, properties: [:])).write(to: URL(filePath: path))
     window.orderOut(nil)
   }
+}
+
+/// 只提供具名剪贴板和操作许可，直接驱动接收端而不发起系统拖放会话。
+@MainActor private final class CompositionDrop: NSObject, NSDraggingInfo {
+  let draggingPasteboard: NSPasteboard
+  var draggingSourceOperationMask: NSDragOperation = .copy
+  var draggingDestinationWindow: NSWindow? { nil }
+  var draggingLocation: NSPoint { .zero }
+  var draggedImageLocation: NSPoint { .zero }
+  nonisolated var draggedImage: NSImage? { nil }
+  var draggingSource: Any? { nil }
+  var draggingSequenceNumber: Int { 0 }
+  var draggingFormation: NSDraggingFormation = .none
+  var animatesToDestination = false
+  var numberOfValidItemsForDrop = 0
+  var springLoadingHighlight: NSSpringLoadingHighlight { .none }
+
+  /// 接收现成的测试剪贴板，读写只发生在该拖放会话。
+  init(pasteboard: NSPasteboard) { draggingPasteboard = pasteboard }
+
+  func slideDraggedImage(to screenPoint: NSPoint) {}
+  func enumerateDraggingItems(
+    options: NSDraggingItemEnumerationOptions, for view: NSView?, classes: [AnyClass],
+    searchOptions: [NSPasteboard.ReadingOptionKey: Any],
+    using block: (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void
+  ) {}
+  func resetSpringLoading() {}
 }

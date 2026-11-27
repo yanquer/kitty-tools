@@ -534,7 +534,7 @@ struct ShotCompositionTests {
     #expect(model.preview != nil && model.error == nil)
   }
 
-  /// 文件导入失败保留在手的编辑记录，成功替换后设立新基线，关闭时清空会话。
+  /// 失败保留旧预览和历史，成功替换只占一步，追加仍开始新的编辑基线。
   @Test func historyRespectsImportAndSessionBoundaries() async throws {
     let folder = try directory()
     defer { try? FileManager.default.removeItem(at: folder) }
@@ -545,23 +545,51 @@ struct ShotCompositionTests {
     model.importFiles([first.url, second.url])
     try await settleImport(model)
     let firstID = try #require(model.sources.first?.id)
+    model.beginCrop(firstID)
+    try await settleCrop(model)
+    let draft = try #require(model.cropDraft)
+    draft.selection = CGRect(x: 0, y: 0, width: 0.5, height: 1)
+    model.applyCrop()
+    let cropped = try #require(model.sources.first?.edit)
+    #expect(cropped.crop.width == 0.5)
     model.rotate(firstID, by: 1)
     model.rotate(firstID, by: 1)
     model.undoEdit()
-    model.importFiles([folder.appending(path: "missing.png")], replacing: firstID)
+    try await settlePreview(model)
+    let original = try #require(model.sources.first)
+    let preview = try #require(model.preview)
+    #expect(model.importFiles([folder.appending(path: "missing.png")], replacing: firstID))
     try await settleImport(model)
     #expect(model.error != nil && model.canUndoEdit && model.canRedoEdit)
+    #expect(model.preview === preview)
     #expect(model.sources.first?.edit.turns == 1)
-    model.importFiles([second.url], replacing: firstID)
+    #expect(model.importFiles([second.url], replacing: firstID))
+    #expect(!model.importFiles([first.url], replacing: firstID))
     try await settleImport(model)
-    #expect(model.error == nil && !model.canUndoEdit && !model.canRedoEdit)
-    #expect(model.sources.first?.id == firstID && model.sources.first?.edit.isIdentity == true)
+    let replaced = try #require(model.sources.first)
+    #expect(model.error == nil && model.canUndoEdit && !model.canRedoEdit)
+    #expect(replaced.id == firstID && replaced.edit.isIdentity && replaced.url != original.url)
+    model.undoEdit()
+    #expect(model.sources.first?.url == original.url && model.sources.first?.edit == original.edit)
+    model.undoEdit()
+    #expect(model.sources.first?.edit == cropped)
+    #expect(model.sources.first?.url == original.url)
+    model.redoEdit()
+    model.redoEdit()
+    #expect(model.sources.first?.url == replaced.url)
+    #expect(model.sources.first?.edit.isIdentity == true)
     for _ in 0..<31 { model.rotate(firstID, by: 1) }
     for _ in 0..<30 { model.undoEdit() }
     #expect(!model.canUndoEdit && model.canRedoEdit && model.sources.first?.edit.turns == 1)
+    #expect(model.importFiles([first.url]))
+    try await settleImport(model)
+    #expect(model.sources.count == 3 && !model.canUndoEdit && !model.canRedoEdit)
     model.beginReorder(firstID)
     model.clear()
     #expect(model.reorderingID == nil && !model.canUndoEdit && !model.canRedoEdit)
+    #expect(!FileManager.default.fileExists(atPath: replaced.url.path))
+    #expect(!FileManager.default.fileExists(atPath: original.url.path))
+    #expect(FileManager.default.fileExists(atPath: first.url.path))
   }
 
   /// 等到文件导入提交或明确失败，避免把仍在进行的任务计作结果。
