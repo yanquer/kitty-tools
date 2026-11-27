@@ -1463,8 +1463,15 @@ struct ScreenshotSnapshotTests {
     let description = ancestry.map { "\(type(of: $0)) \($0.isHidden) \($0.alphaValue) \($0.frame)" }
     #expect(!close.isHiddenOrHasHiddenAncestor, "\(description)")
     let layer = try #require(pin.layer)
-    for percent in [100, 10] {
+    for (name, percent, key) in [
+      ("alpha-100", 100, nil), ("alpha-10", 10, nil),
+      ("space-before", 35, nil), ("space-held", 35, NSEvent.EventType.keyDown),
+      ("space-released", 35, .keyUp),
+    ] {
       panel.opacity = CGFloat(percent) / 100
+      if let key {
+        #expect(panel.handleOpaquePreviewKey(try pinSpaceEvent(key), ownsKeyboard: true))
+      }
       CATransaction.flush()
       let bitmap = try #require(
         NSBitmapImageRep(
@@ -1476,7 +1483,7 @@ struct ScreenshotSnapshotTests {
       context.setFillColor(CGColor(gray: 0.75, alpha: 1))
       context.fill(pin.bounds)
       layer.render(in: context)
-      try write(try #require(bitmap.cgImage), to: "\(out)/shot-pin-picture-alpha-\(percent).png")
+      try write(try #require(bitmap.cgImage), to: "\(out)/shot-pin-picture-\(name).png")
       #expect(panel.alphaValue == 1 && !panel.isKeyWindow && close.alphaValue == 1)
       let buttonPoint = close.convert(
         CGPoint(x: close.bounds.midX, y: close.bounds.midY), to: pin.superview)

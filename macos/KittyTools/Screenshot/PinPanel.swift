@@ -315,9 +315,17 @@ final class PinPanel: NSPanel {
   private(set) var annotations: [Annotation]
   private(set) var isMiniature = false
   private(set) var isLocked = false
-  var isEditing = false { didSet { if isEditing { textSelection?.stop() } } }
+  var isEditing = false {
+    didSet {
+      if isEditing {
+        setOpaquePreview(false)
+        textSelection?.stop()
+      }
+    }
+  }
   var textSelection: PinTextSelection? { (contentView as? PinView)?.textSelection }
   private var expandedFrame: CGRect?
+  private var isFadingOut = false
 
   /// 保留原图与可编辑标注，显示与输出仍使用合成图。
   init(
@@ -410,6 +418,7 @@ final class PinPanel: NSPanel {
     guard !isLocked, !isTransforming, !isEditing, let composed = image else { return }
     setMiniature(false)
     finishPopIn()
+    setOpaquePreview(false)
     textSelection?.stop()
     isTransforming = true
     let base = original
@@ -488,10 +497,23 @@ final class PinPanel: NSPanel {
   /// 当前合成图供编辑完成后的完整性验证与输出使用。
   var image: CGImage? { (contentView as? PinView)?.image }
 
-  /// 选字时在窗口内分发复制、退出与缩放，避免系统文字层吞掉钉图的既有操作。
+  /// 全亮预览和选字都在本窗口分发，避免文字层吞掉钉图操作。
   override func sendEvent(_ event: NSEvent) {
+    if handleOpaquePreviewKey(event, ownsKeyboard: isKeyWindow) { return }
     if let view = contentView as? PinView, view.interceptTextEvent(event) { return }
     super.sendEvent(event)
+  }
+
+  /// 失去键盘后可能收不到松键，先恢复设定透明度。
+  override func resignKey() {
+    setOpaquePreview(false)
+    super.resignKey()
+  }
+
+  /// 隐藏或调出专注的其它钉图后，保留设定透明度。
+  override func orderOut(_ sender: Any?) {
+    setOpaquePreview(false)
+    super.orderOut(sender)
   }
 
   override var canBecomeKey: Bool { true }
@@ -503,8 +525,34 @@ final class PinPanel: NSPanel {
   }
   static let opacityPercentRange = 10...100
   var opacityPercent: Int { Int((opacity * 100).rounded()) }
+  private(set) var showsOpaquePreview = false
   /// 长截图期间让开着（B40）
   private(set) var isSuspended = false
+
+  /// 只接当前窗口的无修饰空格。松键恢复，自动重复不能在切回窗口时重启全亮。
+  func handleOpaquePreviewKey(_ event: NSEvent, ownsKeyboard: Bool) -> Bool {
+    guard event.type == .keyDown || event.type == .keyUp, event.keyCode == kVK_Space else {
+      return false
+    }
+    if event.type == .keyUp {
+      guard showsOpaquePreview else { return false }
+      setOpaquePreview(false)
+      return true
+    }
+    let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+    guard ownsKeyboard, flags.isEmpty, !isSuspended, !isEditing, !isTransforming, !isFadingOut
+    else { return false }
+    if !event.isARepeat { setOpaquePreview(true) }
+    return true
+  }
+
+  /// 临时全亮只改变有效合成透明度，保持原设定及旁白状态。
+  private func setOpaquePreview(_ showing: Bool) {
+    guard showing != showsOpaquePreview else { return }
+    showsOpaquePreview = showing
+    updatePictureOpacity()
+    if let contentView { NSAccessibility.post(element: contentView, notification: .valueChanged) }
+  }
 
   /// 滑块和滚动共用整数百分比及取值范围，改变时同步旁白值。
   @discardableResult func setOpacityPercent(_ percent: Int) -> Bool {
@@ -518,13 +566,14 @@ final class PinPanel: NSPanel {
 
   /// 在单独的图片层应用浏览透明度，保留按钮和 HUD 的原本对比度。
   private func updatePictureOpacity() {
-    (contentView as? PinView)?.setPictureOpacity(isSuspended ? 1 : opacity)
+    (contentView as? PinView)?.setPictureOpacity(isSuspended || showsOpaquePreview ? 1 : opacity)
   }
 
   func suspend() {
     guard !isSuspended else { return }
     finishPopIn()
     isSuspended = true
+    setOpaquePreview(false)
     ignoresMouseEvents = true
     updatePictureOpacity()
     alphaValue = min(opacity, 0.3)
@@ -598,6 +647,8 @@ final class PinPanel: NSPanel {
 
   /// 关闭：内容缩到 0.92（以中心为准）并淡出 0.16 s，完了再收窗口
   func fadeOut() {
+    isFadingOut = true
+    setOpaquePreview(false)
     textSelection?.stop()
     finishPopIn()
     if !Style.reduceMotion, let layer = contentView?.layer {
@@ -1193,7 +1244,9 @@ private final class PinView: NSView {
   override func accessibilityValue() -> Any? {
     let size = window?.frame.size ?? bounds.size
     let percent = panel?.opacityPercent ?? PinPanel.opacityPercentRange.upperBound
-    return "\(Int(size.width.rounded())) × \(Int(size.height.rounded())) 点，透明度 \(percent)%"
+    let opacity =
+      panel?.showsOpaquePreview == true ? "临时全亮，设定透明度 \(percent)%" : "透明度 \(percent)%"
+    return "\(Int(size.width.rounded())) × \(Int(size.height.rounded())) 点，\(opacity)"
       + (localZoom.isEnabled ? "，局部放大 \(Int(localZoom.magnification * 100))%" : "")
       + (panel?.isMiniature == true ? "，已收纳" : "")
       + (isFocused ? "，专注" : "")

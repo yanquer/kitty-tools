@@ -556,6 +556,72 @@ struct ScreenshotBatch7Tests {
     #expect(hud.frame.width <= view.bounds.width)
   }
 
+  /// 锁定时按住空格也只改变图片层，松开保留当前设定，重复按键不会重新触发。
+  @Test func pinSpaceTemporarilyShowsOpaqueImage() throws {
+    let board = PinBoard()
+    let frame = CGRect(x: -20000, y: -20000, width: 200, height: 100)
+    let pin = PinPanel(image: Self.image, frame: frame, board: board)
+    let picture = try pictureLayer(in: pin)
+    pin.setOpacityPercent(35)
+    pin.setLocked(true)
+    let down = try pinSpaceEvent(.keyDown)
+    let repeated = try pinSpaceEvent(.keyDown, repeating: true)
+    #expect(!pin.handleOpaquePreviewKey(down, ownsKeyboard: pin.isKeyWindow))
+    let shiftedDown = try pinSpaceEvent(.keyDown, flags: .shift)
+    #expect(!pin.handleOpaquePreviewKey(shiftedDown, ownsKeyboard: true))
+    #expect(pin.handleOpaquePreviewKey(repeated, ownsKeyboard: true) && !pin.showsOpaquePreview)
+    #expect(pin.handleOpaquePreviewKey(down, ownsKeyboard: true))
+    #expect(pin.showsOpaquePreview && pin.opacityPercent == 35 && picture.opacity == 1)
+    #expect(pin.frame == frame && pin.image === Self.image)
+    let value = pin.contentView?.accessibilityValue() as? String
+    #expect(value?.contains("临时全亮，设定透明度 35%") == true)
+    pin.setOpacityPercent(45)
+    #expect(picture.opacity == 1 && pin.opacityPercent == 45)
+    let modifiedUp = try pinSpaceEvent(.keyUp, flags: .option)
+    #expect(pin.handleOpaquePreviewKey(modifiedUp, ownsKeyboard: true))
+    #expect(!pin.showsOpaquePreview && abs(picture.opacity - 0.45) < 0.01)
+  }
+
+  /// 失焦、收起、让位和进入编辑会恢复，晚到的松键或重复按键不把临时状态带回来。
+  @Test func pinOpaquePreviewClearsOnLifecycleChanges() throws {
+    let board = PinBoard()
+    let frame = CGRect(x: -20000, y: -20000, width: 200, height: 100)
+    let pin = PinPanel(image: Self.image, frame: frame, board: board)
+    let picture = try pictureLayer(in: pin)
+    pin.setOpacityPercent(60)
+    let down = try pinSpaceEvent(.keyDown)
+    let up = try pinSpaceEvent(.keyUp)
+    #expect(pin.handleOpaquePreviewKey(down, ownsKeyboard: true))
+    pin.resignKey()
+    #expect(!pin.showsOpaquePreview && abs(picture.opacity - 0.6) < 0.01)
+    #expect(!pin.handleOpaquePreviewKey(up, ownsKeyboard: false))
+    let repeated = try pinSpaceEvent(.keyDown, repeating: true)
+    #expect(pin.handleOpaquePreviewKey(repeated, ownsKeyboard: true) && !pin.showsOpaquePreview)
+
+    #expect(pin.handleOpaquePreviewKey(down, ownsKeyboard: true))
+    pin.orderOut(nil)
+    #expect(!pin.showsOpaquePreview && abs(picture.opacity - 0.6) < 0.01)
+    #expect(pin.handleOpaquePreviewKey(down, ownsKeyboard: true))
+    pin.suspend()
+    #expect(!pin.showsOpaquePreview && abs(pin.alphaValue - 0.3) < 0.01)
+    #expect(!pin.handleOpaquePreviewKey(down, ownsKeyboard: true))
+    pin.resume()
+    #expect(abs(picture.opacity - 0.6) < 0.01)
+
+    #expect(pin.handleOpaquePreviewKey(down, ownsKeyboard: true))
+    pin.isEditing = true
+    #expect(!pin.showsOpaquePreview && abs(picture.opacity - 0.6) < 0.01)
+    #expect(!pin.handleOpaquePreviewKey(down, ownsKeyboard: true))
+    pin.isEditing = false
+    #expect(pin.handleOpaquePreviewKey(down, ownsKeyboard: true))
+    pin.transform(.right)
+    #expect(pin.isTransforming && !pin.showsOpaquePreview)
+    pin.cancelTransform()
+    #expect(pin.handleOpaquePreviewKey(down, ownsKeyboard: true))
+    pin.fadeOut()
+    #expect(!pin.showsOpaquePreview && !pin.handleOpaquePreviewKey(down, ownsKeyboard: true))
+  }
+
   // MARK: D18 截完图放哪（2026-10-26 晾衣绳拍板 B1 起是三选一）
 
   @Test func shotPlacementDefaultsToTheCorner() {

@@ -605,6 +605,7 @@ struct ShortcutsSheet: View {
           Entry("⌘F", text: "专注当前钉图 / 恢复其他钉图"),
           Entry("拖动", "⌥ 拖动", text: "局部放大时：查看细节 / 移动钉图；复制与保存保留完整图片"),
           Entry("⌥ 滚动", text: "调整钉图透明度，锁定时也可用"),
+          Entry("按住空格", text: "点击钉图后临时全亮，松开恢复设定透明度"),
           Entry("⌘S", text: "快速保存"),
           Entry("⇧⌘S", text: "另存为…"),
           Entry("⌘0", text: "原始大小（滚轮、捏合缩放）"),

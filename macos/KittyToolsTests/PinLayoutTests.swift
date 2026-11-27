@@ -5,9 +5,21 @@
 // NSGenericException，测试宿主直接退出）。钉图摆在屏外、从不 makeKey，不读写偏好。
 
 import AppKit
+import Carbon.HIToolbox
 import Testing
 
 @testable import KittyTools
+
+/// 构造仅交给钉图窗口的空格事件，不发到系统队列。
+@MainActor func pinSpaceEvent(
+  _ type: NSEvent.EventType, flags: NSEvent.ModifierFlags = [], repeating: Bool = false
+) throws -> NSEvent {
+  try #require(
+    NSEvent.keyEvent(
+      with: type, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0,
+      context: nil, characters: " ", charactersIgnoringModifiers: " ", isARepeat: repeating,
+      keyCode: UInt16(kVK_Space)))
+}
 
 /// 构造交给钉图本地响应方法的滚动事件，不发到系统事件队列。
 @MainActor func pinScrollEvent(
