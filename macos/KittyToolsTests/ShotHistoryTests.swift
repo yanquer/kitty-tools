@@ -118,13 +118,20 @@ struct ShotHistoryTests {
     #expect(FileManager.default.fileExists(atPath: history.thumbnailURL(for: id).path))
     #expect(await history.image(for: id)?.width == 400)
     #expect(history.item(id)?.source == "Safari")
-    let drawn = [Annotation(shape: .rectangle(CGRect(x: 1, y: 2, width: 3, height: 4)))]
+    let drawn = [
+      Annotation(shape: .rectangle(CGRect(x: 1, y: 2, width: 3, height: 4))),
+      Annotation(shape: .counter(7, center: CGPoint(x: 45, y: 70))),
+      Annotation(shape: .counter(27, center: CGPoint(x: 100, y: 70)), style: .init(option: 1)),
+    ]
     try await update(history, id, drawn)
     #expect(history.items.first?.annotations == drawn)
     history.markSaved(id, to: URL(filePath: "/tmp/a.png"))
     history.markPinned(id)
     #expect(history.items.first?.savedPath == "/tmp/a.png")
     #expect(history.items.first?.pinnedAt != nil)
+    let db = try Database(path: root.appending(path: "test.sqlite").path)
+    let reopened = try ShotHistory(db: db, directory: root.appending(path: "shots"))
+    #expect(reopened.item(id)?.annotations == drawn)
   }
 
   /// 缺少标签列的旧库能原地打开，标签保留到重启并随历史清理，外部文件仍归用户。

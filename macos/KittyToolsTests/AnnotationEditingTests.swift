@@ -45,6 +45,54 @@ struct AnnotationEditingTests {
     #expect(h.view.annotations.count == 1)
   }
 
+  /// 通过实际序号托盘切换和编辑，验证点击、复制与撤销都保留独立编号。
+  @Test func counterFormatTrayKeepsIndependentSequences() throws {
+    let h = harness(tool: .counter)
+    let bar = try #require(h.styleBar)
+    func choose(_ format: String) throws -> NSButton {
+      let button = try #require(
+        bar.stack.arrangedSubviews.compactMap { $0 as? NSStackView }
+          .flatMap(\.arrangedSubviews).compactMap { $0 as? NSButton }
+          .first { $0.title == format })
+      #expect(NSApp.sendAction(try #require(button.action), to: button.target, from: button))
+      return button
+    }
+    let point = CGPoint(x: 400, y: 300)
+    h.click(point)
+    let first = try #require(h.view.annotations.first)
+    h.view.selectedAnnotation = nil
+    #expect(try choose("字母").accessibilityValue() as? String == "已选中")
+    let other = CGPoint(x: 540, y: 300)
+    h.click(other)
+    #expect(h.view.annotations.first == first)
+    #expect(h.view.annotations.last?.shape == .counter(1, center: other))
+    #expect(h.view.annotations.last?.style.counterFormat == .letters)
+    bar.onNumber(1)
+    #expect(h.view.annotations.last?.shape == .counter(2, center: other))
+    h.keyEquivalent(kVK_ANSI_Z, "z", flags: .command)
+    #expect(h.view.annotations.last?.shape == .counter(1, center: other))
+    h.keyEquivalent(kVK_ANSI_D, "d", flags: .command)
+    #expect(h.view.annotations.last?.style.counterFormat == .letters)
+    let nextPoint = CGPoint(x: 650, y: 300)
+    h.click(nextPoint)
+    #expect(h.view.annotations.last?.shape == .counter(3, center: nextPoint))
+    h.view.selectedAnnotation = nil
+    _ = try choose("数字")
+    let digitPoint = CGPoint(x: 400, y: 430)
+    h.click(digitPoint)
+    let secondDigit = try #require(h.view.annotations.last)
+    #expect(secondDigit.style.counterFormat == .digits)
+    #expect(secondDigit.shape == .counter(2, center: digitPoint))
+    _ = try choose("字母")
+    #expect(h.view.annotations.last?.id == secondDigit.id)
+    #expect(h.view.annotations.last?.shape == secondDigit.shape)
+    #expect(h.view.annotations.last?.style.counterFormat == .letters)
+    h.keyEquivalent(kVK_ANSI_Z, "z", flags: .command)
+    #expect(h.view.annotations.last == secondDigit)
+    h.keyEquivalent(kVK_ANSI_Z, "Z", flags: [.command, .shift])
+    #expect(h.view.annotations.last?.style.counterFormat == .letters)
+  }
+
   @Test func penDragAccumulatesPointsAndSelects() throws {
     let h = harness(tool: .pen)
     h.drag(CGPoint(x: 350, y: 250), CGPoint(x: 450, y: 330))

@@ -29,11 +29,8 @@ extension Annotation {
   {
     var copies: [Annotation] = []
     for original in chosen {
-      var copy = original.duplicated(offset: offset)
-      if case .counter(_, let center) = copy.shape {
-        copy.shape = .counter(nextCounter(in: existing + copies), center: center)
-      }
-      copies.append(copy)
+      let numberingFrom = original.tool == .counter ? existing + copies : nil
+      copies.append(original.duplicated(offset: offset, numberingFrom: numberingFrom))
     }
     return copies
   }

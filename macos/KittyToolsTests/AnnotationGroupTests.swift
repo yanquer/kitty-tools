@@ -140,26 +140,33 @@ struct AnnotationGroupTests {
     let h = try harness()
     defer { dispose(h) }
     let counter = Annotation(shape: .counter(1, center: CGPoint(x: 30, y: 30)))
+    let letter = Annotation(
+      shape: .counter(26, center: CGPoint(x: 30, y: 120)), style: .init(option: 1))
     var line = Annotation(shape: .line(from: CGPoint(x: 60, y: 70), to: CGPoint(x: 180, y: 70)))
     line.caption = .init(text: "下一步", style: line.captionStyle)
-    h.canvas.annotations = [counter, line]
-    h.canvas.selectAnnotations([counter.id, line.id])
+    h.canvas.annotations = [counter, line, letter]
+    h.canvas.selectAnnotations([counter.id, line.id, letter.id])
     let event = try #require(
       NSEvent.keyEvent(
         with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: 0,
         context: nil, characters: "d", charactersIgnoringModifiers: "d", isARepeat: false,
         keyCode: UInt16(kVK_ANSI_D)))
     #expect(h.canvas.performKeyEquivalent(with: event))
-    #expect(h.canvas.annotations.count == 4 && h.canvas.selectedItems.count == 2)
-    #expect(Set(h.canvas.annotations.map(\.id)).count == 4)
+    #expect(h.canvas.annotations.count == 6 && h.canvas.selectedItems.count == 3)
+    #expect(Set(h.canvas.annotations.map(\.id)).count == 6)
     #expect(h.canvas.selectedItems.contains { $0.caption?.text == "下一步" })
     #expect(
       h.canvas.selectedItems.contains {
-        if case .counter(2, _) = $0.shape { return true }
+        if case .counter(2, _) = $0.shape { return $0.style.counterFormat == .digits }
+        return false
+      })
+    #expect(
+      h.canvas.selectedItems.contains {
+        if case .counter(27, _) = $0.shape { return $0.style.counterFormat == .letters }
         return false
       })
     h.canvas.undo()
-    #expect(h.canvas.annotations == [counter, line])
+    #expect(h.canvas.annotations == [counter, line, letter])
   }
 
   /// 截图画布的框选、拖动与撤销保持原截图区域。

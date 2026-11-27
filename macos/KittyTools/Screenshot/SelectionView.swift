@@ -1704,7 +1704,9 @@ final class SelectionView: NSView, NSTextViewDelegate {
     next[index] = selected.renumbered(number + delta)
     commit(next)
     refresh()
-    if let shown = selectedCounterNumber { announce("编号 \(shown)") }
+    if let shown = selectedCounterNumber {
+      announce("编号 \(selected.style.counterFormat.label(shown))")
+    }
   }
 
   /// 滚轮换档（拍板 O1）：调整阶段鼠标在选中的标注上（或正在输入的文字上）滚，往上大一档、往下小一档——文字是字号，
@@ -1926,15 +1928,6 @@ final class SelectionView: NSView, NSTextViewDelegate {
   private func replace(_ annotation: Annotation) {
     guard let index = annotations.firstIndex(where: { $0.id == annotation.id }) else { return }
     annotations[index] = annotation
-  }
-
-  /// 复制一份（新 id，序号换成下一个号），调用方放到最上面
-  private func duplicate(_ original: Annotation, offset: CGSize) -> Annotation {
-    var copy = original.duplicated(offset: offset)
-    if case .counter(_, let center) = copy.shape {
-      copy.shape = .counter(Annotation.nextCounter(in: annotations), center: center)
-    }
-    return copy
   }
 
   /// 正拖着标注（画、挪、改大小）：撤销 / 重做 / 删除 / 复制 / 方向键挪标注都不响应。松手时要按按下前的样子记一步撤销，
@@ -2842,7 +2835,9 @@ final class SelectionView: NSView, NSTextViewDelegate {
       if let hit {
         // ⌥：先复制一份（序号换下一个号）放在最上面，拖的是副本，光标带 +
         let before = annotations
-        let target = modifiers.contains(.option) ? duplicate(hit, offset: .zero) : hit
+        let target =
+          modifiers.contains(.option)
+          ? hit.duplicated(offset: .zero, numberingFrom: annotations) : hit
         if target.id != hit.id { annotations.append(target) }
         selectedAnnotation = target.id
         (target.id == hit.id ? NSCursor.closedHand : .dragCopy).set()
@@ -2858,8 +2853,8 @@ final class SelectionView: NSView, NSTextViewDelegate {
         case .counter:
           // 单击放一个序号（编号自动 +1）并选中；按着拖就是挪它，松手一共记一步撤销
           let before = annotations
-          let counter = Annotation(
-            shape: .counter(Annotation.nextCounter(in: annotations), center: point), style: style)
+          let number = Annotation.nextCounter(in: annotations, format: style.counterFormat)
+          let counter = Annotation(shape: .counter(number, center: point), style: style)
           annotations.append(counter)
           selectedAnnotation = counter.id
           drag = .moveAnnotation(counter, start: point, before: before, copyOf: nil)

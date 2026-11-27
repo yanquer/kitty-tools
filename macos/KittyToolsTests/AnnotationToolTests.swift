@@ -769,6 +769,14 @@ struct AnnotationToolTests {
         counter, Annotation(shape: .counter(1, center: .zero)),
         Annotation(shape: .rectangle(.zero)),
       ]) == 4)
+    let letters = Annotation(shape: .counter(26, center: .zero), style: .init(option: 1))
+    #expect(Annotation.nextCounter(in: [counter, letters]) == 4)
+    #expect(Annotation.nextCounter(in: [counter], format: .letters) == 1)
+    #expect(Annotation.nextCounter(in: [counter, letters], format: .letters) == 27)
+    let copied = letters.duplicated(offset: .zero, numberingFrom: [counter, letters])
+    #expect(copied.shape == .counter(27, center: .zero) && copied.style == letters.style)
+    let labels = [1, 26, 27, 52, 53].map(Annotation.CounterFormat.letters.label)
+    #expect(labels == ["A", "Z", "AA", "AZ", "BA"])
   }
 
   @Test func stylesAreRememberedPerTool() throws {

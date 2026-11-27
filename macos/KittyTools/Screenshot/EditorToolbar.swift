@@ -833,7 +833,7 @@ final class StyleBar: HUDBar {
       self.style = nil
     }
     self.number = number
-    numberValue?.stringValue = number.map(String.init) ?? ""
+    numberValue?.stringValue = number.map(style.counterFormat.label) ?? ""
     guard style != self.style || oldMix != selection || watermarkChanged else { return }
     if let watermark {
       if let watermarkAngle { Self.setValue(watermarkAngle, "角度 \(Int(watermark.angle))°") }
@@ -860,7 +860,12 @@ final class StyleBar: HUDBar {
         !selection.weight && style.diameter == nil && swatch.tag == style.weight.rawValue,
         animated: animated)
     }
-    for button in options { Self.mark(button, on: !selection.option && button.tag == style.option) }
+    let activeOption = tool == .counter ? style.counterFormat.rawValue : style.option
+    for button in options {
+      let chosen = !selection.option && button.tag == activeOption
+      Self.mark(button, on: chosen)
+      if tool == .counter { button.setAccessibilityValue(chosen ? "已选中" : "未选中") }
+    }
   }
 
   private func rebuild(for tool: Annotation.Tool, numbered: Bool, custom: Int?) {

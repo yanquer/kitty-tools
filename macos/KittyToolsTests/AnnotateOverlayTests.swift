@@ -445,6 +445,46 @@ struct AnnotateOverlayTests {
     #expect(numbers == [1, 2])
   }
 
+  /// 长图编辑器的实际托盘和画布从 Z 续到 AA，出图回调保持两种格式。
+  @Test func letterCountersContinueInLongImageEditor() throws {
+    let original = image(width: 400, height: 600)
+    let number = Annotation(shape: .counter(7, center: CGPoint(x: 60, y: 70)))
+    let letter = Annotation(
+      shape: .counter(26, center: CGPoint(x: 100, y: 70)), style: .init(option: 1))
+    var result: [Annotation]?
+    let editor = AnnotateOverlay(
+      image: original, scale: 2, annotations: [number, letter], strictOutput: true
+    ) { _, _, _, annotations in
+      result = annotations
+    }
+    defer { editor.close() }
+    let content = try #require(editor.panel.contentView)
+    let scroll = try #require(content.subviews.compactMap { $0 as? NSScrollView }.first)
+    let canvas = try #require(scroll.documentView as? ScrollCanvas)
+    let suite = "counter-format-tests-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    canvas.styleDefaults = defaults
+    canvas.choose(.counter)
+    let tray = try #require(content.subviews.compactMap { $0 as? StyleBar }.first)
+    let option = try #require(
+      tray.stack.arrangedSubviews.compactMap { $0 as? NSStackView }
+        .flatMap(\.arrangedSubviews).compactMap { $0 as? NSButton }.first { $0.title == "字母" })
+    #expect(NSApp.sendAction(try #require(option.action), to: option.target, from: option))
+    let point = canvas.convert(CGPoint(x: 150, y: 140), to: nil)
+    try drag(canvas, from: point, to: point)
+    let placed = try #require(canvas.annotations.last)
+    #expect(canvas.selectedCounterNumber == 27 && placed.style.counterFormat == .letters)
+    tray.onNumber(1)
+    #expect(canvas.selectedCounterNumber == 28)
+    canvas.undo()
+    #expect(canvas.annotations == [number, letter, placed])
+    let toolbar = try #require(content.subviews.compactMap { $0 as? EditorToolbar }.first)
+    let copy = try #require(toolbar.button(for: .output(.copy)))
+    #expect(NSApp.sendAction(try #require(copy.action), to: copy.target, from: copy))
+    #expect(result == [number, letter, placed])
+  }
+
   /// 出图：没画标注就是原图（很长的图不白渲一遍），画了就重渲一张
   @Test func composedRendersOnlyWithAnnotations() throws {
     let (canvas, window) = canvasInWindow()

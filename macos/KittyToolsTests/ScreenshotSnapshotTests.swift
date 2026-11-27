@@ -1861,6 +1861,32 @@ struct ScreenshotSnapshotTests {
     canvas.cancelTransform()
   }
 
+  /// 屏外核对普通宽度和靠屏边的窄窗口中，混排序号及托盘的选中状态。
+  @Test(.enabled(if: directory != nil)) func renderCounterFormats() throws {
+    let desktop = try Self.desktop()
+    for (width, dark) in [(CGFloat(1200), false), (CGFloat(800), true)] {
+      let h = Harness(image: desktop)
+      h.window.setContentSize(CGSize(width: width, height: 620))
+      h.view.frame.size = CGSize(width: width, height: 620)
+      let area = CGRect(x: width - 412, y: 160, width: 400, height: 370)
+      h.view.select(area)
+      let counters = [(7, 0), (26, 1), (27, 1)].enumerated().map { index, value in
+        Annotation(
+          shape: .counter(
+            value.0, center: CGPoint(x: area.minX + 60 + CGFloat(index) * 65, y: area.midY)),
+          style: .init(color: .blue, option: value.1))
+      }
+      h.view.annotations = counters
+      h.view.selectedAnnotation = counters.last?.id
+      h.move(CGPoint(x: width - 12, y: 600))
+      let tray = try #require(h.styleBar)
+      #expect(tray.frame.minX >= 0 && tray.frame.maxX <= width)
+      let name = "counter-formats-\(Int(width))"
+      try shoot(h.window, name, dark: dark, crop: area.union(barsFrame(h)).insetBy(dx: -8, dy: -8))
+      try shootContent(tray, name)
+    }
+  }
+
   /// 多选框、混合托盘与关联说明用假桌面屏外渲染，两个画布沿用同一套选中外观。
   @Test(.enabled(if: directory != nil)) func renderAnnotationGroups() async throws {
     let desktop = try Self.desktop()

@@ -58,6 +58,7 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
       case .line: ["直线", "尺寸（px）"]
       case .arrow: ["单头", "双头"]  // 2026-11-12 拍板 O4
       case .text: ["无底", "描边", "底色"]
+      case .counter: ["数字", "字母"]
       case .mosaic: ["像素", "模糊"]
       default: []
       }
@@ -79,6 +80,25 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
 
     /// 拖出来的；文字、序号是单击放置
     var isDragDrawn: Bool { self != .text && self != .counter }
+  }
+
+  /// 序号的两种格式沿用样式选项下标，旧序号的默认值 0 表示数字。
+  enum CounterFormat: Int, Sendable {
+    case digits = 0
+    case letters = 1
+
+    /// 按序位生成徽章和托盘共用的标签，字母在 Z 后继续到 AA。
+    func label(_ number: Int) -> String {
+      guard self == .letters else { return String(number) }
+      var remaining = max(number, 1)
+      var characters: [UInt8] = []
+      while remaining > 0 {
+        remaining -= 1
+        characters.append(UInt8(ascii: "A") + UInt8(remaining % 26))
+        remaining /= 26
+      }
+      return String(decoding: characters.reversed(), as: UTF8.self)
+    }
   }
 
   enum Shape: Equatable, Codable, Sendable {
@@ -201,6 +221,9 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
 
     /// 序号实际的直径
     var counterDiameter: CGFloat { diameter ?? weight.counterDiameter }
+
+    /// 序号读取自己的格式选项，未知值仍按数字显示。
+    var counterFormat: CounterFormat { CounterFormat(rawValue: option) ?? .digits }
 
     /// 往大（step > 0）/ 往小换一档：文字换字号（不在档位上的旧字号先落到相邻的那档），别的工具换三档（到头不动）。
     /// A− / A+、⌘+ / ⌘−、滚轮都走这里（拍板 A2、O1）
@@ -503,10 +526,17 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
     return moved
   }
 
-  /// 复制一份（新 id）：⌘D 往右下偏 12，⌥ 拖动传 .zero。序号的编号不变，要不要换由调用方决定
-  func duplicated(offset delta: CGSize = CGSize(width: 12, height: -12)) -> Annotation {
+  /// 复制一份（新 id）：⌘D 往右下偏 12，⌥ 拖动传 .zero。提供同画布标注时，序号接上所属格式的编号。
+  func duplicated(
+    offset delta: CGSize = CGSize(width: 12, height: -12),
+    numberingFrom annotations: [Annotation]? = nil
+  ) -> Annotation {
     var copy = offset(by: delta)
     copy.id = UUID()
+    if let annotations, case .counter(_, let center) = copy.shape {
+      let number = Self.nextCounter(in: annotations, format: style.counterFormat)
+      copy.shape = .counter(number, center: center)
+    }
     return copy
   }
 
@@ -658,10 +688,13 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
     return next
   }
 
-  /// 下一个序号：现有最大的 + 1
-  static func nextCounter(in annotations: [Annotation]) -> Int {
-    let numbers = annotations.compactMap { annotation -> Int? in
-      if case .counter(let number, _) = annotation.shape { number } else { nil }
+  /// 从同格式现有最大序位接着分配，空序列从 1 或 A 开始。
+  static func nextCounter(in annotations: [Annotation], format: CounterFormat = .digits) -> Int {
+    let numbers = annotations.lazy.compactMap { annotation -> Int? in
+      if case .counter(let number, _) = annotation.shape, annotation.style.counterFormat == format {
+        return number
+      }
+      return nil
     }
     return (numbers.max() ?? 0) + 1
   }
@@ -1075,8 +1108,9 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
       context.setStrokeColor(NSColor.white.cgColor)
       context.setLineWidth(1.5)
       context.strokeEllipse(in: circle)
-      Self.drawNumber(
-        number, centeredAt: center, diameter: diameter, color: style.ink, in: context)
+      Self.drawCounterLabel(
+        style.counterFormat.label(number), centeredAt: center, diameter: diameter,
+        color: style.ink, in: context)
     case .mosaic(let rect):
       drawMosaic(rect, in: context, image: image, viewSize: viewSize)
     case .spotlight:
@@ -1144,16 +1178,15 @@ struct Annotation: Identifiable, Equatable, Codable, Sendable {
     return path
   }
 
-  /// 序号数字：SF Pro Rounded bold，按字形本身的外框居中（数字没有下伸部，按行框居中会偏上）；
-  /// 两位以上缩到圆的 0.78 宽以内
-  private static func drawNumber(
-    _ number: Int, centeredAt center: CGPoint, diameter: CGFloat, color: NSColor,
+  /// 序号用 SF Pro Rounded bold，按字形外框居中，多位标签缩到圆的 0.78 宽以内。
+  private static func drawCounterLabel(
+    _ label: String, centeredAt center: CGPoint, diameter: CGFloat, color: NSColor,
     in context: CGContext
   ) {
     func line(_ size: CGFloat) -> CTLine {
       CTLineCreateWithAttributedString(
         NSAttributedString(
-          string: String(number),
+          string: label,
           attributes: [
             .font: rounded(size: size, weight: .bold),
             NSAttributedString.Key(kCTForegroundColorAttributeName as String): color.cgColor,
