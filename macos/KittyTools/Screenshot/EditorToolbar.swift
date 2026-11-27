@@ -216,7 +216,7 @@ final class EditorToolbar: PopView {
 
   enum Item: Equatable {
     case tool(Annotation.Tool)
-    case erase, transform, caption, watermark
+    case erase, transform, caption, watermark, annotationClipboard
     case undo
     case redo
     /// .output(.save) 是保存本体（单击快速保存）
@@ -235,6 +235,9 @@ final class EditorToolbar: PopView {
   private let tools = HUDBar(radius: Style.Radius.panel, height: 40)
   private let outputs = HUDBar(radius: Style.Radius.panel, height: 40)
   private var buttons: [(item: Item, button: BarButton)] = []
+  private var compactableWidths: [NSLayoutConstraint] = []
+  private var standardWidth: CGFloat = 0
+  private var isCompact = false
   /// 当前工具的粉色底块（全 App 唯一一处强调色填满的块），在工具间滑动
   private let toolHighlight = CALayer()
   private var state: (tool: Annotation.Tool?, canUndo: Bool, canRedo: Bool)?
@@ -256,6 +259,7 @@ final class EditorToolbar: PopView {
         as [Spec])
         + (mode == .capture ? [] : [(.transform, "rotate.right", "旋转与镜像", "旋转与镜像")]),
       [
+        (.annotationClipboard, "clipboard", "标注剪贴板", "复制或粘贴标注"),
         (.undo, "arrow.uturn.backward", "撤销", "撤销"),
         (.redo, "arrow.uturn.forward", "重做", "重做"),
       ],
@@ -310,6 +314,7 @@ final class EditorToolbar: PopView {
     }
     outputs.frame.origin.x = tools.frame.maxX + 6
     frame.size = CGSize(width: outputs.frame.maxX, height: 40)
+    standardWidth = frame.width
     layoutSubtreeIfNeeded()
     toolHighlight.backgroundColor = Style.Shot.accent.cgColor
     toolHighlight.cornerRadius = Style.Shot.toolRadius
@@ -327,6 +332,27 @@ final class EditorToolbar: PopView {
   }
 
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+  /// 窄屏收紧按钮的横宽及间距，保留两段工具栏的顺序、高度和所有动作。
+  func fit(to width: CGFloat) {
+    let compact = standardWidth > width
+    guard compact != isCompact else { return }
+    isCompact = compact
+    let buttonWidth: CGFloat = compact ? 28 : 32
+    for constraint in compactableWidths { constraint.constant = buttonWidth }
+    for bar in [tools, outputs] {
+      bar.stack.spacing = compact ? 1 : 2
+      bar.fit()
+    }
+    outputs.frame.origin.x = tools.frame.maxX + 6
+    frame.size.width = outputs.frame.maxX
+    layoutSubtreeIfNeeded()
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    toolHighlight.bounds.size.width = buttonWidth
+    CATransaction.commit()
+    moveHighlight(from: state?.tool)
+  }
 
   private func makeButtons(_ groups: [[(Item, String, String, String)]]) -> [NSView] {
     var views: [NSView] = []
@@ -347,6 +373,11 @@ final class EditorToolbar: PopView {
             ? tip : (Self.shotKey(for: item) == nil ? tip : Self.tip(for: item, name: label)),
           label: label, action: #selector(clicked(_:)), size: size)
         button.tag = buttons.count
+        if size.width == 32,
+          let width = button.constraints.first(where: { $0.firstAttribute == .width })
+        {
+          compactableWidths.append(width)
+        }
         switch item {
         case .output(.pin) where mode == .pinShot, .output(.copy):
           // 拷贝：28 pt 强调色实心圆 + 对勾（主按钮），不出悬停底
@@ -1232,7 +1263,25 @@ final class HUDMenu: HUDBar {
     let title: String
     var key: String? = nil
     var checked = false
+    var enabled = true
     let action: () -> Void
+  }
+
+  static let annotationClipboardLabel = "标注剪贴板"
+
+  /// 两个画布复用命令的显示名称、键帽和不可用状态。
+  static func annotationClipboard(
+    canCopy: Bool, canPaste: Bool, perform: @escaping (AnnotationClipboard.Action) -> Void
+  ) -> HUDMenu {
+    HUDMenu(
+      AnnotationClipboard.Action.allCases.map { action in
+        Entry(
+          title: action.title, key: action.availableKeyLabel,
+          enabled: action == .copy ? canCopy : canPaste
+        ) {
+          perform(action)
+        }
+      }, label: annotationClipboardLabel)
   }
 
   var onDismiss: () -> Void = {}
@@ -1331,25 +1380,31 @@ private final class HUDMenuRow: NSView {
     setAccessibilityLabel(entry.title)
     setAccessibilityHelp(entry.key)
     setAccessibilityValue(entry.checked ? "已选中" : nil)
+    setAccessibilityEnabled(entry.enabled)
   }
 
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
   override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-  override func mouseEntered(with event: NSEvent) { hovering = true }
+  override func mouseEntered(with event: NSEvent) { hovering = entry.enabled }
   override func mouseExited(with event: NSEvent) { hovering = false }
   override func mouseDown(with event: NSEvent) {}
 
   override func mouseUp(with event: NSEvent) {
-    if bounds.contains(convert(event.locationInWindow, from: nil)) { onPick() }
+    if entry.enabled, bounds.contains(convert(event.locationInWindow, from: nil)) { onPick() }
   }
 
   override func accessibilityPerformPress() -> Bool {
+    guard entry.enabled else { return false }
     onPick()
     return true
   }
 
   override func draw(_ dirtyRect: NSRect) {
+    let dimmed = entry.enabled ? nil : NSGraphicsContext.current?.cgContext
+    dimmed?.saveGState()
+    dimmed?.setAlpha(0.35)
+    defer { dimmed?.restoreGState() }
     if hovering {
       Style.HUD.hoverFill.setFill()
       NSBezierPath(

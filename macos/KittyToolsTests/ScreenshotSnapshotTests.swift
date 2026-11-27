@@ -2014,6 +2014,45 @@ struct ScreenshotSnapshotTests {
     }
   }
 
+  /// 查看标注剪贴板的工具栏、启用和禁用菜单项，以及窄屏的最终摆放。
+  @Test(.enabled(if: directory != nil)) func renderAnnotationClipboard() throws {
+    let desktop = try Self.desktop()
+    let clipboard = AnnotationClipboard()
+    for dark in [false, true] {
+      let h = Harness(image: desktop)
+      let size = CGSize(width: dark ? 860 : 1200, height: dark ? 620 : 800)
+      h.window.setContentSize(size)
+      h.view.frame.size = size
+      h.view.select(CGRect(x: 70, y: 210, width: 620, height: 340))
+      h.view.annotationClipboard = clipboard
+      let mark = Annotation(
+        shape: .arrow(from: CGPoint(x: 180, y: 320), to: CGPoint(x: 325, y: 400)))
+      if dark {
+        _ = clipboard.copy([mark])
+      } else {
+        h.view.annotations = [mark]
+        h.view.selectAnnotations([mark.id])
+      }
+      let toolbar = try #require(h.toolbar)
+      let button = try #require(toolbar.button(for: .annotationClipboard))
+      button.performClick(nil)
+      let menu = try #require(h.menu)
+      #expect(h.view.bounds.contains(toolbar.frame) && h.view.bounds.contains(menu.frame))
+      try shoot(h.window, "annotation-clipboard", dark: dark)
+      try shootContent(menu, dark ? "annotation-clipboard-dark" : "annotation-clipboard")
+      for (index, bar) in referenceBars(in: toolbar).enumerated() {
+        try shootContent(bar, "annotation-clipboard-bar-\(index)\(dark ? "-dark" : "")")
+      }
+      let output = try #require(toolbar.button(for: .output(.copy)))
+      #expect(h.view.bounds.contains(output.convert(output.bounds, to: h.view)))
+      if dark {
+        h.pick("粘贴标注")
+        #expect(h.view.selectedItems.count == 1)
+        try shoot(h.window, "annotation-clipboard-pasted", dark: true)
+      }
+    }
+  }
+
   /// 原位选字使用系统真实分析与合成桌面，在非 key 屏外窗口查看选择层及局部放大。
   @Test(.enabled(if: directory != nil)) func renderPinSelection() async throws {
     let desktop = try Self.desktop()

@@ -116,6 +116,7 @@ final class SelectionView: NSView, NSTextViewDelegate {
 
   // 标注（截图模式）。截图自检直接设它们摆出各种状态
   var annotations: [Annotation] = [] { didSet { syncAnnotations() } }
+  var annotationClipboard = AnnotationClipboard.shared
   var tool: Annotation.Tool? { didSet { refresh() } }
   var selectedAnnotation: UUID? {
     didSet {
@@ -1317,13 +1318,14 @@ final class SelectionView: NSView, NSTextViewDelegate {
     toolbar.onRightClick = { [unowned self] item in offerRebind(item) }
     toolbar.onClick = { [unowned self] item in
       finishSizeEditing(commit: true)  // 输入着尺寸点了栏：先按输入的改选区再出图
-      if item != .saveMenu { hudMenu?.dismiss() }
+      if item != .saveMenu && item != .annotationClipboard { hudMenu?.dismiss() }
       switch item {
       case .tool(let tool): choose(tool)
       case .erase: chooseEraser()
       case .caption: editCaption()
       case .watermark: addWatermark()
       case .transform: break
+      case .annotationClipboard: toggleAnnotationClipboardMenu()
       case .undo: undo()
       case .redo: redo()
       case .output(let action): output(action)
@@ -1413,6 +1415,7 @@ final class SelectionView: NSView, NSTextViewDelegate {
     toolbar.update(
       tool: tool, canUndo: !undoStack.isEmpty, canRedo: !redoStack.isEmpty && editor == nil,
       canCaption: canEditCaption)
+    toolbar.fit(to: bounds.width - 20)
     let (origin, edge, anchorX) = Self.toolbarPlacement(
       size: toolbar.frame.size, selection: selection, in: bounds, alignRight: alignRight)
     let moved = toolbar.frame.origin != origin
@@ -1948,6 +1951,43 @@ final class SelectionView: NSView, NSTextViewDelegate {
       selectedItems, offset: CGSize(width: 12, height: -12), existing: annotations)
     commit(annotations + copies)
     selectAnnotations(Set(copies.map(\.id)))
+  }
+
+  /// 在框选调整中使用标注剪贴板，等待当前拖动、文字编辑或取色结束。
+  private var canUseAnnotationClipboard: Bool {
+    annotates && isAdjusting && drag == nil && eraseBefore == nil && editor == nil
+      && !sizeField.isEditing && !pickingColor && !translating
+  }
+
+  /// 在现有工具栏按钮旁打开两条标注命令。
+  private func toggleAnnotationClipboardMenu() {
+    if closesMenu(HUDMenu.annotationClipboardLabel) { return }
+    guard let button = toolbar?.button(for: .annotationClipboard) else { return }
+    let menu = HUDMenu.annotationClipboard(
+      canCopy: canUseAnnotationClipboard && AnnotationClipboard.canCopy(selectedItems),
+      canPaste: canUseAnnotationClipboard && annotationClipboard.hasContent
+    ) { [weak self] action in self?.useAnnotationClipboard(action) }
+    present(menu, anchor: button.convert(button.bounds, to: self))
+  }
+
+  /// 粘贴使用既有撤销和选中逻辑，标注剪贴板不经过出图链路。
+  private func useAnnotationClipboard(_ action: AnnotationClipboard.Action) {
+    guard canUseAnnotationClipboard, let selection else { return }
+    let message: String
+    switch action {
+    case .copy:
+      let count = annotationClipboard.copy(selectedItems)
+      message = count == 0 ? "请先选择可复制的标注" : "已复制 \(count) 条标注"
+    case .paste:
+      let copies = annotationClipboard.paste(in: selection, existing: annotations)
+      if !copies.isEmpty {
+        commit(annotations + copies)
+        selectAnnotations(Set(copies.map(\.id)))
+      }
+      message = copies.isEmpty ? "请先复制标注" : "已粘贴 \(copies.count) 条标注"
+    }
+    flashHint([message])
+    announce(message)
   }
 
   /// 一次拖动（挪、改大小、⌥ 复制、放序号）松手时记一步撤销；没变不记
@@ -3420,6 +3460,13 @@ final class SelectionView: NSView, NSTextViewDelegate {
     }
     // 出图 / 撤销这些（ShotKeys，默认 ⌘C ⌘S ⇧⌘S ⌘Z ⇧⌘Z，能改）；⌘D 复制标注固定
     if let key = ShotKey.matching(event), perform(key) { return true }
+    if annotates, let action = AnnotationClipboard.Action.matching(event) {
+      if !event.isARepeat {
+        hudMenu?.dismiss()
+        useAnnotationClipboard(action)
+      }
+      return true
+    }
     guard annotates, Int(event.keyCode) == kVK_ANSI_D, flags == .command, selectedAnnotation != nil
     else { return super.performKeyEquivalent(with: event) }
     duplicateSelected()

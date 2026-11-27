@@ -169,6 +169,25 @@ struct AnnotationGroupTests {
     #expect(h.canvas.annotations == [counter, line, letter])
   }
 
+  /// 空剪贴板、平铺水印、放不下的整组和异常视口都走明确分支。
+  @Test func annotationClipboardKeepsValueSnapshotAndPlacesOversizedGroup() throws {
+    let clipboard = AnnotationClipboard()
+    let viewport = CGRect(x: -40, y: 1200, width: 80, height: 60)
+    #expect(clipboard.paste(in: viewport, existing: []).isEmpty)
+    let watermark = Annotation.watermark(in: CGRect(x: 0, y: 0, width: 500, height: 500))
+    #expect(!AnnotationClipboard.canCopy([watermark]))
+    var marks = pair()
+    #expect(clipboard.copy(marks + [watermark]) == 2)
+    #expect(clipboard.copy([watermark]) == 0)
+    marks[0].style.color = .green
+    #expect(clipboard.paste(in: .zero, existing: []).isEmpty)
+    let copies = clipboard.paste(in: viewport, existing: [])
+    let first = try #require(copies.first)
+    #expect(copies.count == 2 && first.style.color == .red)
+    #expect(first.bounds.midX == viewport.midX && first.bounds.midY == viewport.midY)
+    #expect(copies[1].bounds.midX - first.bounds.midX == 110)
+  }
+
   /// 截图画布的框选、拖动与撤销保持原截图区域。
   @Test func selectionCanvasGroupActionsPreserveScreenshotRegion() {
     let h = SelectionInteractionTests.Harness()

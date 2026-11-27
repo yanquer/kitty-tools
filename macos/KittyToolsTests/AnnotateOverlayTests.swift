@@ -485,6 +485,96 @@ struct AnnotateOverlayTests {
     #expect(result == [number, letter, placed])
   }
 
+  /// 从区域截图复制一组对象，粘贴到历史编辑视口，再由钉图编辑提交可编辑标注。
+  @Test func transfersAnnotationsAcrossCaptureHistoryAndPin() throws {
+    let clipboard = AnnotationClipboard()
+    let source = SelectionInteractionTests.Harness()
+    let region = CGRect(x: 180, y: 180, width: 700, height: 450)
+    source.view.select(region)
+    source.view.annotationClipboard = clipboard
+    var arrow = Annotation(
+      shape: .arrow(from: CGPoint(x: 280, y: 310), to: CGPoint(x: 380, y: 340)),
+      style: .init(color: .blue, weight: .small))
+    arrow.caption = .init(text: "查看详情", style: arrow.captionStyle)
+    let letter = Annotation(
+      shape: .counter(2, center: CGPoint(x: 260, y: 360)), style: .init(option: 1))
+    source.view.annotations = [arrow, letter]
+    source.view.selectAnnotations([arrow.id, letter.id])
+    let button = try #require(source.toolbar?.button(for: .annotationClipboard))
+    button.performClick(nil)
+    let menu = try #require(source.menu)
+    let unavailable = try #require(menu.effect.subviews.first { $0.accessibilityLabel() == "粘贴标注" })
+    #expect(!unavailable.accessibilityPerformPress())
+    source.pick("复制标注")
+    #expect(source.menu == nil && clipboard.hasContent)
+    #expect(source.view.annotations == [arrow, letter] && source.view.selection == region)
+
+    let marker = Annotation(
+      shape: .counter(26, center: CGPoint(x: 56, y: 52)), style: .init(option: 1))
+    var historyOutput: [Annotation]?
+    let history = AnnotateOverlay(
+      image: image(width: 1000, height: 4000), scale: 2, annotations: [marker], strictOutput: true
+    ) { action, _, _, values in
+      #expect(action == .copy)
+      historyOutput = values
+    }
+    defer { history.close() }
+    let content = try #require(history.panel.contentView as? AnnotateOverlayView)
+    let scroll = try #require(content.subviews.compactMap { $0 as? NSScrollView }.first)
+    let canvas = try #require(scroll.documentView as? ScrollCanvas)
+    canvas.annotationClipboard = clipboard
+    canvas.scroll(CGPoint(x: 0, y: 450))
+    let viewport = scroll.documentVisibleRect.intersection(canvas.bounds)
+    #expect(!viewport.isEmpty && viewport.minY > 0 && viewport.maxY < canvas.bounds.maxY)
+    let shortcut = try #require(
+      NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: [.command, .option], timestamp: 0,
+        windowNumber: 0, context: nil, characters: "v", charactersIgnoringModifiers: "v",
+        isARepeat: false, keyCode: UInt16(kVK_ANSI_V)))
+    #expect(content.performKeyEquivalent(with: shortcut))
+    let pasted = canvas.selectedItems
+    try #require(pasted.count == 2)
+    #expect(pasted[0].caption == arrow.caption && pasted[0].style == arrow.style)
+    #expect(Set(canvas.annotations.map(\.id)).isDisjoint(with: [arrow.id, letter.id]))
+    if case .counter(let number, _) = pasted[1].shape {
+      #expect(number == 27)
+    } else {
+      Issue.record("粘贴结果缺少序号")
+    }
+    let group = pasted[0].bounds.union(pasted[1].bounds)
+    #expect(abs(group.midX - viewport.midX) < 0.01 && abs(group.midY - viewport.midY) < 0.01)
+    canvas.undo()
+    #expect(canvas.annotations == [marker] && !canvas.canUndo)
+    canvas.redo()
+    #expect(canvas.annotations == [marker] + pasted)
+    let wholeImage = try #require(
+      NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: 0,
+        context: nil, characters: "c", charactersIgnoringModifiers: "c", isARepeat: false,
+        keyCode: UInt16(kVK_ANSI_C)))
+    #expect(content.performKeyEquivalent(with: wholeImage))
+    #expect(historyOutput == [marker] + pasted)
+
+    var pinOutput: [Annotation]?
+    let pin = AnnotateOverlay(image: image(width: 500, height: 360), scale: 1, appliesToPin: true) {
+      action, _, _, values in
+      #expect(action == .pin)
+      pinOutput = values
+    }
+    defer { pin.close() }
+    let pinContent = try #require(pin.panel.contentView)
+    let pinScroll = try #require(pinContent.subviews.compactMap { $0 as? NSScrollView }.first)
+    let pinCanvas = try #require(pinScroll.documentView as? ScrollCanvas)
+    pinCanvas.annotationClipboard = clipboard
+    let toolbar = try #require(pinContent.subviews.compactMap { $0 as? EditorToolbar }.first)
+    try #require(toolbar.button(for: .annotationClipboard)).performClick(nil)
+    let row = try #require(pin.menu?.effect.subviews.first { $0.accessibilityLabel() == "粘贴标注" })
+    #expect(row.accessibilityPerformPress())
+    #expect(pinCanvas.selectedItems.count == 2)
+    try #require(toolbar.button(for: .output(.pin))).performClick(nil)
+    #expect(pinOutput == pinCanvas.annotations && pinOutput?.first?.caption == arrow.caption)
+  }
+
   /// 出图：没画标注就是原图（很长的图不白渲一遍），画了就重渲一张
   @Test func composedRendersOnlyWithAnnotations() throws {
     let (canvas, window) = canvasInWindow()

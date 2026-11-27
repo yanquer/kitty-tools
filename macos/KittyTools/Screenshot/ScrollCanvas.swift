@@ -23,6 +23,7 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
 
   // 标注（同遮罩里的那套；单测直接设它们摆状态）
   var annotations: [Annotation] = [] { didSet { syncAnnotations() } }
+  var annotationClipboard = AnnotationClipboard.shared
   var tool: Annotation.Tool? {
     didSet {
       refreshCursor()
@@ -558,6 +559,29 @@ final class ScrollCanvas: NSView, NSTextViewDelegate {
       selectedItems, offset: CGSize(width: 12, height: -12), existing: annotations)
     commit(annotations + copies)
     selectAnnotations(Set(copies.map(\.id)))
+  }
+
+  /// 只在普通编辑状态转移标注，变换、手势和文字编辑期间保留原画布状态。
+  var canUseAnnotationClipboard: Bool {
+    !isTransforming && drag == nil && eraseBefore == nil && editor == nil && !pickingColor
+  }
+
+  /// 从当前画布选区复制，或粘到当前滚动视口并记一步撤销。
+  func useAnnotationClipboard(_ action: AnnotationClipboard.Action) {
+    guard canUseAnnotationClipboard else { return }
+    switch action {
+    case .copy:
+      let count = annotationClipboard.copy(selectedItems)
+      Island.announce(count == 0 ? "请先选择可复制的标注" : "已复制 \(count) 条标注")
+    case .paste:
+      guard annotationClipboard.hasContent else { return Island.announce("请先复制标注") }
+      let viewport = (enclosingScrollView?.documentVisibleRect ?? visibleRect).intersection(bounds)
+      let copies = annotationClipboard.paste(in: viewport, existing: annotations)
+      guard !copies.isEmpty else { return Island.announce("当前没有可粘贴的图像区域") }
+      commit(annotations + copies)
+      selectAnnotations(Set(copies.map(\.id)))
+      Island.announce("已粘贴 \(copies.count) 条标注")
+    }
   }
 
   /// 方向键按同一位移移动整组选中对象。

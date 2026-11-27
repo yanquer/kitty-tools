@@ -289,6 +289,7 @@ import OSLog
   /// 都放不下贴在图里底部。纯函数那一半在 SelectionView.toolbarPlacement，这里直接用它
   private func placeBar() {
     guard let content = panel.contentView else { return }
+    bar.fit(to: content.bounds.width - 20)
     // 不跟「工具栏位置」走（2026-11-05 拍板 Q7）：图摆在屏幕正中、不是拖出来的，没有松手的那一点可贴
     bar.frame.origin =
       SelectionView.toolbarPlacement(size: bar.frame.size, selection: box, in: content.bounds)
@@ -301,7 +302,7 @@ import OSLog
   private func composed() -> CGImage { canvas.composed() }
 
   private func clicked(_ item: EditorToolbar.Item) {
-    if item != .saveMenu { menu?.dismiss() }
+    if item != .saveMenu && item != .annotationClipboard { menu?.dismiss() }
     switch item {
     case .output(let action): emit(action)
     case .cancel: dismiss()
@@ -311,6 +312,7 @@ import OSLog
     case .caption: canvas.editCaption()
     case .watermark: canvas.addWatermark()
     case .transform: toggleTransformMenu()
+    case .annotationClipboard: toggleAnnotationClipboardMenu()
     case .undo: canvas.undo()
     case .redo: canvas.redo()
     case .scroll, .record: break  // 长图的工具栏里没有这两颗
@@ -336,6 +338,22 @@ import OSLog
       ImageTransform.Action.allCases.map { action in
         .init(title: action.title) { [weak self] in self?.canvas.transform(action) }
       }, label: "旋转与镜像")
+    present(next, anchor: button.convert(button.bounds, to: panel.contentView))
+  }
+
+  /// 历史、长截图、外部图和钉图使用同一个标注命令菜单。
+  private func toggleAnnotationClipboardMenu() {
+    if let menu {
+      let same = menu.accessibilityLabel() == HUDMenu.annotationClipboardLabel
+      menu.dismiss()
+      if same { return }
+    }
+    guard let button = bar.button(for: .annotationClipboard) else { return }
+    let next = HUDMenu.annotationClipboard(
+      canCopy: canvas.canUseAnnotationClipboard
+        && AnnotationClipboard.canCopy(canvas.selectedItems),
+      canPaste: canvas.canUseAnnotationClipboard && canvas.annotationClipboard.hasContent
+    ) { [weak self] action in self?.canvas.useAnnotationClipboard(action) }
     present(next, anchor: button.convert(button.bounds, to: panel.contentView))
   }
 
@@ -472,6 +490,14 @@ import OSLog
     ]
     if let action = ShotKey.matching(event).flatMap({ outputs[$0] }) {
       emit(action)
+      return true
+    }
+    if let action = AnnotationClipboard.Action.matching(event) {
+      if !event.isARepeat {
+        menu?.dismiss()
+        armedEscape = false
+        canvas.useAnnotationClipboard(action)
+      }
       return true
     }
     switch (Int(event.keyCode), flags) {
