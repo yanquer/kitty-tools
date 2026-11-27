@@ -501,8 +501,20 @@ final class PinPanel: NSPanel {
   var opacity: CGFloat = 1 {
     didSet { if !isSuspended { updatePictureOpacity() } }
   }
+  static let opacityPercentRange = 10...100
+  var opacityPercent: Int { Int((opacity * 100).rounded()) }
   /// 长截图期间让开着（B40）
   private(set) var isSuspended = false
+
+  /// 滑块和滚动共用整数百分比及取值范围，改变时同步旁白值。
+  @discardableResult func setOpacityPercent(_ percent: Int) -> Bool {
+    let range = Self.opacityPercentRange
+    let next = CGFloat(min(max(percent, range.lowerBound), range.upperBound)) / 100
+    guard next != opacity else { return false }
+    opacity = next
+    if let contentView { NSAccessibility.post(element: contentView, notification: .valueChanged) }
+    return true
+  }
 
   /// 在单独的图片层应用浏览透明度，保留按钮和 HUD 的原本对比度。
   private func updatePictureOpacity() {
@@ -631,12 +643,15 @@ private final class PinView: NSView {
   /// 悬停后右上角的三个圆钮（透明度、锁定、关闭）：15 使用按钮栈，26 使用同一玻璃容器共用取样。
   private let controls: NSView
   private var lockButton: NSButton?
-  /// 缩放时中央的百分比
-  private let zoomHUD = HUDBar(radius: Style.Radius.control, height: 26)
-  private let zoomLabel = NSTextField(labelWithString: "")
+  /// 中央百分比供缩放和透明度共用。
+  private let percentageHUD = HUDBar(radius: Style.Radius.control, height: 26)
+  private let percentageLabel = NSTextField(labelWithString: "")
   private var hovering = false
-  /// 每次缩放加一；停手 0.7 s 后只有最后一次负责收起百分比
-  private var zoomGeneration = 0
+  /// 每次更新加一，只有最后一次操作负责淡出提示。
+  private var percentageGeneration = 0
+  private enum OpacityScrollState { case idle, adjusting, awaitingMomentum }
+  private var opacityScrollState = OpacityScrollState.idle
+  private var opacityTarget: CGFloat?
 
   init(image: CGImage, size: CGSize, board: PinBoard) {
     self.image = image
@@ -684,7 +699,7 @@ private final class PinView: NSView {
         action: #selector(close), size: CGSize(width: side, height: side)))
     buttons.spacing = 6
     buttons.setViews([opacity, circle(locking), close], in: .trailing)
-    // 圆钮贴右上角、各让 6，百分比在 showZoom 里居中；之后窗口改尺寸（回弹、缩放、原始大小）都靠掩码跟着走。
+    // 圆钮贴右上角、各让 6，百分比显示时居中；之后窗口改尺寸（回弹、缩放、原始大小）都靠掩码跟着走。
     // 别挪进 layout() 里摆（issue #6）：布局阶段改带 autoresizing 约束的子视图 frame 会让约束失效（layout() 的文档不许）；
     // super.layout() 又把它们吸到像素格上，居中落在半点时 1x 屏上吸到整点、再摆回半点，来回到 AppKit 抛异常闪退
     controls.frame = CGRect(
@@ -698,13 +713,13 @@ private final class PinView: NSView {
     addSubview(controls)
     // 和尺寸胶囊同一种小标签：SF Mono 12 semibold，字离两边一样远（量出来约 13）。内边距写 12 而不是尺寸胶囊的 8：
     // 那个 8 是到数字框的边，数字框里到字还有约 4.5；这里的标签框贴着字（写 8 的话字离边只有 9，比尺寸胶囊紧一截）
-    zoomLabel.font = SizeField.font
-    zoomLabel.textColor = Style.HUD.text
-    zoomHUD.stack.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 12)
-    zoomHUD.install([zoomLabel])
-    zoomHUD.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
-    zoomHUD.isHidden = true
-    addSubview(zoomHUD)
+    percentageLabel.font = SizeField.font
+    percentageLabel.textColor = Style.HUD.text
+    percentageHUD.stack.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 12)
+    percentageHUD.install([percentageLabel])
+    percentageHUD.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
+    percentageHUD.isHidden = true
+    addSubview(percentageHUD)
     addTrackingArea(
       NSTrackingArea(
         rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
@@ -736,6 +751,8 @@ private final class PinView: NSView {
 
   override func mouseExited(with event: NSEvent) {
     hovering = false
+    if opacityScrollState == .adjusting { opacityScrollState = .awaitingMomentum }
+    opacityTarget = nil
     fade(controls, in: false)
     Task { [weak self] in
       try? await Task.sleep(for: .seconds(Style.fadeOut))
@@ -855,9 +872,69 @@ private final class PinView: NSView {
   }
 
   override func scrollWheel(with event: NSEvent) {
+    if handleOpacityScroll(event) { return }
     // 触控板给的是像素级增量，滚轮给的是行
     let delta = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * 8
     zoom(by: exp(delta * 0.01))
+  }
+
+  /// ⌥ 滚动只改变透明度，触控板松手后的惯性留在原手势里并直接略过。
+  private func handleOpacityScroll(_ event: NSEvent) -> Bool {
+    let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+    let option = flags == .option
+    let phase = event.phase
+    if !event.momentumPhase.isEmpty {
+      guard opacityScrollState != .idle || option else { return false }
+      if event.momentumPhase.contains(.ended) || event.momentumPhase.contains(.cancelled) {
+        opacityScrollState = .idle
+      }
+      return true
+    }
+    if phase.contains(.began) || phase.contains(.mayBegin)
+      || opacityScrollState == .awaitingMomentum
+    {
+      opacityScrollState = .idle
+      opacityTarget = nil
+    } else if phase.isEmpty {
+      opacityScrollState = .idle
+    }
+    guard option || opacityScrollState == .adjusting else {
+      opacityTarget = nil
+      return false
+    }
+    if !phase.isEmpty { opacityScrollState = .adjusting }
+    if option, !phase.contains(.cancelled) {
+      adjustOpacity(delta: event.scrollingDeltaY, precise: event.hasPreciseScrollingDeltas)
+    }
+    if phase.contains(.ended) || phase.contains(.cancelled) {
+      opacityScrollState = .awaitingMomentum
+      opacityTarget = nil
+    }
+    return true
+  }
+
+  /// 滚轮一格调五个百分点，触控板累积小位移，边界处丢弃多余位移。
+  private func adjustOpacity(delta: CGFloat, precise: Bool) {
+    guard let panel, !panel.isSuspended, !panel.isEditing, !panel.isTransforming,
+      delta.isFinite, delta != 0
+    else { return }
+    let current = CGFloat(panel.opacityPercent)
+    let previous = opacityTarget ?? current
+    let base = precise && previous.rounded() == current ? previous : current
+    let range = PinPanel.opacityPercentRange
+    let target = min(
+      max(base + delta * (precise ? 0.2 : 5), CGFloat(range.lowerBound)),
+      CGFloat(range.upperBound))
+    opacityTarget = precise ? target : nil
+    let percent = Int(target.rounded())
+    guard panel.setOpacityPercent(percent) else { return }
+    let value = "\(percent)%"
+    let title = "透明度 \(value)"
+    let inset = percentageHUD.stack.edgeInsets
+    let textWidth = (title as NSString).size(withAttributes: [.font: SizeField.font]).width
+    let width = ceil(textWidth + inset.left + inset.right + HUDBar.materialInset * 2)
+    showPercentage(
+      width <= bounds.width ? title : value, accessibilityLabel: title)
   }
 
   override func magnify(with event: NSEvent) { zoom(by: 1 + event.magnification) }
@@ -894,18 +971,25 @@ private final class PinView: NSView {
 
   /// 中央 HUD 显示当前倍数，停手 0.7 s 后淡出
   private func showZoom(_ scale: CGFloat) {
-    zoomLabel.stringValue = "\(Int((scale * 100).rounded()))%"
-    zoomHUD.fit()
-    zoomHUD.frame.origin = CGPoint(
-      x: (bounds.width - zoomHUD.frame.width) / 2, y: (bounds.height - zoomHUD.frame.height) / 2)
-    zoomHUD.isHidden = false
-    zoomHUD.alphaValue = 1
-    zoomGeneration += 1
-    let generation = zoomGeneration
+    showPercentage("\(Int((scale * 100).rounded()))%")
+  }
+
+  /// 百分比复用同一位置和淡出计时，快速交替操作时最新提示有效。
+  private func showPercentage(_ text: String, accessibilityLabel: String? = nil) {
+    percentageLabel.stringValue = text
+    percentageLabel.setAccessibilityLabel(accessibilityLabel)
+    percentageHUD.fit()
+    percentageHUD.frame.origin = CGPoint(
+      x: (bounds.width - percentageHUD.frame.width) / 2,
+      y: (bounds.height - percentageHUD.frame.height) / 2)
+    percentageHUD.isHidden = false
+    percentageHUD.alphaValue = 1
+    percentageGeneration += 1
+    let generation = percentageGeneration
     Task { [weak self] in
       try? await Task.sleep(for: .seconds(0.7))
-      guard let self, self.zoomGeneration == generation else { return }
-      self.fade(self.zoomHUD, in: false)
+      guard let self, self.percentageGeneration == generation else { return }
+      self.fade(self.percentageHUD, in: false)
     }
   }
 
@@ -1108,7 +1192,7 @@ private final class PinView: NSView {
 
   override func accessibilityValue() -> Any? {
     let size = window?.frame.size ?? bounds.size
-    let percent = Int(((panel?.opacity ?? 1) * 100).rounded())
+    let percent = panel?.opacityPercent ?? PinPanel.opacityPercentRange.upperBound
     return "\(Int(size.width.rounded())) × \(Int(size.height.rounded())) 点，透明度 \(percent)%"
       + (localZoom.isEnabled ? "，局部放大 \(Int(localZoom.magnification * 100))%" : "")
       + (panel?.isMiniature == true ? "，已收纳" : "")
@@ -1241,9 +1325,10 @@ private final class OpacitySlider: NSView {
   init(panel: PinPanel?) {
     self.panel = panel
     // 这个构造出来是横的、连续的（拖动中一直发 action，钉图跟着手变）
+    let range = PinPanel.opacityPercentRange
     slider = NSSlider(
-      value: ((panel?.opacity ?? 1) * 100).rounded(), minValue: 10, maxValue: 100, target: nil,
-      action: nil)
+      value: Double(panel?.opacityPercent ?? range.upperBound), minValue: Double(range.lowerBound),
+      maxValue: Double(range.upperBound), target: nil, action: nil)
     super.init(frame: CGRect(x: 0, y: 0, width: 224, height: 30))
     slider.target = self
     slider.action = #selector(changed)
@@ -1273,7 +1358,7 @@ private final class OpacitySlider: NSView {
 
   /// 按整数百分比设
   @objc private func changed() {
-    panel?.opacity = slider.doubleValue.rounded() / 100
+    panel?.setOpacityPercent(Int(slider.doubleValue.rounded()))
     showValue()
   }
 

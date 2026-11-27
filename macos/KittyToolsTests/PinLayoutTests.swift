@@ -9,6 +9,26 @@ import Testing
 
 @testable import KittyTools
 
+/// 构造交给钉图本地响应方法的滚动事件，不发到系统事件队列。
+@MainActor func pinScrollEvent(
+  _ delta: Int32, precise: Bool = false, option: Bool = false,
+  phase: CGScrollPhase? = nil, momentum: CGMomentumScrollPhase? = nil
+) throws -> NSEvent {
+  let event = try #require(
+    CGEvent(
+      scrollWheelEvent2Source: nil, units: precise ? .pixel : .line, wheelCount: 1,
+      wheel1: delta, wheel2: 0, wheel3: 0))
+  event.flags = option ? .maskAlternate : []
+  if precise { event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1) }
+  if let phase {
+    event.setIntegerValueField(.scrollWheelEventScrollPhase, value: Int64(phase.rawValue))
+  }
+  if let momentum {
+    event.setIntegerValueField(.scrollWheelEventMomentumPhase, value: Int64(momentum.rawValue))
+  }
+  return try #require(NSEvent(cgEvent: event))
+}
+
 /// 假装在 1x 屏上
 private final class OneXWindow: NSWindow {
   override var backingScaleFactor: CGFloat { 1 }
@@ -23,6 +43,31 @@ struct PinLayoutTests {
       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
     return context.makeImage()!
   }()
+
+  /// 小幅位移连续累积，释放修饰键后的惯性也不会落到普通缩放。
+  @Test func optionTrackpadAccumulatesAndKeepsMomentumOutOfZoom() throws {
+    let board = PinBoard()
+    let frame = CGRect(x: -20000, y: -20000, width: 200, height: 100)
+    let pin = PinPanel(image: Self.image, frame: frame, board: board)
+    let view = try #require(pin.contentView)
+    pin.opacity = 0.5
+    let begin = try pinScrollEvent(2, precise: true, option: true, phase: .began)
+    #expect(begin.hasPreciseScrollingDeltas && begin.phase == .began)
+    view.scrollWheel(with: begin)
+    #expect(pin.opacityPercent == 50)
+    view.scrollWheel(with: try pinScrollEvent(2, precise: true, option: true, phase: .changed))
+    #expect(pin.opacityPercent == 51 && pin.frame == frame)
+    view.scrollWheel(with: try pinScrollEvent(50, precise: true, phase: .changed))
+    view.scrollWheel(with: try pinScrollEvent(0, precise: true, phase: .ended))
+    let tail = try pinScrollEvent(40, precise: true, momentum: .begin)
+    #expect(tail.momentumPhase == .began)
+    view.scrollWheel(with: tail)
+    view.scrollWheel(with: try pinScrollEvent(0, precise: true, momentum: .end))
+    #expect(pin.opacityPercent == 51 && pin.frame == frame)
+    view.scrollWheel(with: try pinScrollEvent(10, precise: true, phase: .began))
+    #expect(pin.frame.size != frame.size && pin.opacityPercent == 51)
+    #expect(!pin.isKeyWindow)
+  }
 
   // 回弹、滚轮缩放、原始大小都不卡在布局里，圆钮一直贴右上角、百分比居中（1x 上差不过半个点）
   @Test func pinLaysOutOnOneXScreens() throws {

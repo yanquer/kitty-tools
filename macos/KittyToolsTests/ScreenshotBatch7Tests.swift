@@ -517,6 +517,45 @@ struct ScreenshotBatch7Tests {
     #expect(panel.image === Self.image)
   }
 
+  /// 锁定时可调透明度，滑块读取同一个值，长截图让位不受滚动影响。
+  @Test func pinOptionWheelUsesLockedOpacityAndSlider() throws {
+    let board = PinBoard()
+    let frame = CGRect(x: -20000, y: -20000, width: 200, height: 100)
+    let pin = PinPanel(image: Self.image, frame: frame, board: board)
+    let view = try #require(pin.contentView)
+    pin.setLocked(true)
+    view.scrollWheel(with: try pinScrollEvent(-1, option: true))
+    #expect(pin.opacityPercent == 95 && pin.frame == frame && pin.alphaValue == 1)
+    let hud = try #require(view.subviews.compactMap { $0 as? HUDBar }.first)
+    let label = try #require(hud.stack.arrangedSubviews.compactMap { $0 as? NSTextField }.first)
+    #expect(!hud.isHidden && label.stringValue == "透明度 95%")
+    view.scrollWheel(with: try pinScrollEvent(-20, option: true))
+    #expect(pin.opacityPercent == 10)
+    let event = try #require(
+      NSEvent.mouseEvent(
+        with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0,
+        context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+    let row = try #require(
+      view.menu(for: event)?.items.first { $0.title == "透明度" }?.submenu?.items.first?.view)
+    let slider = try #require(row.subviews.compactMap { $0 as? NSSlider }.first)
+    #expect(slider.doubleValue == 10)
+    pin.suspend()
+    view.scrollWheel(with: try pinScrollEvent(20, option: true))
+    #expect(pin.opacityPercent == 10)
+    pin.resume()
+    view.scrollWheel(with: try pinScrollEvent(20, option: true))
+    #expect(pin.opacityPercent == 100 && pin.frame == frame && !pin.isKeyWindow)
+
+    let narrow = CGRect(origin: frame.origin, size: CGSize(width: 58, height: 40))
+    pin.setFrame(narrow, display: false)
+    pin.layoutIfNeeded()
+    view.scrollWheel(with: try pinScrollEvent(-1, option: true))
+    let picture = try pictureLayer(in: pin)
+    #expect(pin.frame == narrow && abs(picture.opacity - 0.95) < 0.01)
+    #expect(label.stringValue == "95%" && label.accessibilityLabel() == "透明度 95%")
+    #expect(hud.frame.width <= view.bounds.width)
+  }
+
   // MARK: D18 截完图放哪（2026-10-26 晾衣绳拍板 B1 起是三选一）
 
   @Test func shotPlacementDefaultsToTheCorner() {

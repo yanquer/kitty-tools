@@ -1344,6 +1344,26 @@ struct ScreenshotSnapshotTests {
     context.scaleBy(x: 2, y: 2)
     try #require(pin.layer).render(in: context)
     try write(try #require(bitmap.cgImage), to: "\(out)/shot-pin-zoom.png")
+
+    for (name, dark) in [("pin-opacity-wheel", false), ("pin-opacity-wheel-mini", true)] {
+      if dark {
+        panel.setMiniature(true)
+        panel.setLocked(true)
+      }
+      panel.opacity = 0.7
+      pin.scrollWheel(with: try pinScrollEvent(-7, option: true))
+      #expect(panel.opacityPercent == 35)
+      try shoot(panel, name, dark: dark)
+      let hud = try #require(pin.subviews.compactMap { $0 as? HUDBar }.first)
+      try shootContent(hud, name)
+    }
+    panel.setFrame(
+      CGRect(origin: panel.frame.origin, size: CGSize(width: 58, height: 40)), display: false)
+    panel.layoutIfNeeded()
+    pin.scrollWheel(with: try pinScrollEvent(1, option: true))
+    try shoot(panel, "pin-opacity-wheel-narrow", dark: true)
+    let hud = try #require(pin.subviews.compactMap { $0 as? HUDBar }.first)
+    try shootContent(hud, "pin-opacity-wheel-narrow")
   }
 
   /// 检查长图跟随、拖动和小面板可读性，以及半透明钉图上实际显示的操作区。

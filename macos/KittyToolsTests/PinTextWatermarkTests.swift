@@ -148,6 +148,9 @@ struct PinTextWatermarkTests {
     #expect(!sharedMenu.items.contains { $0.title == "系统复制占位" })
     let text = selector.overlay.text
     selector.overlay.selectedRanges = [try #require(text.range(of: "Alpha"))]
+    let frame = pin.frame
+    pin.sendEvent(try pinScrollEvent(-4, option: true))
+    #expect(pin.opacityPercent == 80 && pin.frame == frame && selector.isEnabled)
     let copy = try #require(
       NSEvent.keyEvent(
         with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
