@@ -11,12 +11,13 @@ import UniformTypeIdentifiers
 
 @MainActor
 struct ShotHistoryTests {
-  /// 临时目录里的一套库（用完删掉）
-  private func makeHistory() throws -> (history: ShotHistory, directory: URL) {
+  /// 临时历史保留真实图片读写，无需验证重启落库时可使用内存数据库。
+  private func makeHistory(inMemory: Bool = false) throws -> (history: ShotHistory, directory: URL)
+  {
     let root = FileManager.default.temporaryDirectory.appending(
       path: "kitty-shots-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let db = try Database(path: root.appending(path: "test.sqlite").path)
+    let db = try Database(path: inMemory ? ":memory:" : root.appending(path: "test.sqlite").path)
     let history = try ShotHistory(db: db, directory: root.appending(path: "shots"))
     let defaults = try #require(UserDefaults(suiteName: "shot-history-tests-\(UUID().uuidString)"))
     defaults.set(true, forKey: Prefs.shotHistory)
@@ -310,6 +311,9 @@ struct ShotHistoryTests {
     #expect(window.makeFirstResponder(editor))
     #expect(try !send(kVK_Space) && !model.quickPreview.isOpen)
     #expect(window.makeFirstResponder(nil))
+    model.showsDateFilter = true
+    #expect(try !send(kVK_Space) && !model.quickPreview.isOpen)
+    model.showsDateFilter = false
     #expect(try send(kVK_Space))
     #expect(model.quickPreview.count == 2 && model.quickPreview.item?.id == start.id)
     #expect(try send(kVK_Space, repeatKey: true) && model.quickPreview.isOpen)
@@ -471,6 +475,85 @@ struct ShotHistoryTests {
     #expect(shown(.all, "长截图") == 1)  // 种类名也搜得到
     #expect(shown(.recording, "safari") == 0)  // 筛选和搜索一起生效
     #expect(shown(.all, "  ") == 5)  // 只有空格不算搜
+  }
+
+  /// 日历范围包含最后一天，跨夏令时依然以本地午夜为界。
+  @Test func dateBoundsIncludeLastDayAcrossDaylightSaving() throws {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = try #require(TimeZone(identifier: "America/Los_Angeles"))
+    func date(_ day: Int, hour: Int = 0) throws -> Date {
+      try #require(calendar.date(from: DateComponents(year: 2026, month: 3, day: day, hour: hour)))
+    }
+    let now = try date(12, hour: 12)
+    typealias Filter = ShotHistoryModel.DateFilter
+    let week = try #require(Filter.lastSevenDays.bounds(now: now, calendar: calendar))
+    #expect(try week.lowerBound == date(6) && week.upperBound == date(13))
+    #expect(try !week.contains(date(5, hour: 23)) && week.contains(date(12, hour: 23)))
+    let today = try #require(Filter.today.bounds(now: now, calendar: calendar))
+    #expect(try today.lowerBound == date(12) && today.upperBound == date(13))
+    let custom = try Filter.custom(start: date(8, hour: 22), end: date(8))
+    let range = try #require(custom.bounds(now: now, calendar: calendar))
+    #expect(range.upperBound.timeIntervalSince(range.lowerBound) == 23 * 3600)
+    #expect(try range.contains(date(8, hour: 23)) && !range.contains(date(9)))
+    let reversed = try Filter.custom(start: date(9), end: date(8))
+    #expect(reversed.bounds(now: now, calendar: calendar) == nil)
+  }
+
+  /// 日期与其它筛选叠加后，批量保存、预览和跨午夜收尾使用真实的共同选区。
+  @Test func datesRestrictSelectionAndPreviewThroughMidnight() async throws {
+    let (history, root) = try makeHistory(inMemory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let calendar = Calendar.current
+    let today = calendar.startOfDay(for: .now)
+    var now = today.addingTimeInterval(60)
+    let daySix = try #require(calendar.date(byAdding: .day, value: -6, to: today))
+    let daySeven = try #require(calendar.date(byAdding: .day, value: -7, to: today))
+    let recent = try #require(await history.record(image(), scale: 2, source: "Safari"))
+    let edge = try #require(await history.record(image(), scale: 2, source: "Safari"))
+    let old = try #require(await history.record(image(), scale: 2, source: "Safari"))
+    let other = try #require(await history.record(image(), scale: 2, source: "终端"))
+    let scroll = try #require(
+      await history.record(image(), scale: 2, kind: .scroll, source: "Safari"))
+    let noise = try #require(await history.record(image(), scale: 2, source: "Safari"))
+    let dates = [edge: daySix, old: daySeven]
+    history.seed(
+      history.items.map { item in
+        var next = item
+        next.createdAt = dates[item.id] ?? today
+        next.tags = item.id == noise ? ["个人"] : ["验收"]
+        return next
+      })
+    var saved: [UUID] = []
+    var actions = ShotActions()
+    actions.saveMany = { saved = $0.map(\.id) }
+    let model = ShotHistoryModel(history: history, actions: actions, now: { now })
+    model.search = "Safari"
+    model.filter = .shot
+    model.setTagFilter("验收")
+    #expect(model.shown.map(\.id) == [recent, edge, old])
+    model.pickAll()
+    model.anchor = old
+    #expect(model.setDateFilter(.lastSevenDays))
+    #expect(model.picked == [recent, edge] && model.anchor == recent)
+    model.saveSelection()
+    #expect(saved == [recent, edge])
+    #expect(!model.setDateFilter(.custom(start: today, end: daySix)))
+    #expect(model.dateFilter == .lastSevenDays)
+    model.pick(edge)
+    #expect(model.openQuickPreview() && model.quickPreview.count == 2)
+    #expect(model.quickPreview.item?.id == edge)
+    try await waitUntil { model.quickPreview.image != nil }
+    #expect(model.quickPreview.image?.width == 400)
+    let tomorrow = try #require(calendar.date(byAdding: .day, value: 1, to: today))
+    now = tomorrow.addingTimeInterval(1)
+    model.calendarChanged()
+    #expect(!model.quickPreview.isOpen && model.picked.isEmpty && model.anchor == nil)
+    #expect(model.shown.map(\.id) == [recent])
+    #expect(model.setDateFilter(.today) && model.shown.isEmpty)
+    #expect(model.setDateFilter(.all) && model.shown.map(\.id) == [recent, edge, old])
+    #expect(model.setDateFilter(.custom(start: daySeven, end: daySix)))
+    #expect(model.shown.map(\.id) == [edge, old])
+    #expect(history.item(other) != nil && history.item(scroll) != nil)
   }
 
   /// 按天分组：今天、昨天写成字，更早的写日期；每组内部新的在前

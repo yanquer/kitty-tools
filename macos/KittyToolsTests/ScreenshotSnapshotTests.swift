@@ -2402,6 +2402,105 @@ struct ScreenshotSnapshotTests {
       name: "history-tags-detail", dark: true)
   }
 
+  /// 从实际日期按钮应用与取消草稿，检查窄窗里的条件摘要和无结果状态。
+  @Test(.enabled(if: directory != nil)) func renderShotHistoryDates() async throws {
+    let root = FileManager.default.temporaryDirectory.appending(
+      path: "kitty-history-dates-\(UUID())")
+    let history = try ShotHistory(db: Database(path: ":memory:"), directory: root)
+    let suite = "kitty-history-dates-\(UUID())"
+    let prefs = try #require(UserDefaults(suiteName: suite))
+    prefs.set(true, forKey: Prefs.shotHistory)
+    history.defaults = prefs
+    defer {
+      prefs.removePersistentDomain(forName: suite)
+      try? FileManager.default.removeItem(at: root)
+    }
+    let id = try #require(await history.record(Self.desktop(), scale: 2, source: "Safari"))
+    let item = try #require(history.item(id))
+    _ = try #require(await ShotThumbnails.shared.image(for: item, in: history))
+    defer { ShotThumbnails.shared.forget(id) }
+    let tag = "用于下次发布的多个主题和界面细节对照"
+    try history.applyTags(to: [id], adding: [tag], removing: [])
+    let model = ShotHistoryModel(history: history)
+    let calendar = Calendar.current
+    let today = calendar.startOfDay(for: item.createdAt)
+    let yesterday = try #require(calendar.date(byAdding: .day, value: -1, to: today))
+    try enhancement(
+      ShotHistoryDatePicker(selection: .today) { model.setDateFilter($0) },
+      size: NSSize(width: 240, height: 136), name: "history-date-options"
+    ) { host in
+      let choose = try #require(compositionButton(in: host, label: "最近 7 天"))
+      #expect(choose() && model.dateFilter == .lastSevenDays)
+    }
+    try enhancement(
+      ShotHistoryDatePicker(selection: model.dateFilter) { model.setDateFilter($0) },
+      size: NSSize(width: 270, height: 136), name: "history-date-edit", dark: true
+    ) { host in
+      let custom = try #require(compositionButton(in: host, label: "自选日期…"))
+      #expect(custom())
+      RunLoop.main.run(until: Date.now.addingTimeInterval(0.1))
+      let cancel = try #require(compositionButton(in: host, label: "取消"))
+      #expect(cancel() && model.dateFilter == .lastSevenDays)
+      RunLoop.main.run(until: Date.now.addingTimeInterval(0.1))
+      let reopen = try #require(compositionButton(in: host, label: "自选日期…"))
+      #expect(reopen())
+    }
+    try enhancement(
+      ShotHistoryDateRangeEditor(start: today, end: yesterday, cancel: {}) {
+        model.setDateFilter($0)
+      }, size: NSSize(width: 270, height: 144), name: "history-date-invalid"
+    ) { host in
+      _ = compositionButton(in: host, label: "应用")?()
+      #expect(model.dateFilter == .lastSevenDays)
+    }
+    try enhancement(
+      ShotHistoryDateRangeEditor(start: yesterday, end: today, cancel: {}) {
+        model.setDateFilter($0)
+      }, size: NSSize(width: 270, height: 124), name: "history-date-apply"
+    ) { host in
+      let apply = try #require(compositionButton(in: host, label: "应用"))
+      #expect(apply() && model.dateFilter == .custom(start: yesterday, end: today))
+    }
+    model.setTagFilter(tag)
+    model.pick(id)
+    try historyDateWindowSnapshot(
+      ShotHistoryView(model: model).defaultAppStorage(prefs),
+      size: NSSize(width: 720, height: 420), name: "history-date-detail", dark: true)
+    try historyDateWindowSnapshot(
+      ShotHistoryView(model: model).defaultAppStorage(prefs),
+      size: NSSize(width: 720, height: 420), name: "history-date-compact", dark: false)
+    try enhancement(
+      ShotHistoryView(model: model).defaultAppStorage(prefs),
+      size: NSSize(width: 720, height: 420), name: "history-date-detail-content", dark: true)
+    model.setDateFilter(.custom(start: yesterday, end: yesterday))
+    #expect(model.shown.isEmpty)
+    try historyDateWindowSnapshot(
+      ShotHistoryView(model: model).defaultAppStorage(prefs),
+      size: NSSize(width: 960, height: 620), name: "history-date-empty", dark: false)
+  }
+
+  /// 保留原生标题栏桥接，在屏外核对日历、标签、类型和搜索的实际位置。
+  private func historyDateWindowSnapshot(
+    _ view: some View, size: NSSize, name: String, dark: Bool
+  ) throws {
+    let window = OffscreenTitledWindow(contentViewController: .windowContent(view))
+    window.title = "截图历史"
+    window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+    window.toolbarStyle = .unified
+    window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+    window.setContentSize(size)
+    window.setFrameOrigin(NSPoint(x: -20000, y: -20000))
+    window.orderFront(nil)
+    defer { window.orderOut(nil) }
+    #expect(window.screen == nil && !window.isKeyWindow)
+    for _ in 0..<8 { RunLoop.main.run(until: Date.now.addingTimeInterval(0.1)) }
+    let frame = try #require(window.contentView?.superview)
+    let bitmap = try #require(frame.bitmapImageRepForCachingDisplay(in: frame.bounds))
+    frame.cacheDisplay(in: frame.bounds, to: bitmap)
+    let out = try #require(Self.directory)
+    try write(try #require(bitmap.cgImage), to: "\(out)/shot-\(name).png")
+  }
+
   /// 检查独立入口和成功底栏在两种面板尺寸下的位置，不打开真实文件面板。
   @Test(.enabled(if: directory != nil)) func renderIndividualPNGExport() async throws {
     let folder = FileManager.default.temporaryDirectory.appending(

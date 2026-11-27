@@ -33,11 +33,59 @@ import SwiftUI
     }
   }
 
+  /// 日期条件只作用于当前历史窗口，按本地日历日匹配记录的创建时间。
+  enum DateFilter: Equatable {
+    case all, today, lastSevenDays
+    case custom(start: Date, end: Date)
+
+    /// 同一个日期名称用于工具栏状态、当前筛选和旁白。
+    var title: String {
+      switch self {
+      case .all: return "不限日期"
+      case .today: return "今天"
+      case .lastSevenDays: return "最近 7 天"
+      case .custom(let start, let end):
+        let first = start.formatted(date: .numeric, time: .omitted)
+        let last = end.formatted(date: .numeric, time: .omitted)
+        return first == last ? first : "\(first) 至 \(last)"
+      }
+    }
+
+    /// 用次日开始作为排他上界，涵盖结束日期整天及夏令时切换日。
+    func bounds(now: Date, calendar: Calendar) -> Range<Date>? {
+      let first: Date
+      let last: Date
+      switch self {
+      case .all: return nil
+      case .today:
+        first = now
+        last = now
+      case .lastSevenDays:
+        guard let sixDaysAgo = calendar.date(byAdding: .day, value: -6, to: now) else { return nil }
+        first = sixDaysAgo
+        last = now
+      case .custom(let start, let end):
+        first = start
+        last = end
+      }
+      let lower = calendar.startOfDay(for: first)
+      guard let day = calendar.dateInterval(of: .day, for: last), lower <= day.start else {
+        return nil
+      }
+      return lower..<day.end
+    }
+  }
+
   let history: ShotHistory
   let quickPreview: ShotHistoryPreview
+  @ObservationIgnored private let now: () -> Date
   var search = ""
   var filter = Filter.all
   private(set) var tagFilter: String?
+  private(set) var dateFilter = DateFilter.all
+  /// 日期面板打开时，窗口级历史快捷键也让给日期控件。
+  var showsDateFilter = false
+  private var calendarRevision = 0
   /// 选中的那几条（多选，2026-10-27 用户要的）：空 = 没选中。
   /// 右边正好一条时是预览，多条时是「已选 N 张」+ 能一起做的那几件
   var picked: Set<UUID> = []
@@ -65,10 +113,14 @@ import SwiftUI
   /// 历史关着时空状态里的「打开设置」：到 设置 › 截图（AppDelegate 给）
   @ObservationIgnored var openSettings: @MainActor () -> Void = {}
 
-  init(history: ShotHistory, actions: ShotActions = ShotActions()) {
+  init(
+    history: ShotHistory, actions: ShotActions = ShotActions(),
+    now: @escaping () -> Date = { .now }
+  ) {
     self.history = history
     quickPreview = ShotHistoryPreview(history: history)
     self.actions = actions
+    self.now = now
   }
 
   /// 筛过、搜过的那些（新的在前，和网格里的先后一样）
@@ -77,12 +129,18 @@ import SwiftUI
   /// 按天分组（新的在前），标题是「今天」「昨天」或者日期。
   /// 按历史的版本号、搜索词、筛选和今天是哪天记一份（P2：原来每次画都筛一遍、排一遍、按天分一遍）
   var groups: [Group] {
+    let now = now()
+    let calendar = Calendar.current
     let key = GroupKey(
       revision: history.revision, search: search, filter: filter, tag: tagFilter,
-      day: Calendar.current.startOfDay(for: .now))
+      dateFilter: dateFilter, day: calendar.startOfDay(for: now), calendarRevision: calendarRevision
+    )
     if let memo, memo.key == key { return memo.groups }
     let groups = Self.group(
-      Self.filtered(history.items, search: search, filter: filter, tag: tagFilter), now: .now)
+      Self.filtered(
+        history.items, search: search, filter: filter, tag: tagFilter, dateFilter: dateFilter,
+        now: now, calendar: calendar),
+      now: now, calendar: calendar)
     memo = (key, groups)
     return groups
   }
@@ -92,7 +150,9 @@ import SwiftUI
     let search: String
     let filter: Filter
     let tag: String?
+    let dateFilter: DateFilter
     let day: Date
+    let calendarRevision: Int
   }
   @ObservationIgnored private var memo: (key: GroupKey, groups: [Group])?
 
@@ -107,17 +167,20 @@ import SwiftUI
     return visible.count == 1 ? visible.first : nil
   }
 
-  /// 标签筛选精确匹配，兼容现有的类型条件和普通关键字搜索。
+  /// 日期、类型、标签和关键字同时匹配，同一份结果供列表、预览与批量操作使用。
   static func filtered(
-    _ items: [ShotHistory.Item], search: String, filter: Filter, tag: String? = nil
+    _ items: [ShotHistory.Item], search: String, filter: Filter, tag: String? = nil,
+    dateFilter: DateFilter = .all, now: Date = .now, calendar: Calendar = .current
   )
     -> [ShotHistory.Item]
   {
     let needle = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     let tagNeedle = ShotTags.key(needle)
     let tagKey = tag.map(ShotTags.key)
+    let dateBounds = dateFilter.bounds(now: now, calendar: calendar)
     return items.filter { item in
       guard filter.matches(item.kind) else { return false }
+      if dateFilter != .all, dateBounds?.contains(item.createdAt) != true { return false }
       if let tagKey, !item.tags.contains(where: { ShotTags.key($0) == tagKey }) { return false }
       guard !needle.isEmpty else { return true }
       return (item.source ?? "").lowercased().contains(needle)
@@ -153,6 +216,24 @@ import SwiftUI
     reconcileQuickPreview()
   }
 
+  /// 应用有效日期范围，同时移除隐藏的多选与预览记录。
+  @discardableResult func setDateFilter(_ filter: DateFilter) -> Bool {
+    guard filter == .all || filter.bounds(now: now(), calendar: .current) != nil else {
+      return false
+    }
+    dateFilter = filter
+    reconcileSelection()
+    reconcileQuickPreview()
+    return true
+  }
+
+  /// 跨午夜、系统时钟或时区调整时重新计算当天边界和当前可操作的记录。
+  func calendarChanged() {
+    calendarRevision += 1
+    reconcileSelection()
+    reconcileQuickPreview()
+  }
+
   /// 大图只浏览当前筛出来的截图和长截图，保持网格当前选择。
   @discardableResult func openQuickPreview(_ requested: ShotHistory.Item? = nil) -> Bool {
     guard deleting.isEmpty, let item = requested ?? selected, item.supportsQuickPreview else {
@@ -161,7 +242,7 @@ import SwiftUI
     return quickPreview.open(item.id, within: previewableIDs)
   }
 
-  /// 搜索条件、标签或历史发生变化时更新预览集合，不恢复已经隐藏的关联项。
+  /// 筛选条件或历史发生变化时更新预览集合，只留下可见项。
   func reconcileQuickPreview() {
     guard quickPreview.isOpen else { return }
     quickPreview.reconcile(with: previewableIDs)
@@ -169,7 +250,7 @@ import SwiftUI
 
   private var previewableIDs: [UUID] { shown.filter(\.supportsQuickPreview).map(\.id) }
 
-  /// 类型、搜索和标签变更后，选区与锚点只保留可见记录。
+  /// 筛选条件变更后，选区与锚点只保留可见记录。
   func reconcileSelection() {
     guard !picked.isEmpty || anchor != nil else { return }
     let visible = Set(shown.map(\.id))
@@ -188,8 +269,9 @@ import SwiftUI
   }
 
   /// 按天分组（新的在前；今天、昨天写成字，更早的写日期）。纯函数，配单测
-  static func group(_ items: [ShotHistory.Item], now: Date) -> [Group] {
-    let calendar = Calendar.current
+  static func group(_ items: [ShotHistory.Item], now: Date, calendar: Calendar = .current)
+    -> [Group]
+  {
     var order: [Date] = []
     var buckets: [Date: [ShotHistory.Item]] = [:]
     for item in items.sorted(by: { $0.createdAt > $1.createdAt }) {
@@ -210,6 +292,7 @@ import SwiftUI
     // 只要日期、不带时间（Date.FormatStyle 加了字段也还会带上 0:00，实测）；今年的不写年份
     let formatter =
       calendar.isDate(day, equalTo: now, toGranularity: .year) ? thisYear : otherYears
+    if formatter.timeZone != calendar.timeZone { formatter.timeZone = calendar.timeZone }
     return formatter.string(from: day)
   }
 
@@ -482,6 +565,7 @@ import SwiftUI
 
   func windowWillClose(_ notification: Notification) {
     removeKeyMonitor()
+    model.showsDateFilter = false
     model.quickPreview.close()
     NSApp.leaveDockIfNoWindows(closing: window)
     onClose()
@@ -493,7 +577,7 @@ import SwiftUI
   static func handlesKeyDown(_ event: NSEvent, in window: NSWindow, model: ShotHistoryModel)
     -> Bool
   {
-    guard event.window === window, window.attachedSheet == nil,
+    guard event.window === window, window.attachedSheet == nil, !model.showsDateFilter,
       !(window.firstResponder is NSTextView)
     else { return false }
     let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])

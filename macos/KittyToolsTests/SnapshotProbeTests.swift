@@ -5671,7 +5671,7 @@ private final class PaperFill: NSView {
 }
 
 /// 截图自检：有标题栏的窗口摆在屏外（系统默认会把它挪回屏幕里）
-private final class OffscreenTitledWindow: NSWindow {
+final class OffscreenTitledWindow: NSWindow {
   override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
     frameRect
   }

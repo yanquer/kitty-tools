@@ -6,6 +6,7 @@
 // 快速保存叫「存储到「桌面」」（ScreenshotOutput.saveTitle，同截图工具栏、钉图；第四轮体检 U13：原来写「存储到…」，
 // 像会弹框，其实直接存）。
 
+import Combine
 import SwiftUI
 
 struct ShotHistoryView: View {
@@ -27,7 +28,7 @@ struct ShotHistoryView: View {
   var body: some View {
     HStack(spacing: 0) {
       VStack(spacing: 0) {
-        if let tag = model.tagFilter { activeTag(tag) }
+        if model.tagFilter != nil || model.dateFilter != .all { activeFilters }
         grid
       }
       let chosen = model.chosen
@@ -57,6 +58,7 @@ struct ShotHistoryView: View {
       }
       ToolbarItem(placement: .automatic) {
         Button("标签筛选", systemImage: model.tagFilter == nil ? "tag" : "tag.fill") {
+          model.showsDateFilter = false
           showsTagFilter.toggle()
         }
         .accessibilityValue(model.tagFilter ?? "所有标签")
@@ -69,19 +71,43 @@ struct ShotHistoryView: View {
           }
         }
       }
+      ToolbarItem(placement: .automatic) {
+        Button("日期筛选", systemImage: "calendar") {
+          showsTagFilter = false
+          model.showsDateFilter.toggle()
+        }
+        .labelStyle(.iconOnly)
+        .accessibilityValue(model.dateFilter.title)
+        .help("按日期筛选")
+        .disabled(model.quickPreview.isOpen)
+        .popover(isPresented: $model.showsDateFilter, arrowEdge: .bottom) {
+          ShotHistoryDatePicker(selection: model.dateFilter) { filter in
+            if model.setDateFilter(filter) { model.showsDateFilter = false }
+          }
+        }
+      }
     }
-    .searchable(text: $model.search, prompt: "搜来源、种类、文件名或标签")
+    .searchable(text: $model.search, prompt: "搜来源、文件名或标签")
     .searchFocused($searching)
     .onChange(of: model.search) { _, _ in reconcileAfterFilter() }
     .onChange(of: model.filter) { _, _ in reconcileAfterFilter() }
     .onChange(of: model.history.revision) { _, _ in model.reconcileQuickPreview() }
+    .onReceive(
+      NotificationCenter.default.publisher(for: .NSCalendarDayChanged)
+        .merge(
+          with: NotificationCenter.default.publisher(for: .NSSystemTimeZoneDidChange),
+          NotificationCenter.default.publisher(for: .NSSystemClockDidChange)
+        )
+        .receive(on: RunLoop.main)
+    ) { _ in model.calendarChanged() }
     .sheet(item: $tagEdit) { edit in
       ShotHistoryTagEditor(edit: edit) { ids, adding, removing in
         try model.applyTags(ids, adding: adding, removing: removing)
       }
     }
     .onKeyPress(.delete) {
-      guard !searching, tagEdit == nil, !showsTagFilter, !model.quickPreview.isOpen,
+      guard !searching, tagEdit == nil, !showsTagFilter, !model.showsDateFilter,
+        !model.quickPreview.isOpen,
         !model.chosen.isEmpty
       else {
         return .ignored
@@ -119,16 +145,33 @@ struct ShotHistoryView: View {
     if model.openQuickPreview(item) { searching = false }
   }
 
-  /// 筛选条件显示在结果上方，长标签可查看完整名称并一键清除。
-  private func activeTag(_ tag: String) -> some View {
-    HStack(spacing: 8) {
-      Label(tag, systemImage: "tag").lineLimit(1).help(tag)
-      Button("清除标签筛选", systemImage: "xmark.circle.fill") { model.setTagFilter(nil) }
-        .labelStyle(.iconOnly).buttonStyle(.borderless)
+  /// 当前标签和日期在结果上方并排显示，两种条件可以分别清除。
+  private var activeFilters: some View {
+    HStack(spacing: 12) {
+      if let tag = model.tagFilter {
+        activeFilter(tag, symbol: "tag", clear: "清除标签筛选") { model.setTagFilter(nil) }
+      }
+      if model.dateFilter != .all {
+        activeFilter(model.dateFilter.title, symbol: "calendar", clear: "清除日期筛选") {
+          model.setDateFilter(.all)
+        }
+        .layoutPriority(1)
+      }
       Spacer(minLength: 0)
     }
     .font(.system(size: 12)).foregroundStyle(.secondary)
     .padding(.horizontal, 16).padding(.vertical, 8)
+  }
+
+  /// 复用当前筛选的行内标签和旁白可识别的移除按钮。
+  private func activeFilter(
+    _ title: String, symbol: String, clear: String, action: @escaping () -> Void
+  ) -> some View {
+    HStack(spacing: 8) {
+      Label(title, systemImage: symbol).lineLimit(1).help(title)
+      Button(clear, systemImage: "xmark.circle.fill", action: action)
+        .labelStyle(.iconOnly).buttonStyle(.borderless).help(clear)
+    }
   }
 
   /// 打开编辑器时固定清晰的目标，右键未选中项只编辑该项。
@@ -184,7 +227,7 @@ struct ShotHistoryView: View {
       }
     }
     .opacity(0)
-    .disabled(tagEdit != nil || showsTagFilter)
+    .disabled(tagEdit != nil || showsTagFilter || model.showsDateFilter)
     .frame(width: 0, height: 0)
     .accessibilityHidden(true)
   }
@@ -245,9 +288,13 @@ struct ShotHistoryView: View {
 
   /// 网格里一条都没有时：搜不到 / 历史关着（给去设置的入口）/ 还没有（保留几天照设置说）
   @ViewBuilder private var emptyState: some View {
-    if model.tagFilter != nil || !model.search.isEmpty || model.filter != .all {
+    if model.dateFilter != .all || model.tagFilter != nil || !model.search.isEmpty
+      || model.filter != .all
+    {
       EmptyState(symbol: "magnifyingglass", title: "没有匹配的截图") {
-        if model.tagFilter != nil {
+        if model.dateFilter != .all {
+          Button("清除日期筛选") { model.setDateFilter(.all) }
+        } else if model.tagFilter != nil {
           Button("清除标签筛选") { model.setTagFilter(nil) }
         } else {
           Text("换个词或筛选条件试试").foregroundStyle(.secondary)
@@ -467,6 +514,108 @@ struct ShotHistoryView: View {
   private func edit(_ item: ShotHistory.Item) {
     model.pick(item.id)
     if item.filePath == nil { model.actions.edit(item) } else { model.open(item) }
+  }
+}
+
+/// 历史日期面板提供快捷范围，自选日期在同一个面板里填写和确认。
+struct ShotHistoryDatePicker: View {
+  let selection: ShotHistoryModel.DateFilter
+  let choose: (ShotHistoryModel.DateFilter) -> Void
+  @State private var editingRange = false
+
+  var body: some View {
+    if editingRange {
+      let initial = initialRange
+      ShotHistoryDateRangeEditor(start: initial.0, end: initial.1) {
+        editingRange = false
+      } apply: { filter in
+        choose(filter)
+      }
+    } else {
+      VStack(alignment: .leading, spacing: 4) {
+        preset(.all)
+        preset(.today)
+        preset(.lastSevenDays)
+        Hairline().padding(.vertical, 4)
+        option("自选日期…", selected: isCustom) { editingRange = true }
+      }
+      .padding(12).frame(width: 240)
+    }
+  }
+
+  /// 重新编辑时从当前范围开始，第一次自选从当天开始。
+  private var initialRange: (Date, Date) {
+    if case .custom(let start, let end) = selection { return (start, end) }
+    let today = Date.now
+    return (today, today)
+  }
+
+  private var isCustom: Bool {
+    if case .custom = selection { return true }
+    return false
+  }
+
+  /// 预设选择立即刷新结果。
+  private func preset(_ filter: ShotHistoryModel.DateFilter) -> some View {
+    option(filter.title, selected: filter == selection) { choose(filter) }
+  }
+
+  /// 复用系统皮肤的填充行与选中标记，旁白读出当前条件。
+  private func option(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+      HStack {
+        Text(title)
+        Spacer()
+        if selected { Image(systemName: "checkmark").accessibilityHidden(true) }
+      }
+      .padding(.vertical, 4).contentShape(.rect)
+    }
+    .buttonStyle(.plain)
+    .accessibilityAddTraits(selected ? .isSelected : [])
+  }
+}
+
+/// 两个本地日期字段保存本次草稿，到应用时才更新历史条件。
+struct ShotHistoryDateRangeEditor: View {
+  @Environment(\.calendar) private var calendar
+  @State private var start: Date
+  @State private var end: Date
+  let cancel: () -> Void
+  let apply: (ShotHistoryModel.DateFilter) -> Void
+
+  /// 每次进入编辑时用已生效范围初始化独立草稿。
+  init(
+    start: Date, end: Date, cancel: @escaping () -> Void,
+    apply: @escaping (ShotHistoryModel.DateFilter) -> Void
+  ) {
+    _start = State(initialValue: start)
+    _end = State(initialValue: end)
+    self.cancel = cancel
+    self.apply = apply
+  }
+
+  var body: some View {
+    let filter = ShotHistoryModel.DateFilter.custom(start: start, end: end)
+    let valid = filter.bounds(now: start, calendar: calendar) != nil
+    VStack(alignment: .leading, spacing: 10) {
+      DatePicker("开始日期", selection: $start, displayedComponents: .date)
+      DatePicker("结束日期", selection: $end, displayedComponents: .date)
+      if !valid {
+        Text("结束日期不能早于开始日期").font(.footnote).foregroundStyle(.secondary)
+      }
+      HStack {
+        Spacer()
+        Button("取消", action: cancel).keyboardShortcut(.cancelAction)
+        Button("应用") {
+          if valid { apply(filter) }
+        }
+        .buttonStyle(.borderedProminent)
+        .keyboardShortcut(.defaultAction)
+        .disabled(!valid)
+      }
+    }
+    .datePickerStyle(.stepperField)
+    .padding(12).frame(width: 270)
   }
 }
 
