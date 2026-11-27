@@ -125,7 +125,7 @@ struct ShotAccessibilityTests {
         "拷贝", "拷贝为 PNG 文件", "识字并拷贝", "查看识字结果", "翻译", ScreenshotOutput.saveTitle, "另存为…",
         "继续标注", "局部放大", "收起为小卡片",
         "专注这张钉图", "锁定钉图", "原始大小", "向左旋转 90°", "向右旋转 90°", "水平翻转", "垂直翻转",
-        "关闭", "原位选字",
+        "关闭", "原位选字", "跟随指针", "固定最近边",
       ])
     for action in actions.prefix(7) { #expect(action.handler?() == true) }
     #expect(outputs == [.copy, .recognize, .inspect, .translate, .save, .saveAs])

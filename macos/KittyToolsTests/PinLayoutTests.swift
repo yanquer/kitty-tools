@@ -24,7 +24,8 @@ import Testing
 /// 构造交给钉图本地响应方法的滚动事件，不发到系统事件队列。
 @MainActor func pinScrollEvent(
   _ delta: Int32, precise: Bool = false, option: Bool = false,
-  phase: CGScrollPhase? = nil, momentum: CGMomentumScrollPhase? = nil
+  phase: CGScrollPhase? = nil, momentum: CGMomentumScrollPhase? = nil,
+  at screenPoint: CGPoint? = nil, timestamp: TimeInterval? = nil
 ) throws -> NSEvent {
   let event = try #require(
     CGEvent(
@@ -38,6 +39,11 @@ import Testing
   if let momentum {
     event.setIntegerValueField(.scrollWheelEventMomentumPhase, value: Int64(momentum.rawValue))
   }
+  if let screenPoint {
+    event.location = CGPoint(
+      x: screenPoint.x, y: CGDisplayBounds(CGMainDisplayID()).height - screenPoint.y)
+  }
+  if let timestamp { event.timestamp = UInt64(timestamp * 1_000_000_000) }
   return try #require(NSEvent(cgEvent: event))
 }
 
@@ -79,6 +85,101 @@ struct PinLayoutTests {
     view.scrollWheel(with: try pinScrollEvent(10, precise: true, phase: .began))
     #expect(pin.frame.size != frame.size && pin.opacityPercent == 51)
     #expect(!pin.isKeyWindow)
+  }
+
+  /// 在屏外经原生菜单和响应方法核对四条边的缩放位置。
+  @Test func fixedScrollZoomAnchorsNearestEdge() throws {
+    let board = PinBoard()
+    let frame = CGRect(x: -20000, y: -20000, width: 200, height: 100)
+    let edges: [(CGPoint, KeyPath<CGRect, CGFloat>)] = [
+      (CGPoint(x: frame.minX + 6, y: frame.midY), \.minX),
+      (CGPoint(x: frame.maxX - 6, y: frame.midY), \.maxX),
+      (CGPoint(x: frame.midX, y: frame.minY + 6), \.minY),
+      (CGPoint(x: frame.midX, y: frame.maxY - 6), \.maxY),
+    ]
+    for (point, edge) in edges {
+      let pin = PinPanel(image: Self.image, frame: frame, board: board)
+      let view = try #require(pin.contentView)
+      let scroll = try pinScrollEvent(20, precise: true, phase: .began, at: point)
+      let menu = try #require(view.menu(for: scroll)?.item(withTitle: "缩放锚点")?.submenu)
+      #expect(menu.items.map(\.state) == [.on, .off])
+      let fixed = try #require(menu.item(withTitle: "固定最近边"))
+      #expect(NSApp.sendAction(try #require(fixed.action), to: fixed.target, from: fixed))
+      #expect(
+        view.menu(for: scroll)?.item(withTitle: "缩放锚点")?.submenu?.items.map(\.state) == [.off, .on])
+      view.scrollWheel(with: scroll)
+      #expect(pin.frame.width > frame.width)
+      #expect(abs(pin.frame[keyPath: edge] - frame[keyPath: edge]) <= 0.5)
+      #expect(!pin.isKeyWindow)
+    }
+  }
+
+  /// 指针跨边时保留原锚点，新的触控板手势和间隔后的鼠标滚轮重新取边。
+  @Test func fixedScrollZoomKeepsGestureAndWheelGroups() throws {
+    let board = PinBoard()
+    let frame = CGRect(x: -20000, y: -20000, width: 200, height: 100)
+    let pin = PinPanel(image: Self.image, frame: frame, board: board)
+    let view = try #require(pin.contentView)
+    let action = try #require(view.accessibilityCustomActions()?.first { $0.name == "固定最近边" })
+    #expect(action.handler?() == true)
+    let left = CGPoint(x: frame.minX + 5, y: frame.midY)
+    let start = try pinScrollEvent(0, precise: true, phase: .began, at: left)
+    view.scrollWheel(with: start)
+    #expect(pin.frame == frame)
+    let right = CGPoint(x: frame.maxX - 5, y: frame.midY)
+    view.scrollWheel(with: try pinScrollEvent(20, precise: true, phase: .changed, at: right))
+    #expect(pin.frame.minX == frame.minX && pin.frame.width > frame.width)
+    view.scrollWheel(with: try pinScrollEvent(0, precise: true, phase: .ended, at: right))
+    let beforeMomentum = pin.frame
+    view.scrollWheel(with: try pinScrollEvent(20, precise: true, momentum: .begin, at: right))
+    #expect(pin.frame.minX == frame.minX && pin.frame.width > beforeMomentum.width)
+    view.scrollWheel(with: try pinScrollEvent(0, precise: true, momentum: .end, at: right))
+    let beforeNext = pin.frame
+    let newRight = CGPoint(x: beforeNext.maxX - 5, y: beforeNext.midY)
+    view.scrollWheel(with: try pinScrollEvent(-20, precise: true, phase: .began, at: newRight))
+    #expect(abs(pin.frame.maxX - beforeNext.maxX) <= 0.5 && pin.frame.width < beforeNext.width)
+    view.scrollWheel(with: try pinScrollEvent(20, precise: true, phase: .cancelled, at: left))
+
+    pin.setFrame(frame, display: false)
+    view.scrollWheel(with: try pinScrollEvent(1, at: left, timestamp: 1))
+    let wheelRight = CGPoint(x: pin.frame.maxX - 5, y: pin.frame.midY)
+    view.scrollWheel(with: try pinScrollEvent(1, at: wheelRight, timestamp: 1.1))
+    #expect(pin.frame.minX == frame.minX)
+    let beforeGap = pin.frame
+    let afterGap = CGPoint(x: beforeGap.maxX - 5, y: beforeGap.midY)
+    view.scrollWheel(with: try pinScrollEvent(-1, at: afterGap, timestamp: 1.5))
+    #expect(abs(pin.frame.maxX - beforeGap.maxX) <= 0.5 && pin.frame.width < beforeGap.width)
+  }
+
+  /// 固定最近边不接管透明度、锁定和局部取景，取消后恢复指针模式。
+  @Test func fixedScrollZoomRespectsOtherPinModes() throws {
+    let board = PinBoard()
+    let frame = CGRect(x: -20000, y: -20000, width: 200, height: 100)
+    let pin = PinPanel(image: Self.image, frame: frame, board: board)
+    let view = try #require(pin.contentView)
+    let point = CGPoint(x: frame.minX + 5, y: frame.midY)
+    let scroll = try pinScrollEvent(1, at: point)
+    let actions = try #require(view.accessibilityCustomActions())
+    let fixed = try #require(actions.first { $0.name == "固定最近边" })
+    #expect(fixed.handler?() == true)
+    pin.setLocked(true)
+    view.scrollWheel(with: scroll)
+    #expect(pin.frame == frame)
+    view.scrollWheel(with: try pinScrollEvent(-5, option: true, at: point))
+    #expect(pin.frame == frame && pin.opacityPercent == 75)
+    pin.setLocked(false)
+    let local = try #require(actions.first { $0.name == "局部放大" })
+    #expect(local.handler?() == true)
+    view.scrollWheel(with: scroll)
+    #expect(pin.frame == frame)
+    #expect((view.accessibilityValue() as? String)?.contains("局部放大 108%") == true)
+    #expect(local.handler?() == true)
+    let follow = try #require(actions.first { $0.name == "跟随指针" })
+    #expect(follow.handler?() == true)
+    #expect(
+      view.menu(for: scroll)?.item(withTitle: "缩放锚点")?.submenu?.items.map(\.state) == [.on, .off])
+    view.scrollWheel(with: scroll)
+    #expect(pin.frame.width > frame.width)
   }
 
   // 回弹、滚轮缩放、原始大小都不卡在布局里，圆钮一直贴右上角、百分比居中（1x 上差不过半个点）

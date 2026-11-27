@@ -703,6 +703,14 @@ private final class PinView: NSView {
   private enum OpacityScrollState { case idle, adjusting, awaitingMomentum }
   private var opacityScrollState = OpacityScrollState.idle
   private var opacityTarget: CGFloat?
+  /// 一次普通滚动的屏幕锚点及其在窗口内的归一化位置。
+  private struct ScrollAnchor {
+    let point: CGPoint
+    let fraction: CGPoint
+    var wheelTimestamp: TimeInterval?
+  }
+  private var fixesScrollEdge = false
+  private var scrollAnchor: ScrollAnchor?
 
   init(image: CGImage, size: CGSize, board: PinBoard) {
     self.image = image
@@ -864,6 +872,7 @@ private final class PinView: NSView {
   private var scale: CGFloat { CGFloat(image.width) / originalSize.width }
 
   override func mouseDown(with event: NSEvent) {
+    scrollAnchor = nil
     if panel?.isLocked == true || panel?.isTransforming == true {
       window?.makeKey()
       return
@@ -896,6 +905,7 @@ private final class PinView: NSView {
   /// 锁定时结束已有拖动并更新可见解锁按钮，不改变窗口位置或激活前台。
   func lockChanged() {
     panStart = nil
+    scrollAnchor = nil
     let locked = panel?.isLocked == true
     let title = locked ? "解锁钉图" : "锁定钉图"
     lockButton?.image = NSImage(
@@ -909,6 +919,7 @@ private final class PinView: NSView {
   /// 更换合成图时保留查看倍率，下一次重画使用新内容。
   func replaceImage(_ image: CGImage, resetView: Bool = false) {
     textSelection.stop()
+    scrollAnchor = nil
     self.image = image
     if let panel {
       originalSize = CGSize(
@@ -922,11 +933,53 @@ private final class PinView: NSView {
     needsDisplay = true
   }
 
+  /// 透明度优先处理，只有普通滚动才可能固定窗口的一条边。
   override func scrollWheel(with event: NSEvent) {
-    if handleOpacityScroll(event) { return }
+    if handleOpacityScroll(event) {
+      scrollAnchor = nil
+      return
+    }
     // 触控板给的是像素级增量，滚轮给的是行
     let delta = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * 8
-    zoom(by: exp(delta * 0.01))
+    zoom(by: exp(delta * 0.01), scrollEvent: event)
+  }
+
+  /// 首次滚动时把指针投影到最近边，松手后的惯性继续用同一个点。
+  private func fixedAnchor(for event: NSEvent, in frame: CGRect) -> ScrollAnchor? {
+    let phase = event.phase
+    let momentum = event.momentumPhase
+    if phase.contains(.cancelled) || momentum.contains(.cancelled) || phase.contains(.mayBegin) {
+      scrollAnchor = nil
+      return nil
+    }
+    let wheel = phase.isEmpty && momentum.isEmpty
+    // 无手势阶段的鼠标滚轮以相邻事件的间隔划分，连续拨动不跳边。
+    let previousTick = scrollAnchor?.wheelTimestamp
+    let continuesWheel = previousTick.map { event.timestamp - $0 <= 0.25 } ?? false
+    if phase.contains(.began) || (wheel && !continuesWheel) || (!wheel && previousTick != nil) {
+      scrollAnchor = nil
+    }
+    defer {
+      if momentum.contains(.ended) { scrollAnchor = nil }
+    }
+    if scrollAnchor == nil {
+      let point =
+        event.window?.convertPoint(toScreen: event.locationInWindow) ?? event.locationInWindow
+      let x = min(max(point.x, frame.minX), frame.maxX)
+      let y = min(max(point.y, frame.minY), frame.maxY)
+      let candidates = [
+        (abs(point.x - frame.minX), CGPoint(x: frame.minX, y: y)),
+        (abs(point.x - frame.maxX), CGPoint(x: frame.maxX, y: y)),
+        (abs(point.y - frame.minY), CGPoint(x: x, y: frame.minY)),
+        (abs(point.y - frame.maxY), CGPoint(x: x, y: frame.maxY)),
+      ]
+      guard let anchor = candidates.min(by: { $0.0 < $1.0 })?.1 else { return nil }
+      let fraction = CGPoint(
+        x: (anchor.x - frame.minX) / frame.width, y: (anchor.y - frame.minY) / frame.height)
+      scrollAnchor = ScrollAnchor(point: anchor, fraction: fraction)
+    }
+    if wheel { scrollAnchor?.wheelTimestamp = event.timestamp }
+    return scrollAnchor
   }
 
   /// ⌥ 滚动只改变透明度，触控板松手后的惯性留在原手势里并直接略过。
@@ -990,14 +1043,18 @@ private final class PinView: NSView {
 
   override func magnify(with event: NSEvent) { zoom(by: 1 + event.magnification) }
 
-  /// 以鼠标为锚点缩放，保持宽高比：最小到原大的 10%、且宽高都不小于 24 点（原图本来更小就是原大），最大 5 倍
-  private func zoom(by factor: CGFloat) {
+  /// 等比缩放，默认以指针为锚点；整窗滚动可改用手势开始时选定的边。
+  private func zoom(by factor: CGFloat, scrollEvent: NSEvent? = nil) {
     guard panel?.isTransforming != true, panel?.isLocked != true, panel?.isMiniature != true,
       let window, factor.isFinite,
       factor > 0
-    else { return }
+    else {
+      scrollAnchor = nil
+      return
+    }
     panel?.finishPopIn()
     if localZoom.isEnabled {
+      scrollAnchor = nil
       let point = convert(NSEvent.mouseLocation, from: nil)
       localZoom.zoom(
         by: factor,
@@ -1009,13 +1066,22 @@ private final class PinView: NSView {
     let frame = window.frame
     let minimum = max(min(1, max(0.1, 24 / originalSize.width)), min(1, 24 / originalSize.height))
     let scale = min(max(frame.width / originalSize.width * factor, minimum), 5)
-    let ratio = originalSize.width * scale / frame.width
-    let anchor = NSEvent.mouseLocation
-    window.setFrame(
-      CGRect(
+    let size = CGSize(width: originalSize.width * scale, height: originalSize.height * scale)
+    let origin: CGPoint
+    if fixesScrollEdge, let scrollEvent {
+      guard let anchor = fixedAnchor(for: scrollEvent, in: frame), factor != 1 else { return }
+      origin = CGPoint(
+        x: anchor.point.x - anchor.fraction.x * size.width,
+        y: anchor.point.y - anchor.fraction.y * size.height)
+    } else {
+      scrollAnchor = nil
+      let ratio = size.width / frame.width
+      let anchor = NSEvent.mouseLocation
+      origin = CGPoint(
         x: anchor.x - (anchor.x - frame.minX) * ratio,
-        y: anchor.y - (anchor.y - frame.minY) * ratio,
-        width: originalSize.width * scale, height: originalSize.height * scale), display: true)
+        y: anchor.y - (anchor.y - frame.minY) * ratio)
+    }
+    window.setFrame(CGRect(origin: origin, size: size), display: true)
     window.invalidateShadow()
     showZoom(scale)
   }
@@ -1173,6 +1239,16 @@ private final class PinView: NSView {
     ]
   }
 
+  /// 缩放锚点只有菜单和旁白入口，跟随指针排在默认位置。
+  private var scrollAnchorCommands: [Command] {
+    [
+      Command(
+        title: "跟随指针", key: "", keyCode: nil, modifiers: [], action: #selector(followScrollPointer)),
+      Command(
+        title: "固定最近边", key: "", keyCode: nil, modifiers: [], action: #selector(fixScrollEdge)),
+    ]
+  }
+
   /// 锁定期间拒绝改变几何和编辑，复制、识字、透明度、专注、解锁与明确关闭仍可用。
   private func commandIsEnabled(_ action: Selector) -> Bool {
     if panel?.isTransforming == true { return action == #selector(close) }
@@ -1196,16 +1272,7 @@ private final class PinView: NSView {
   override func menu(for event: NSEvent) -> NSMenu? {
     let menu = NSMenu()
     menu.autoenablesItems = false
-    let items = commands.map { command in
-      let item = NSMenuItem(
-        title: command.title, action: command.action, keyEquivalent: command.key)
-      item.keyEquivalentModifierMask = command.modifiers
-      item.target = self
-      item.isEnabled = commandIsEnabled(command.action)
-      // 翻译功能关闭时隐藏对应动作。
-      item.isHidden = command.action == #selector(translateImage) && !Feature.translate.isOn
-      return item
-    }
+    let items = commands.map(menuItem(for:))
     let outputs = items.prefix { $0.action != #selector(editImage) }
     outputs.forEach(menu.addItem)
     if let selecting = items.first(where: { $0.action == #selector(toggleTextSelection) }) {
@@ -1217,9 +1284,21 @@ private final class PinView: NSView {
     opacity.submenu = opacityMenu()
     menu.addItem(opacity)
     items.dropFirst(outputs.count).prefix { $0.action != #selector(close) }.forEach(menu.addItem)
-    if let zoomItem = menu.items.first(where: { $0.action == #selector(toggleLocalZoom) }) {
+    if let index = menu.items.firstIndex(where: { $0.action == #selector(toggleLocalZoom) }) {
+      let zoomItem = menu.items[index]
       zoomItem.state = localZoom.isEnabled ? .on : .off
       zoomItem.toolTip = "固定窗口大小，滚轮放大、拖动查看；⌥ 拖动移动窗口。复制与保存保留完整图片。"
+      let anchor = NSMenuItem(title: "缩放锚点", action: nil, keyEquivalent: "")
+      anchor.toolTip = "整窗滚动缩放时使用。"
+      let submenu = NSMenu()
+      submenu.autoenablesItems = false
+      for command in scrollAnchorCommands {
+        let item = menuItem(for: command)
+        item.state = (command.action == #selector(fixScrollEdge)) == fixesScrollEdge ? .on : .off
+        submenu.addItem(item)
+      }
+      anchor.submenu = submenu
+      menu.insertItem(anchor, at: index + 1)
     }
     for item in menu.items {
       if item.action == #selector(toggleLock) { item.state = panel?.isLocked == true ? .on : .off }
@@ -1231,6 +1310,16 @@ private final class PinView: NSView {
     menu.addItem(.separator())
     if let close = items.first(where: { $0.action == #selector(close) }) { menu.addItem(close) }
     return menu
+  }
+
+  /// 共用菜单项的目标、可用状态和键盘配置。
+  private func menuItem(for command: Command) -> NSMenuItem {
+    let item = NSMenuItem(title: command.title, action: command.action, keyEquivalent: command.key)
+    item.keyEquivalentModifierMask = command.modifiers
+    item.target = self
+    item.isEnabled = commandIsEnabled(command.action)
+    item.isHidden = command.action == #selector(translateImage) && !Feature.translate.isOn
+    return item
   }
 
   // MARK: 无障碍（mac-whisker §7，体检 B45）：钉图平时没有看得见的按钮，整张图是一个元素，操作都在自定义动作里
@@ -1248,6 +1337,7 @@ private final class PinView: NSView {
       panel?.showsOpaquePreview == true ? "临时全亮，设定透明度 \(percent)%" : "透明度 \(percent)%"
     return "\(Int(size.width.rounded())) × \(Int(size.height.rounded())) 点，\(opacity)"
       + (localZoom.isEnabled ? "，局部放大 \(Int(localZoom.magnification * 100))%" : "")
+      + (fixesScrollEdge ? "，滚动缩放固定最近边" : "")
       + (panel?.isMiniature == true ? "，已收纳" : "")
       + (isFocused ? "，专注" : "")
       + (panel?.isLocked == true ? "，已锁定" : "")
@@ -1255,7 +1345,7 @@ private final class PinView: NSView {
   }
 
   override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
-    commands.filter {
+    (commands + scrollAnchorCommands).filter {
       commandIsEnabled($0.action)
         && ($0.action != #selector(translateImage) || Feature.translate.isOn)
     }.map {
@@ -1265,6 +1355,20 @@ private final class PinView: NSView {
         MainActor.assumeIsolated { NSApp.sendAction(action, to: self, from: nil) }
       }
     }
+  }
+
+  /// 恢复当前钉图的默认滚动方式。
+  @objc private func followScrollPointer() { setScrollAnchorMode(fixed: false) }
+
+  /// 为当前钉图预设滚动时固定最近边。
+  @objc private func fixScrollEdge() { setScrollAnchorMode(fixed: true) }
+
+  /// 切换只作用于当前钉图，下一次滚动重新取锚点。
+  private func setScrollAnchorMode(fixed: Bool) {
+    guard panel?.isTransforming != true, fixesScrollEdge != fixed else { return }
+    fixesScrollEdge = fixed
+    scrollAnchor = nil
+    NSAccessibility.post(element: self, notification: .valueChanged)
   }
 
   /// 右键与旁白共享四个显式图像方向操作。
@@ -1284,7 +1388,10 @@ private final class PinView: NSView {
   @objc private func toggleLock() { if let panel { panel.setLocked(!panel.isLocked) } }
 
   /// 收纳仅改变查看方式，原始图片和编辑标注保留在同一对象中。
-  @objc private func toggleMiniature() { if let panel { panel.setMiniature(!panel.isMiniature) } }
+  @objc private func toggleMiniature() {
+    scrollAnchor = nil
+    if let panel { panel.setMiniature(!panel.isMiniature) }
+  }
 
   /// 专注由钉图集合统一控制，菜单、快捷键和旁白共用此动作。
   @objc private func toggleFocus() { if let panel { board.toggleFocus(panel) } }
@@ -1298,6 +1405,7 @@ private final class PinView: NSView {
     panel?.setMiniature(false)
     localZoom.toggle()
     panStart = nil
+    scrollAnchor = nil
     needsDisplay = true
     Island.announce(localZoom.isEnabled ? "局部放大：滚轮放大、拖动查看，⌥ 拖动移动窗口" : "已显示完整图片")
   }
@@ -1349,6 +1457,7 @@ private final class PinView: NSView {
   /// 回到钉上时的大小，左上角不动
   @objc private func actualSize() {
     guard panel?.isLocked != true else { return }
+    scrollAnchor = nil
     panel?.setMiniature(false)
     localZoom = PinZoom()
     needsDisplay = true

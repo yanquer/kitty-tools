@@ -1366,6 +1366,32 @@ struct ScreenshotSnapshotTests {
     try shootContent(hud, "pin-opacity-wheel-narrow")
   }
 
+  /// 屏外渲染贴边缩放前后的钉图，核对普通尺寸与窄图的百分比位置。
+  @Test(.enabled(if: directory != nil)) func renderPinFixedScrollZoom() throws {
+    let board = PinBoard()
+    let desktop = try Self.desktop()
+    for (width, height, dark) in [(200, 100, false), (64, 100, true)] {
+      let image = try #require(
+        desktop.cropping(to: CGRect(x: 0, y: 0, width: width * 2, height: height * 2)))
+      let frame = CGRect(x: -20000, y: -20000, width: width, height: height)
+      let panel = PinPanel(image: image, frame: frame, board: board)
+      let pin = try #require(panel.contentView)
+      let point = CGPoint(x: frame.maxX - 3, y: frame.midY)
+      let scroll = try pinScrollEvent(20, precise: true, phase: .began, at: point)
+      let menu = try #require(pin.menu(for: scroll)?.item(withTitle: "缩放锚点")?.submenu)
+      let item = try #require(menu.item(withTitle: "固定最近边"))
+      #expect(NSApp.sendAction(try #require(item.action), to: item.target, from: item))
+      try shoot(panel, "pin-edge-before", dark: dark)
+      pin.scrollWheel(with: scroll)
+      #expect(abs(panel.frame.maxX - frame.maxX) <= 0.5)
+      #expect(panel.frame.width > frame.width)
+      try shoot(panel, "pin-edge-zoom", dark: dark)
+      let hud = try #require(pin.subviews.compactMap { $0 as? HUDBar }.first)
+      #expect(!hud.isHidden && abs(hud.frame.midX - pin.bounds.midX) <= 0.5)
+      try shootContent(hud, dark ? "pin-edge-zoom-dark" : "pin-edge-zoom")
+    }
+  }
+
   /// 检查长图跟随、拖动和小面板可读性，以及半透明钉图上实际显示的操作区。
   @Test(.enabled(if: directory != nil)) func renderScrollAndPinAppearance() async throws {
     try renderScrollPositions()

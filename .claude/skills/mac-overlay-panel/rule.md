@@ -148,7 +148,8 @@ M1 起的实测结论。代码：`Shell/OverlayPanel.swift`、`HotKeyCenter.swif
 
 ## 9. 钉图（`Screenshot/PinPanel.swift`）
 - `PinPanel`：`.borderless + .nonactivatingPanel`、`.floating`、`canBecomeKey`；显示只 `orderFrontRegardless`，**不 makeKey**（出现时不抢键盘）；用户点了它才 makeKey，Esc / ⌘C 才归它。
-- 原位置出现（选区的全局坐标），`constrainFrameRect` 原样返回，别被挪出菜单栏区域。拖动用 `performDrag(with:)`，双击关闭；缩放以鼠标为锚点、保持宽高比。
+- 原位置出现（选区的全局坐标），`constrainFrameRect` 原样返回，别被挪出菜单栏区域。拖动用 `performDrag(with:)`，双击关闭；缩放默认以指针为锚点、保持宽高比。
+- 每张钉图的「缩放锚点」可选「固定最近边」。整窗滚动开始时把指针投影到最近边，触控板同一手势及惯性沿用该位置；无阶段滚轮事件按 250 毫秒间隔分组。捏合和局部放大使用指针锚点，⌥ 滚动优先处理透明度。锁定时可预设锚点，几何修改仍需解锁。
 - 不做点击穿透、不做钉图历史；钉图是看得见的浮动窗口，按 §8 的留用名单留在之后的截图里（隐藏着的不截）。
 - 按键（钉图是 key 时，和截图出图同义，体检 C9 D17）：⌘C 拷贝、O 识字并拷贝（不重复）、⌘S 快速保存（岛「已保存到「桌面」」+ 文件名 + 缩略图，失败改放剪贴板）、⇧⌘S 另存为…、⌘0 原始大小、⌘W / Esc 关闭；修饰键只比 ⌘⌃⌥⇧。右键菜单「拷贝 / 识字并拷贝 / 翻译 / 存储到「桌面」/ 另存为… ｜ 透明度 ▸ / 原始大小 ｜ 关闭」，和 VoiceOver 自定义动作、按键（`keyDown` / `performKeyEquivalent` 都经 `perform(_:)` 按 keyCode + 修饰键查表，按住不放不反复执行）同一份 `PinView.commands`，不另写 switch；输出全走 `PinBoard.output(动作, 图, 像素 / 点)`（`RegionSelector.Action`），AppDelegate 接到 `copyImage` / `saveImage` / `copyRecognizedText(in:)` / `translateImage(_:)`。
 - 无障碍（体检 B45）：`PinView` 是一个图像元素（名字「钉图」、值「宽 × 高 点，透明度 N%」）；钉上时播报「已钉到屏幕」（钉图不抢键盘，VoiceOver 焦点不在它上面）。用户选的透明度记在 `PinPanel.opacity`，只作用于合成图片层。长截图让位时暂用整窗透明度（原值与 0.3 取小），`resume` 恢复图片透明度和全亮操作区。透明度滑块（`OpacitySlider`，10–100%，2026-10-03）是一个 `NSMenuItem.view`：悬停圆钮 `popUp(positioning:at:in:)` 弹出、右键「透明度 ▸」的子菜单，同一个 `opacityMenu()`；操作按钮和缩放提示有独立的视图层，保持原本对比度。单测 `ScreenshotBatch7Tests.pinOpacitySlider` 经右键菜单拿到滑块、发 action 验透明度和旁白（`popUp` 会卡住测试，不点圆钮）。
