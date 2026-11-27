@@ -337,8 +337,14 @@ struct ScreenshotBatch7Tests {
     #expect(actions == [.toggleSampling])
     hud.sampling = .paused
     #expect(capture.accessibilityLabel() == "继续采集（P）" && !auto.isEnabled)
+    let pixels = try #require(buttons(in: hud).first { $0.toolTip == "查看实际像素（I）" })
+    #expect(!pixels.isHidden)
+    pixels.performClick(nil)
+    hud.showsPixelPreview = true
+    #expect(pixels.accessibilityLabel() == "关闭实际像素（I）")
     for (code, key, repeating) in [
-      (kVK_Space, " ", false), (kVK_ANSI_P, "p", true), (kVK_ANSI_P, "p", false),
+      (kVK_Space, " ", false), (kVK_ANSI_I, "i", true), (kVK_ANSI_I, "i", false),
+      (kVK_ANSI_P, "p", true), (kVK_ANSI_P, "p", false),
     ] {
       let event = try #require(
         NSEvent.keyEvent(
@@ -347,9 +353,10 @@ struct ScreenshotBatch7Tests {
           isARepeat: repeating, keyCode: UInt16(code)))
       hud.keyDown(with: event)
     }
-    #expect(actions == [.toggleSampling, .toggleSampling])
+    #expect(
+      actions == [.toggleSampling, .togglePixelPreview, .togglePixelPreview, .toggleSampling])
     hud.sampling = .reconnecting
-    #expect(!auto.isEnabled && capture.toolTip == "暂停采集（P）")
+    #expect(!auto.isEnabled && capture.toolTip == "暂停采集（P）" && pixels.isHidden)
     hud.sampling = .capturing
     #expect(auto.isEnabled && capture.isEnabled)
   }

@@ -53,11 +53,14 @@ final class ScrollCapture {
   /// 选区（点，全局坐标，对齐到像素）
   private let region: CGRect
   private let scale: CGFloat
+  private let screen: NSScreen
   private let grabImage: @MainActor @Sendable () async throws -> CGImage
   private var stitcher: ScrollStitcher
   private let border: NSPanel
   private let borderView: ScrollBorderView
   private let panel: ScrollCapturePanel
+  private(set) var pixelPreview: ScrollPixelPreviewPanel?
+  private var pixelPreviewFailed = false
   private var continuation: CheckedContinuation<Result?, Never>?
   private var loop: Task<Void, Never>?
   private let sessionID = UUID()
@@ -103,6 +106,7 @@ final class ScrollCapture {
   )
     async throws
   {
+    self.screen = screen
     scale = screen.backingScaleFactor
     // 对齐到像素，夹进这块屏；sourceRect：屏内坐标，点，原点在左上
     let (snapped, source) = RegionSelector.captureRect(region, in: screen.frame, scale: scale)
@@ -181,9 +185,11 @@ final class ScrollCapture {
     switch action {
     case .toggleAuto: toggleAutoScroll()
     case .toggleSampling: toggleSampling()
+    case .togglePixelPreview: togglePixelPreview()
     case .speed(let speed): setSpeed(speed)
     case .cancel: finish(nil)
-    case .escape: escape()
+    case .escape:
+      if pixelPreview != nil { closePixelPreview() } else { escape() }
     case .output(let output): finish(output)
     case .saveMenu: break
     }
@@ -379,6 +385,7 @@ final class ScrollCapture {
     previewIsStale = false
     lastPreview = .now
     panel.hudView.updatePreview(stitcher: stitcher, scale: panel.backingScaleFactor)
+    pixelPreview?.follow(from: panel.hudView.browseFrom, growingUp: stitcher.isGrowingUp)
   }
 
   /// 快速拖动只绘制最新位置，捕获停止后也能绘制节流期间的最后一次请求。
@@ -432,10 +439,13 @@ final class ScrollCapture {
   }
 
   private func updateStatus() {
-    let status = Self.status(
-      notice: notice, isFull: isFull, isLost: isLost, isAutoScrolling: isAutoScrolling,
-      isBrowsing: panel.hudView.browseFrom != nil, isArmed: escapeArm.isArmed(at: .now),
-      sampling: sampling)
+    let status =
+      pixelPreviewFailed
+      ? Status(text: "部分实际像素预览未显示，采集仍暂停", tone: .warning)
+      : Self.status(
+        notice: notice, isFull: isFull, isLost: isLost, isAutoScrolling: isAutoScrolling,
+        isBrowsing: panel.hudView.browseFrom != nil, isArmed: escapeArm.isArmed(at: .now),
+        sampling: sampling)
     panel.hudView.sampling = sampling
     panel.hudView.show(
       status.text, tone: status.tone, width: stitcher.width, height: capturedHeight)
@@ -467,11 +477,54 @@ final class ScrollCapture {
         "长截图暂停采集 session=\(self.sessionID.uuidString, privacy: .public) height=\(self.capturedHeight) generation=\(self.samplingGeneration)"
       )
     case .paused:
+      closePixelPreview()
       sampling = .reconnecting
       wakePausedLoop()
       Log.capture.notice("长截图开始寻找接缝 session=\(self.sessionID.uuidString, privacy: .public)")
     case .stopped: return
     }
+    updateStatus()
+  }
+
+  /// 实际像素窗口只在暂停时打开，从当前拼接画布按需获取切片。
+  private func togglePixelPreview() {
+    guard sampling == .paused else { return }
+    if pixelPreview != nil { return closePixelPreview() }
+    let display = panel.screen ?? screen
+    let preview = ScrollPixelPreviewPanel(
+      beside: panel.frame, in: display.visibleFrame, width: stitcher.width, rows: stitcher.rows,
+      scale: display.backingScaleFactor,
+      image: { [weak self] rows, columns in
+        guard let self, self.sampling == .paused else { return nil }
+        return self.stitcher.pixelSlice(rows: rows, columns: columns)
+      }, onRenderFailure: { [weak self] in self?.pixelPreviewRenderFailed() })
+    preview.onDismiss = { [weak self] in self?.closePixelPreview() }
+    pixelPreview = preview
+    preview.follow(from: panel.hudView.browseFrom, growingUp: stitcher.isGrowingUp)
+    panel.hudView.showsPixelPreview = true
+    if panel.isVisible { preview.orderFrontRegardless() }
+    Log.capture.debug("长截图打开实际像素 session=\(self.sessionID.uuidString, privacy: .public)")
+  }
+
+  /// 关闭只释放预览，继续采集和出图各自沿用原入口。
+  private func closePixelPreview() {
+    guard let preview = pixelPreview else { return }
+    pixelPreview = nil
+    preview.orderOut(nil)
+    panel.hudView.showsPixelPreview = false
+    if pixelPreviewFailed {
+      pixelPreviewFailed = false
+      updateStatus()
+    }
+    Log.capture.debug("长截图关闭实际像素 session=\(self.sessionID.uuidString, privacy: .public)")
+  }
+
+  /// 切片创建失败时在 HUD 提示并保留画布，出图和继续仍可使用。
+  private func pixelPreviewRenderFailed() {
+    guard pixelPreview != nil, !pixelPreviewFailed else { return }
+    pixelPreviewFailed = true
+    Log.capture.error(
+      "长截图实际像素切片创建失败 session=\(self.sessionID.uuidString, privacy: .public) stage=slice")
     updateStatus()
   }
 
@@ -722,6 +775,7 @@ final class ScrollCapture {
   private func finish(_ action: Action?) {
     guard let continuation else { return }
     self.continuation = nil
+    closePixelPreview()
     loop?.cancel()
     inFlight?.cancel()
     nap?.cancel()
@@ -906,7 +960,7 @@ final class ScrollCapturePanel: NSPanel {
 /// macOS 26 起是液态玻璃（mac-whisker §2「26 分支」）
 final class ScrollCaptureHUD: NSView {
   enum Item: Equatable {
-    case toggleAuto, toggleSampling, cancel
+    case toggleAuto, toggleSampling, togglePixelPreview, cancel
     /// 换了自动滚动的速度（按钮行上面那一行）
     case speed(Prefs.ScrollSpeed)
     /// 按了 Esc（✕ 是 cancel）：长图拼上过东西时第一下只上膛（第四轮体检 U3）
@@ -949,6 +1003,17 @@ final class ScrollCaptureHUD: NSView {
       samplingButton.setAccessibilityLabel(title)
       samplingButton.isEnabled = sampling != .stopped
       autoButton.isEnabled = sampling == .capturing
+      pixelButton.isHidden = !paused
+      speedWidth?.constant = Self.width - 20 - (paused ? 80 : 40)
+    }
+  }
+  /// 显示实际像素时高亮入口，并提供关闭动作的提示。
+  var showsPixelPreview = false {
+    didSet {
+      let title = showsPixelPreview ? "关闭实际像素（I）" : "查看实际像素（I）"
+      pixelButton.toolTip = title
+      pixelButton.setAccessibilityLabel(title)
+      pixelButton.contentTintColor = showsPixelPreview ? Style.Shot.accent : Style.HUD.text
     }
   }
   /// 自动滚动时屏幕每刷新一帧调一次（参数是离上一帧的秒数，匀速发滚轮用）；设成 nil 停掉显示器回调
@@ -985,6 +1050,8 @@ final class ScrollCaptureHUD: NSView {
   private let reading = HeightReading()
   private var autoButton = NSButton()
   private var samplingButton = NSButton()
+  private var pixelButton = NSButton()
+  private var speedWidth: NSLayoutConstraint?
   private var buttons: [(item: Item, button: NSButton)] = []
   /// 开着的存储菜单（点别处、按键时收起；别叫 menu，NSView 自己有一个同名的右键菜单属性）
   private var openMenu: HUDMenu?
@@ -1135,10 +1202,16 @@ final class ScrollCaptureHUD: NSView {
       Self.symbol("pause.circle"), tip: "暂停采集（P）", action: #selector(samplingClicked(_:)),
       size: CGSize(width: 32, height: 32))
     samplingButton.contentTintColor = Style.HUD.text
-    let speedRow = NSStackView(views: [speedControl, samplingButton])
+    pixelButton = barButton(
+      Self.symbol("magnifyingglass"), tip: "查看实际像素（I）", action: #selector(pixelClicked(_:)))
+    let speedRow = NSStackView(views: [speedControl, samplingButton, pixelButton])
     speedRow.alignment = .centerY
     speedRow.spacing = 8
+    speedRow.detachesHiddenViews = true
+    pixelButton.isHidden = true
     speedRow.setContentHuggingPriority(.required, for: .vertical)
+    let speedWidth = speedControl.widthAnchor.constraint(equalToConstant: content - 40)
+    self.speedWidth = speedWidth
 
     let stack = NSStackView(views: [
       previewContainer(width: content), readingView, statusBox, speedRow, bar,
@@ -1158,7 +1231,7 @@ final class ScrollCaptureHUD: NSView {
       stack.bottomAnchor.constraint(equalTo: surface.bottomAnchor),
       statusBox.widthAnchor.constraint(equalToConstant: content),
       speedRow.widthAnchor.constraint(equalToConstant: content),
-      speedControl.widthAnchor.constraint(equalToConstant: content - 40),
+      speedWidth,
       statusBox.heightAnchor.constraint(equalToConstant: twoLines),
       status.leadingAnchor.constraint(equalTo: statusBox.leadingAnchor),
       status.trailingAnchor.constraint(equalTo: statusBox.trailingAnchor),
@@ -1412,6 +1485,12 @@ final class ScrollCaptureHUD: NSView {
     onAction(.toggleSampling)
   }
 
+  /// 实际像素按钮和 I 键共用同一会话命令。
+  @objc private func pixelClicked(_ sender: NSButton) {
+    openMenu?.dismiss()
+    onAction(.togglePixelPreview)
+  }
+
   @objc private func clicked(_ sender: NSButton) {
     let item = buttons[sender.tag].item
     if case .saveMenu = item { return toggleSaveMenu() }
@@ -1459,6 +1538,8 @@ final class ScrollCaptureHUD: NSView {
     case kVK_ANSI_A where flags.isEmpty: onAction(.output(.annotate))
     case kVK_ANSI_P where flags.isEmpty && !event.modifierFlags.contains(.shift):
       if !event.isARepeat, sampling != .stopped { onAction(.toggleSampling) }
+    case kVK_ANSI_I where flags.isEmpty && !event.modifierFlags.contains(.shift):
+      if !event.isARepeat, sampling == .paused { onAction(.togglePixelPreview) }
     case kVK_Space where flags.isEmpty:
       if !event.isARepeat, sampling == .capturing { onAction(.toggleAuto) }
     case kVK_UpArrow where flags.isEmpty:

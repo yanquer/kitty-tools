@@ -161,9 +161,14 @@ struct ScrollSpeedTests {
     control.sendAction(control.action, to: control.target)
     #expect(actions == [.speed(.slow)])
     #expect(hud.speed == .slow)
-    // 和内容一样宽，在按钮行（✓ 那颗钮）上面、状态下面；不抢第一响应者、第一下点击就算
+    // 速度分段和暂停钮共享一行，暂停时给实际像素入口留出位置。
     let width = ScrollCaptureHUD.width - 20
-    #expect(abs(control.frame.width - width) < 0.5)
+    #expect(abs(control.frame.width - (width - 40)) < 0.5)
+    hud.sampling = .paused
+    hud.layoutSubtreeIfNeeded()
+    #expect(abs(control.frame.width - (width - 80)) < 0.5)
+    let pixels = try #require(Self.first(NSButton.self, in: hud) { $0.toolTip == "查看实际像素（I）" })
+    #expect(hud.bounds.contains(pixels.convert(pixels.bounds, to: hud)))
     let copy = try #require(Self.first(NSButton.self, in: hud) { $0.toolTip == "拷贝（↩）" })
     let below = copy.convert(copy.bounds, to: hud)
     let row = control.convert(control.bounds, to: hud)

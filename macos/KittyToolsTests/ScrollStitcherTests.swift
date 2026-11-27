@@ -136,6 +136,27 @@ struct ScrollStitcherTests {
       ScrollStitcher(first: image(first), scrollbarWidth: scrollbar, maxHeight: 100_000))
   }
 
+  /// 实际像素跨越向上生长的两段存储，逐字节对照全图的同一裁片。
+  @Test func pixelSlicePreservesOriginalBytesAcrossJoin() throws {
+    var stitcher = try Self.stitcher(Self.frame(at: 160))
+    #expect(stitcher.add(Self.image(Self.frame(at: 80))) == .moved(grown: 80))
+    #expect(stitcher.rows.lowerBound == -80)
+    let full = try #require(stitcher.makeImage())
+    for (rows, columns) in [(-24..<20, 5..<96), (-120 ..< -70, -8..<28), (194..<260, 100..<150)] {
+      let slice = try #require(stitcher.pixelSlice(rows: rows, columns: columns))
+      let actualRows = rows.clamped(to: stitcher.rows)
+      let actualColumns = columns.clamped(to: 0..<full.width)
+      let expected = try #require(
+        full.cropping(
+          to: CGRect(
+            x: actualColumns.lowerBound, y: actualRows.lowerBound - stitcher.rows.lowerBound,
+            width: actualColumns.count, height: actualRows.count)))
+      #expect(Self.pixels(slice) == Self.pixels(expected))
+    }
+    #expect(stitcher.pixelSlice(rows: -100 ..< -80, columns: 0..<1) == nil)
+    #expect(stitcher.pixelSlice(rows: -1..<1, columns: 130..<140) == nil)
+  }
+
   /// 行哈希（2026-11-12 换成按 8 字节一吃的快哈希）：同样的字节在不同地址（没对齐）哈希一样；任何一个字节、
   /// 任何一位变了都不一样，包括凑不满 8 字节的尾巴
   @Test func rowHashSeesEveryByte() {
@@ -405,10 +426,20 @@ struct ScrollStitcherTests {
     probe.deliver(.success(Self.image(Self.frame(at: 80))))
     try await probe.wait { probe.isWaiting && capture.capturedHeight == 280 }
 
+    capture.perform(.togglePixelPreview)
+    #expect(capture.pixelPreview == nil)
+
     capture.perform(.toggleSampling)
     #expect(capture.sampling == .paused)
+    capture.perform(.togglePixelPreview)
+    let preview = try #require(capture.pixelPreview)
+    #expect(!preview.isVisible && !preview.canBecomeKey)
+    capture.perform(.escape)
+    #expect(capture.sampling == .paused && capture.pixelPreview == nil)
+    capture.perform(.togglePixelPreview)
+    #expect(capture.pixelPreview != nil)
     capture.perform(.toggleSampling)
-    #expect(capture.sampling == .reconnecting)
+    #expect(capture.sampling == .reconnecting && capture.pixelPreview == nil)
     probe.deliver(
       lateError ? .failure(CancellationError()) : .success(Self.image(Self.frame(at: 150))))
     try await probe.wait { probe.isWaiting }
@@ -427,7 +458,10 @@ struct ScrollStitcherTests {
     probe.deliver(.success(Self.image(Self.frame(at: 170))))
     try await Task.sleep(for: .milliseconds(45))
     #expect(capture.sampling == .paused && probe.requests == count && capture.capturedHeight == 310)
+    capture.perform(.togglePixelPreview)
+    #expect(capture.pixelPreview != nil && probe.requests == count)
     capture.perform(.output(.copy))
+    #expect(capture.pixelPreview == nil)
     let result = try #require(await session.value)
     #expect(result.action == .copy)
     Self.expect(result.image, top: 0, bottom: 310, topFrame: first, bottomFrame: last)

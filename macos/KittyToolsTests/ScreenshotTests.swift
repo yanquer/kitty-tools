@@ -195,6 +195,7 @@ struct ScreenshotTests {
         13, "SelectionOverlay",
         level: NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)),
       window(14, "ScrollCapturePanel"),  // 长截图面板（浮动层级，只能按类名认）
+      window(17, "ScrollPixelPreviewPanel"),
       window(15, "NSMenuWindowManagerWindow", level: .popUpMenu),  // 正在淡出的菜单
       window(16, "NSToolTipPanel", level: .normal),
       window(18, "NSPanel", level: .screenSaver),
@@ -236,6 +237,7 @@ struct ScreenshotTests {
         12, "SelectionOverlay",
         level: NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)),
       window(13, "ScrollCapturePanel"),
+      window(19, "ScrollPixelPreviewPanel"),
       window(14, "NSMenuWindowManagerWindow", level: .popUpMenu),
       window(15, "NSToolTipPanel", level: .normal),
       window(16, "_NSPopoverWindow"),

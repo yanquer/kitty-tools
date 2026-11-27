@@ -318,7 +318,10 @@ enum ScreenCapture {
   /// 不在悬停列表里：windowFrames 只收程序坞以下的层、弹出菜单和菜单栏那一条），可以接受。纯函数，配单测
   static func keptOwnWindows(_ windows: [OwnWindow]) -> Set<CGWindowID> {
     let status = NSWindow.Level.statusBar.rawValue
-    let chrome = ["SelectionOverlay", "ScrollCapturePanel", "PanelStandIn", "Menu", "ToolTip"]
+    let chrome = [
+      "SelectionOverlay", "ScrollCapturePanel", "ScrollPixelPreviewPanel", "PanelStandIn", "Menu",
+      "ToolTip",
+    ]
     return Set(
       windows.filter { window in
         if window.level == status { return window.className.contains("StatusBar") }

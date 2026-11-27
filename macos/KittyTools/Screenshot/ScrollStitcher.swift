@@ -291,6 +291,11 @@ struct ScrollStitcher {
   /// 长图现在占的行（绝对行号，往上接时往负数长；`preview` 和 `previewRange` 的 from 是同一套坐标）
   var rows: Range<Int> { top..<bottom }
 
+  /// 从已拼接画布读取原始像素，只复制和画布相交的行列，不缩放或建立整图。
+  func pixelSlice(rows requestedRows: Range<Int>, columns: Range<Int>) -> CGImage? {
+    image(of: requestedRows.clamped(to: rows), columns: columns.clamped(to: 0..<width))
+  }
+
   /// 预览：宽 width 像素，最高 maxHeight 像素；长图更高时取 from 起的那一段（nil = 最近接的那头）。
   /// 缩得越小隔的行越多（选区很宽时整张长图都在预览里，逐行拷贝要上百 MB）
   func preview(width: Int, maxHeight: Int, from: Int? = nil) -> CGImage? {
@@ -539,18 +544,27 @@ struct ScrollStitcher {
   }
 
   /// 画布上 range 这些行拼成图；every > 1 时每隔几行取一行（预览用）
-  private func image(of range: Range<Int>, every step: Int = 1) -> CGImage? {
+  private func image(
+    of range: Range<Int>, every step: Int = 1, columns: Range<Int>? = nil
+  ) -> CGImage? {
     let rows = stride(from: range.lowerBound, to: range.upperBound, by: step)
     let count = (range.count + step - 1) / step
-    guard count > 0 else { return nil }
-    var data = Data(capacity: count * rowBytes)
+    let columns = columns ?? 0..<width
+    guard count > 0, !columns.isEmpty else { return nil }
+    let byteOffset = columns.lowerBound * 4
+    let bytesPerRow = columns.count * 4
+    var data = Data(capacity: count * bytesPerRow)
     for row in rows {
-      withRow(row) { data.append($0.assumingMemoryBound(to: UInt8.self), count: rowBytes) }
+      withRow(row) {
+        data.append(
+          $0.advanced(by: byteOffset).assumingMemoryBound(to: UInt8.self), count: bytesPerRow)
+      }
     }
     guard let provider = CGDataProvider(data: data as CFData) else { return nil }
     return CGImage(
-      width: width, height: count, bitsPerComponent: 8, bitsPerPixel: 32,
-      bytesPerRow: rowBytes, space: colorSpace, bitmapInfo: CGBitmapInfo(rawValue: Self.bitmapInfo),
+      width: columns.count, height: count, bitsPerComponent: 8, bitsPerPixel: 32,
+      bytesPerRow: bytesPerRow, space: colorSpace,
+      bitmapInfo: CGBitmapInfo(rawValue: Self.bitmapInfo),
       provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
   }
 

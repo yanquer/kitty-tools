@@ -1460,6 +1460,55 @@ struct ScreenshotSnapshotTests {
     }
   }
 
+  /// 以屏外窗口检查实际像素、跟随定位和宽图横向浏览，不采集屏幕或取得焦点。
+  @Test(.enabled(if: directory != nil)) func renderScrollPixelPreview() throws {
+    let out = try #require(Self.directory)
+    let desktop = try Self.desktop()
+    let stitcher = try #require(ScrollStitcher(first: desktop, scrollbarWidth: 0, maxHeight: 3000))
+    let visible = CGRect(x: -20000, y: -20000, width: 860, height: 520)
+    let hud = CGRect(x: visible.maxX - 226, y: visible.minY + 210, width: 216, height: 280)
+    var slices: [(Range<Int>, Range<Int>)] = []
+    let panel = ScrollPixelPreviewPanel(
+      beside: hud, in: visible, width: stitcher.width, rows: stitcher.rows, scale: 2,
+      image: { rows, columns in
+        slices.append((rows, columns))
+        return stitcher.pixelSlice(rows: rows, columns: columns)
+      }, onRenderFailure: { Issue.record("屏外预览读取切片失败") })
+    try #require(panel.frame.maxX < -10_000)
+    #expect(!panel.frame.intersects(hud) && visible.contains(panel.frame) && !panel.canBecomeKey)
+    let scroll = try #require(panel.contentView as? NSScrollView)
+    let canvas = try #require(scroll.documentView)
+    #expect(canvas.frame.size == CGSize(width: desktop.width / 2, height: desktop.height / 2))
+    panel.orderFront(nil)
+    defer { panel.orderOut(nil) }
+    for (start, column, dark) in [(0, 0, false), (360, 260, true)] {
+      panel.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+      panel.follow(from: start, growingUp: false, column: CGFloat(column))
+      let frameView = try #require(scroll.superview)
+      RunLoop.main.run(until: Date.now.addingTimeInterval(0.1))
+      #expect(
+        abs(panel.visibleRow - start) <= 1,
+        "请求行 \(start)，实际行 \(panel.visibleRow)")
+      #expect(!panel.isKeyWindow)
+      let rep = try #require(frameView.bitmapImageRepForCachingDisplay(in: frameView.bounds))
+      frameView.cacheDisplay(in: frameView.bounds, to: rep)
+      try write(
+        try #require(rep.cgImage), to: "\(out)/shot-scroll-pixels\(dark ? "-dark" : "").png")
+    }
+    #expect(!slices.isEmpty)
+    #expect(slices.allSatisfy { $0.0.count < stitcher.outputHeight && $0.1.count < stitcher.width })
+    #expect(slices.contains { $0.0.lowerBound >= 359 && $0.1.lowerBound >= 259 })
+    panel.follow(from: nil, growingUp: false)
+    #expect(abs(scroll.documentVisibleRect.minY) < 0.5)
+    panel.follow(from: nil, growingUp: true)
+    #expect(panel.visibleRow == stitcher.rows.lowerBound)
+    var dismissed = false
+    panel.onDismiss = { dismissed = true }
+    let close = try #require(panel.standardWindowButton(.closeButton))
+    #expect(
+      NSApp.sendAction(try #require(close.action), to: close.target, from: close) && dismissed)
+  }
+
   /// 使用同一张钉图核对 100% 与 10% 的画面变化，确保解锁、关闭和透明度按钮清晰可见。
   private func renderPinPictureOpacity() async throws {
     let out = try #require(Self.directory)

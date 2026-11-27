@@ -1664,6 +1664,11 @@ CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO
   没法逐条标错）、标记输入框（NSTokenField，一条一个胶囊，标不了错也放不下说明）、整套规则编辑器（为一行设置太重）。
   单测 `ArchivesTests.skipEditing`，截图自检 `SnapshotProbeTests/finderMenuSettings()`。
 
+### 长截图实际像素预览（2026-11-27）
+
+- 暂停采集后，可点放大镜或按 I，在长截图 HUD 旁打开只读「实际像素」窗口。它跟随侧栏位置条，可在窗口内纵横滚动细看。关闭窗口或按 Esc 后保持暂停，继续采集、取消和出图会先收起窗口。
+- `ScrollPixelPreview.swift` 复用长图像素坐标与原生滚动，按显示器倍率一比一绘制。`ScrollStitcher.pixelSlice` 只读取脏区的原始行列。窗口不激活、不成为 key，排除在冻结帧与录屏之外。切片错误在 HUD 提醒，并按会话进入统一日志 `capture`。
+
 ### 跨截图复制标注（2026-11-27）
 
 - 区域截图和共用标注遮罩的历史编辑、钉图继续标注均可通过工具栏「标注剪贴板」复制/粘贴选中的对象。局部键为 ⌥⌘C / ⌥⌘V，已有自定义截图键优先。⌘C 仍拷贝整图，文字输入保留原生编辑命令。

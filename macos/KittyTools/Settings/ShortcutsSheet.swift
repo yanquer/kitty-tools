@@ -489,19 +489,20 @@ struct ShortcutsSheet: View {
           Entry(key(.inspect), text: "查看识字结果"),
           Entry(text: "识字结果中点选文字定位原图，可切换到实际像素查看"),
         ]),
-      // mac-overlay-panel §10 长截图；代码在 ScrollCapturePanel.keyDown
+      // mac-overlay-panel §10 长截图；代码在 ScrollCaptureHUD.keyDown
       Group(
         title: "长截图", symbol: "arrow.up.and.down.text.horizontal", color: Style.Family.screenshot,
         features: [.screenshot],
         entries: [
           Entry("空格", text: "自动滚动 / 停下（要辅助功能授权）"),
           Entry("P", text: "暂停 / 继续采集，接回上次重叠画面后续拼"),
+          Entry("I", text: "暂停时打开 / 关闭实际像素预览"),
           Entry("↑", "↓", text: "回看已拼接的长图，也可以拖动右侧位置条。双击预览回到最新"),
           Entry("A", text: "标注（在长图上画，画完再出图）"),
           Entry("↩", "⌘C", text: "拷贝"),
           Entry("⌘S", text: "快速保存"),
           Entry("⇧⌘S", text: "另存为…"),
-          Entry("Esc", text: "取消"),
+          Entry("Esc", text: "先关闭实际像素预览，再取消长截图"),
         ]),
       // 截图历史（2026-10-26 拍板 C1）：全局的「截图历史」不设默认键，没设时那一行写「未设置」。
       // 窗口里的键在 ShotHistoryView
