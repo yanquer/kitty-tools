@@ -163,6 +163,13 @@ nonisolated enum ShotComposition {
     var title: String { self == .portrait ? "纵向" : "横向" }
   }
 
+  /// 小体积档逐页压缩图片，两个档位共用纸张与排版。
+  enum PDFQuality: String, CaseIterable, Identifiable, Sendable {
+    case standard, compact
+    var id: String { rawValue }
+    var title: String { self == .standard ? "标准" : "小体积" }
+  }
+
   /// 每次导出固定一份选项，处理中调整界面不会改变正在输出的内容。
   struct Options: Equatable, Sendable {
     var layout = Layout.vertical
@@ -176,6 +183,7 @@ nonisolated enum ShotComposition {
     var orientation = Orientation.portrait
     var pdfMargin: CGFloat = 10
     var pdfBackground = Background.light
+    var pdfQuality = PDFQuality.standard
     var widthMode = WidthMode.automatic
     var customWidth = 1920
     var requestedWidth: CGFloat? {
@@ -205,6 +213,12 @@ nonisolated enum ShotComposition {
   struct Failure: LocalizedError, Sendable {
     let message: String
     var errorDescription: String? { message }
+  }
+
+  /// 已发布的字节数，以及小体积请求是否保留了更小的标准版。
+  struct ExportResult: Sendable {
+    let bytes: Int64
+    var keptStandardPDF = false
   }
 
   /// 根据图片原始比例计算横拼、竖拼或网格；整体等比缩小到像素预算，不拉伸或裁掉内容。
@@ -466,8 +480,12 @@ nonisolated enum ShotComposition {
     let context = try canvas(size: size, background: options.pdfBackground)
     context.scaleBy(x: scale, y: scale)
     let frame = page.frames[0]
-    let image = try decode(
-      source, side: min(4096, Int(ceil(max(frame.width, frame.height) * scale))))
+    let image =
+      if options.pdfQuality == .compact {
+        try compactPDFImage(source, background: options.pdfBackground)
+      } else {
+        try decode(source, side: min(4096, Int(ceil(max(frame.width, frame.height) * scale))))
+      }
     context.interpolationQuality = .high
     context.draw(image, in: frame)
     try Task.checkCancellation()
@@ -490,9 +508,10 @@ nonisolated enum ShotComposition {
     return context
   }
 
-  /// 写出完整 PNG 或 PDF 后才替换目标；失败、取消都删除半成品，已有文件保持原状。
+  /// 完整写出并核对文件后才替换目标，返回实际发布的版本与字节数。
+  @discardableResult
   @concurrent static func export(_ sources: [Source], options: Options, pdf: Bool, to target: URL)
-    async throws
+    async throws -> ExportResult
   {
     guard (2...maximumCount).contains(sources.count) else {
       throw Failure(message: "请选择 2–20 张静态图片")
@@ -500,18 +519,38 @@ nonisolated enum ShotComposition {
     let operation = UUID().uuidString
     let temporary = target.deletingLastPathComponent().appending(
       path: ".kitty-compose-\(operation)")
+    let standard = temporary.appendingPathExtension("standard")
     let began = ContinuousClock.now
+    let quality = pdf ? options.pdfQuality.rawValue : "-"
+    var stage = "write"
     Log.storage.notice(
-      "截图合成开始 operation=\(operation, privacy: .public) count=\(sources.count) pdf=\(pdf) paper=\(options.paper.rawValue, privacy: .public) orientation=\(options.orientation.rawValue, privacy: .public) marginMM=\(options.pdfMargin)"
+      "截图合成开始 operation=\(operation, privacy: .public) count=\(sources.count) pdf=\(pdf) quality=\(quality, privacy: .public) paper=\(options.paper.rawValue, privacy: .public) orientation=\(options.orientation.rawValue, privacy: .public) marginMM=\(options.pdfMargin)"
     )
-    defer { cleanup(temporary) }
+    defer {
+      cleanup(temporary)
+      if pdf && options.pdfQuality == .compact { cleanup(standard) }
+    }
     do {
+      var selected = temporary
+      var result: ExportResult
       if pdf {
         try writePDF(sources, options: options, to: temporary, operation: operation)
-        guard let document = CGPDFDocument(temporary as CFURL),
-          document.numberOfPages == sources.count
-        else {
-          throw Failure(message: "PDF 写入不完整，未替换已有文件")
+        stage = "verify"
+        result = try ExportResult(bytes: verifiedPDFBytes(temporary, pages: sources.count))
+        if options.pdfQuality == .compact {
+          stage = "compare-standard"
+          var standardOptions = options
+          standardOptions.pdfQuality = .standard
+          try writePDF(sources, options: standardOptions, to: standard, operation: operation)
+          let standardBytes = try verifiedPDFBytes(standard, pages: sources.count)
+          let keepStandard = standardBytes < result.bytes
+          Log.storage.notice(
+            "PDF 体积对照 operation=\(operation, privacy: .public) compactBytes=\(result.bytes) standardBytes=\(standardBytes) keptStandard=\(keepStandard)"
+          )
+          if keepStandard {
+            selected = standard
+            result = ExportResult(bytes: standardBytes, keptStandardPDF: true)
+          }
         }
       } else {
         let image = try await render(sources, options: options)
@@ -520,22 +559,43 @@ nonisolated enum ShotComposition {
           "PNG 输出尺寸 operation=\(operation, privacy: .public) layout=\(options.layout.rawValue, privacy: .public) gridColumns=\(columns) widthMode=\(options.widthMode.rawValue, privacy: .public) requestedWidth=\(options.requestedWidth ?? 0) actualWidth=\(image.width) actualHeight=\(image.height)"
         )
         try writePNG(image, to: temporary)
+        stage = "measure"
+        result = try ExportResult(bytes: exportBytes(temporary))
       }
       try Task.checkCancellation()
+      stage = "publish"
       if FileManager.default.fileExists(atPath: target.path) {
-        _ = try FileManager.default.replaceItemAt(target, withItemAt: temporary)
+        _ = try FileManager.default.replaceItemAt(target, withItemAt: selected)
       } else {
-        try FileManager.default.moveItem(at: temporary, to: target)
+        try FileManager.default.moveItem(at: selected, to: target)
       }
       Log.storage.notice(
-        "截图合成成功 operation=\(operation, privacy: .public) count=\(sources.count) pdf=\(pdf) elapsed=\(String(describing: began.duration(to: .now)), privacy: .public)"
+        "截图合成成功 operation=\(operation, privacy: .public) count=\(sources.count) pdf=\(pdf) quality=\(quality, privacy: .public) keptStandard=\(result.keptStandardPDF) bytes=\(result.bytes) elapsed=\(String(describing: began.duration(to: .now)), privacy: .public)"
       )
+      return result
     } catch {
+      let reason = error as NSError
       Log.storage.error(
-        "截图合成未完成 operation=\(operation, privacy: .public) count=\(sources.count) pdf=\(pdf) cause=\(String(reflecting: error), privacy: .public)"
+        "截图合成未完成 operation=\(operation, privacy: .public) stage=\(stage, privacy: .public) count=\(sources.count) pdf=\(pdf) quality=\(quality, privacy: .public) domain=\(reason.domain, privacy: .public) code=\(reason.code) elapsed=\(String(describing: began.duration(to: .now)), privacy: .public)"
       )
       throw error
     }
+  }
+
+  /// 回读已关闭的 PDF 和实际字节数，校验失败时保留旧目标。
+  private static func verifiedPDFBytes(_ url: URL, pages: Int) throws -> Int64 {
+    guard let document = CGPDFDocument(url as CFURL), document.numberOfPages == pages else {
+      throw Failure(message: "PDF 写入不完整，未替换已有文件")
+    }
+    return try exportBytes(url)
+  }
+
+  /// 只读取本次已写出的临时文件大小。
+  private static func exportBytes(_ url: URL) throws -> Int64 {
+    guard let bytes = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize, bytes > 0 else {
+      throw Failure(message: "无法确认导出文件大小，未替换已有文件")
+    }
+    return Int64(bytes)
   }
 
   /// 逐张生成原像素 PNG，再把包含全部结果的目录一次性发布到用户选定位置。
@@ -689,6 +749,34 @@ nonisolated enum ShotComposition {
     return "\(value.domain) (\(value.code))"
   }
 
+  /// 小体积档先用纸张底色合成透明像素，再生成可直接嵌入 PDF 的 JPEG。
+  private static func compactPDFImage(_ source: Source, background: Background) throws -> CGImage {
+    let maximum = 2400
+    let edited = try decode(source, side: maximum)
+    try Task.checkCancellation()
+    // 像素对齐的裁剪可能多出一行或一列，以最终入档像素为准。
+    let ratio = min(1, CGFloat(maximum) / CGFloat(max(edited.width, edited.height)))
+    let size = CGSize(
+      width: min(CGFloat(maximum), ceil(CGFloat(edited.width) * ratio)),
+      height: min(CGFloat(maximum), ceil(CGFloat(edited.height) * ratio)))
+    let flattened = try canvas(size: size, background: background)
+    flattened.interpolationQuality = .high
+    flattened.draw(edited, in: CGRect(origin: .zero, size: size))
+    let data = NSMutableData()
+    guard let image = flattened.makeImage(),
+      let encoder = CGImageDestinationCreateWithData(
+        data, UTType.jpeg.identifier as CFString, 1, nil)
+    else { throw Failure(message: "无法准备 PDF 页面压缩") }
+    CGImageDestinationAddImage(
+      encoder, image, [kCGImageDestinationLossyCompressionQuality: 0.86] as CFDictionary)
+    guard CGImageDestinationFinalize(encoder), let provider = CGDataProvider(data: data),
+      let compressed = CGImage(
+        jpegDataProviderSource: provider, decode: nil, shouldInterpolate: true,
+        intent: .defaultIntent)
+    else { throw Failure(message: "PDF 页面压缩失败") }
+    return compressed
+  }
+
   /// 每图一页、保留比例与顺序；每页解码后立即释放，不把整批像素留在内存。
   private static func writePDF(
     _ sources: [Source], options: Options, to url: URL, operation: String
@@ -708,14 +796,20 @@ nonisolated enum ShotComposition {
           context.beginPDFPage([kCGPDFContextMediaBox: media] as CFDictionary)
           context.setFillColor(options.pdfBackground.color)
           context.fill(box)
-          let image = try decode(
-            source, side: min(4096, Int(ceil(max(editedSize.width, editedSize.height)))))
+          let image =
+            if options.pdfQuality == .compact {
+              try compactPDFImage(source, background: options.pdfBackground)
+            } else {
+              try decode(
+                source, side: min(4096, Int(ceil(max(editedSize.width, editedSize.height)))))
+            }
           context.draw(image, in: page.frames[0])
           context.endPDFPage()
         }
       } catch {
+        let reason = error as NSError
         Log.storage.error(
-          "PDF 页面写入失败 operation=\(operation, privacy: .public) page=\(index + 1) source=\(source.id.uuidString, privacy: .public) cause=\(String(reflecting: error), privacy: .public)"
+          "PDF 页面写入失败 operation=\(operation, privacy: .public) page=\(index + 1) source=\(source.id.uuidString, privacy: .public) quality=\(options.pdfQuality.rawValue, privacy: .public) domain=\(reason.domain, privacy: .public) code=\(reason.code) reason=\(individualFailureReason(error, source: source), privacy: .public)"
         )
         throw error
       }

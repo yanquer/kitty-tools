@@ -38,8 +38,14 @@ struct ShotCompositionInsertion: Equatable {
   var exporting = false
   private(set) var preparingAnnotation = false
   var error: String?
-  var exported: URL? { didSet { exportedImageCount = nil } }
+  var exported: URL? {
+    didSet {
+      exportedImageCount = nil
+      exportedPDF = nil
+    }
+  }
   private(set) var exportedImageCount: Int?
+  private(set) var exportedPDF: ShotComposition.ExportResult?
   var choosing = false
   private var directories: [URL] = []
   private var importedBytes = 0
@@ -633,17 +639,28 @@ struct ShotCompositionInsertion: Equatable {
         return
       }
       do {
-        try await ShotComposition.export(sources, options: options, pdf: pdf, to: url)
+        let result = try await ShotComposition.export(sources, options: options, pdf: pdf, to: url)
         guard !Task.isCancelled, generation == ticket else { return }
         exporting = false
-        exported = url
-        Island.announce("已导出\(pdf ? " PDF" : "拼图")")
+        recordExportedDocument(url, pdfResult: pdf ? result : nil)
+        if pdf {
+          let status = result.keptStandardPDF ? "已保留体积更小的标准版" : "已导出 PDF"
+          Island.announce("\(status)，\(result.bytes.formatted(.byteCount(style: .file)))")
+        } else {
+          Island.announce("已导出拼图")
+        }
       } catch {
         guard !Task.isCancelled, generation == ticket else { return }
         exporting = false
         self.error = error.localizedDescription
       }
     }
+  }
+
+  /// 保存已发布文件和 PDF 结果，翻页保留这份结果。
+  func recordExportedDocument(_ url: URL, pdfResult: ShotComposition.ExportResult?) {
+    exported = url
+    exportedPDF = pdfResult
   }
 
   /// 独立 PNG 不依赖拼图预览是否可导出，也允许处理一张图。
@@ -1116,9 +1133,16 @@ struct ShotCompositionView: View {
           Text($0.title).tag($0)
         }
       }
-      Text("图片等比居中，保留完整内容；按图片尺寸时保留原始比例。")
-        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(
-          horizontal: false, vertical: true)
+      Picker("输出质量", selection: $model.options.pdfQuality) {
+        ForEach(ShotComposition.PDFQuality.allCases) { Text($0.title).tag($0) }
+      }.pickerStyle(.menu)
+      Text(
+        model.options.pdfQuality == .compact
+          ? "压缩页面图片，细节可能减少。导出采用体积较小的版本。"
+          : "图片等比居中，保留完整内容；按图片尺寸时保留原始比例。"
+      )
+      .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(
+        horizontal: false, vertical: true)
     }
   }
 
@@ -1199,10 +1223,19 @@ struct ShotCompositionView: View {
       } else if let error = model.error {
         Text(error).font(.system(size: 12)).foregroundStyle(Style.danger).lineLimit(3)
       } else if let url = model.exported {
-        let title =
-          model.exportedImageCount.map { "已导出 \($0) 张 PNG · \(url.lastPathComponent)" }
-          ?? "已导出：\(url.lastPathComponent)"
-        Text(title).font(.system(size: 12)).lineLimit(1).truncationMode(.middle).help(title)
+        if let result = model.exportedPDF {
+          let status = result.keptStandardPDF ? "已保留标准版" : "已导出 PDF"
+          Text("\(status) · \(result.bytes.formatted(.byteCount(style: .file)))")
+            .font(.system(size: 12)).fixedSize(horizontal: true, vertical: false)
+            .help(result.keptStandardPDF ? "标准版文件较小，已采用标准版" : "PDF 文件大小")
+          Text(url.lastPathComponent).font(.system(size: 12)).lineLimit(1)
+            .truncationMode(.middle).help(url.lastPathComponent)
+        } else {
+          let title =
+            model.exportedImageCount.map { "已导出 \($0) 张 PNG · \(url.lastPathComponent)" }
+            ?? "已导出：\(url.lastPathComponent)"
+          Text(title).font(.system(size: 12)).lineLimit(1).truncationMode(.middle).help(title)
+        }
         Button("在访达中显示") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
       } else {
         Text("预览与导出使用同一批图片快照").font(.system(size: 12)).foregroundStyle(.secondary)

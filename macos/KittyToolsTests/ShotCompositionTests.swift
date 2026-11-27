@@ -259,16 +259,108 @@ struct ShotCompositionTests {
     let target = folder.appending(path: "existing.pdf")
     let original = Data("keep existing file".utf8)
     try original.write(to: target)
-    await #expect(throws: ShotComposition.Failure.self) {
-      try await ShotComposition.export([valid, missing], options: .init(), pdf: true, to: target)
+    for quality in ShotComposition.PDFQuality.allCases {
+      let options = ShotComposition.Options(pdfQuality: quality)
+      await #expect(throws: ShotComposition.Failure.self) {
+        try await ShotComposition.export([valid, missing], options: options, pdf: true, to: target)
+      }
+      #expect(try Data(contentsOf: target) == original)
+      let task = Task {
+        try await ShotComposition.export([valid, valid], options: options, pdf: true, to: target)
+      }
+      task.cancel()
+      await #expect(throws: CancellationError.self) { try await task.value }
+      #expect(try Data(contentsOf: target) == original)
     }
-    #expect(try Data(contentsOf: target) == original)
-    let task = Task {
-      try await ShotComposition.export([valid, valid], options: .init(), pdf: true, to: target)
+    #expect(
+      try FileManager.default.contentsOfDirectory(atPath: folder.path).allSatisfy {
+        !$0.hasPrefix(".kitty-compose-")
+      })
+  }
+
+  /// 回读实际 PDF，核对文件大小、JPEG 嵌入、页序、透明背景和二维码。
+  @Test func compactPDFKeepsPagesBackgroundAndQRCode() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let ci = CIContext()
+    let texture = try #require(CIFilter(name: "CIRandomGenerator")?.outputImage)
+    let detailed = try #require(
+      ci.createCGImage(texture, from: CGRect(x: 0, y: 0, width: 3900, height: 2000)))
+    var first = try await source(detailed, at: folder.appending(path: "texture.png"))
+    first.edit = .init(crop: CGRect(x: 0, y: 0, width: 0.9, height: 1), turns: 1)
+    let payload = "https://example.com/pdf-readback"
+    let filter = CIFilter(
+      name: "CIQRCodeGenerator", parameters: ["inputMessage": Data(payload.utf8)])
+    let generated = try #require(filter?.outputImage)
+      .transformed(by: CGAffineTransform(scaleX: 5, y: 5))
+    let qr = try #require(ci.createCGImage(generated, from: generated.extent))
+    let board = try #require(
+      CGContext(
+        data: nil, width: 400, height: 320, bitsPerComponent: 8, bytesPerRow: 0,
+        space: CGColorSpace(name: CGColorSpace.sRGB)!,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+    board.clear(CGRect(x: 0, y: 0, width: 400, height: 320))
+    board.setFillColor(CGColor(gray: 1, alpha: 1))
+    board.fill(CGRect(x: 94, y: 54, width: qr.width + 32, height: qr.height + 32))
+    board.interpolationQuality = .none
+    board.draw(qr, in: CGRect(x: 110, y: 70, width: qr.width, height: qr.height))
+    let second = try await source(
+      try #require(board.makeImage()), at: folder.appending(path: "qr.png"))
+    let sources = [first, second]
+    let standardURL = folder.appending(path: "standard.pdf")
+    let compactURL = folder.appending(path: "compact.pdf")
+    var options = ShotComposition.Options(
+      paper: .a4, orientation: .landscape, pdfMargin: 10, pdfBackground: .cream)
+    let standardResult = try await ShotComposition.export(
+      sources, options: options, pdf: true, to: standardURL)
+    options.pdfQuality = .compact
+    let compactResult = try await ShotComposition.export(
+      sources, options: options, pdf: true, to: compactURL)
+    let data = try Data(contentsOf: compactURL)
+    #expect(!compactResult.keptStandardPDF && compactResult.bytes < standardResult.bytes)
+    #expect(compactResult.bytes == Int64(data.count))
+    #expect(String(decoding: data, as: UTF8.self).components(separatedBy: "/DCTDecode").count == 3)
+    let standard = try #require(CGPDFDocument(standardURL as CFURL))
+    let compact = try #require(CGPDFDocument(compactURL as CFURL))
+    #expect(compact.numberOfPages == 2)
+    for index in 1...2 {
+      let match = try #require(standard.page(at: index))
+      let page = try #require(compact.page(at: index))
+      #expect(page.getBoxRect(.mediaBox) == match.getBoxRect(.mediaBox))
     }
-    task.cancel()
-    await #expect(throws: CancellationError.self) { try await task.value }
-    #expect(try Data(contentsOf: target) == original)
+    let page = try #require(compact.page(at: 2))
+    let plan = try ShotComposition.pdfPagePlan(size: second.size, options: options)
+    let raster = try #require(
+      CGContext(
+        data: nil, width: Int(ceil(plan.size.width)), height: Int(ceil(plan.size.height)),
+        bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+    raster.drawPDFPage(page)
+    let output = try #require(raster.makeImage())
+    let preview = try await ShotComposition.renderPDFPage(second, options: options)
+    let frame = plan.frames[0]
+    let transparent = CGPoint(x: frame.minX + 8, y: frame.midY)
+    let backdrop = try pixel(output, at: CGPoint(x: 2, y: 2))
+    for image in [output, preview] {
+      #expect(try await OCR.scanCodes(in: image).map(\.text) == [payload])
+      let inside = try pixel(image, at: transparent)
+      #expect(inside[3] == 255)
+      #expect(zip(inside, backdrop).allSatisfy { abs(Int($0) - Int($1)) <= 4 })
+    }
+  }
+
+  /// 平坦小图的标准文件较小时，实际发布标准版并清理两个临时版本。
+  @Test func compactPDFKeepsSmallerStandardVersion() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let item = try await source(image(1, 0), at: folder.appending(path: "solid.png"))
+    let target = folder.appending(path: "result.pdf")
+    let result = try await ShotComposition.export(
+      [item, item], options: .init(pdfQuality: .compact), pdf: true, to: target)
+    let data = try Data(contentsOf: target)
+    #expect(result.keptStandardPDF && result.bytes == Int64(data.count))
+    #expect(try #require(CGPDFDocument(target as CFURL)).numberOfPages == 2)
+    #expect(!String(decoding: data, as: UTF8.self).contains("/DCTDecode"))
     #expect(
       try FileManager.default.contentsOfDirectory(atPath: folder.path).allSatisfy {
         !$0.hasPrefix(".kitty-compose-")

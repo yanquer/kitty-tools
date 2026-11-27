@@ -2225,6 +2225,65 @@ struct ScreenshotSnapshotTests {
       name: "composition-grid-fewer-images", dark: true)
   }
 
+  /// 核对 PDF 默认质量、小体积说明及由真实导出结果提供的文件大小。
+  @Test(.enabled(if: directory != nil)) func renderCompositionPDFQuality() async throws {
+    let folder = FileManager.default.temporaryDirectory.appending(
+      path: "kitty-compose-pdf-quality-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let model = ShotCompositionModel()
+    defer {
+      model.clear()
+      try? FileManager.default.removeItem(at: folder)
+    }
+    let desktop = try Self.desktop()
+    let urls = try (0..<2).map { index in
+      let url = folder.appending(path: "项目核对-第\(index + 1)页.png")
+      let area = CGRect(x: 200 + index * 440, y: 80, width: 1540, height: 920)
+      try write(try #require(desktop.cropping(to: area)), to: url.path)
+      return url
+    }
+    model.pdf = true
+    model.importFiles(urls)
+    try await waitForComposition(model)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 820, height: 620),
+      name: "composition-pdf-standard")
+    model.options.pdfQuality = .compact
+    model.refreshPreview()
+    try await waitForComposition(model)
+    let output = folder.appending(path: "项目核对-长文件名多页截图合集.pdf")
+    let result = try await ShotComposition.export(
+      model.sources, options: model.options, pdf: true, to: output)
+    model.recordExportedDocument(output, pdfResult: result)
+    #expect(model.exportedPDF?.bytes == Int64(try Data(contentsOf: output).count))
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 720, height: 520),
+      name: "composition-pdf-compact", dark: true)
+    model.showPage(1)
+    try await waitForComposition(model)
+    #expect(model.exportedPDF?.bytes == result.bytes)
+    model.refreshPreview()
+    #expect(model.exported == nil && model.exportedPDF == nil)
+
+    model.clear()
+    let solid = try ScreenshotTests.image(size: 100) { context in
+      context.setFillColor(CGColor(red: 0.2, green: 0.5, blue: 0.9, alpha: 1))
+      context.fill(CGRect(x: 0, y: 0, width: 100, height: 100))
+    }
+    let solidURL = folder.appending(path: "纯色.png")
+    try write(solid, to: solidURL.path)
+    model.importFiles([solidURL, solidURL])
+    try await waitForComposition(model)
+    let smallOutput = folder.appending(path: "纯色测试.pdf")
+    let kept = try await ShotComposition.export(
+      model.sources, options: model.options, pdf: true, to: smallOutput)
+    #expect(kept.keptStandardPDF)
+    model.recordExportedDocument(smallOutput, pdfResult: kept)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 720, height: 520),
+      name: "composition-pdf-smaller-standard", dark: true)
+  }
+
   /// 核对插入线和撤销按钮在面板中的最终位置，调用真实的本进程按钮动作。
   @Test(.enabled(if: directory != nil)) func renderCompositionHistory() async throws {
     let folder = FileManager.default.temporaryDirectory.appending(
