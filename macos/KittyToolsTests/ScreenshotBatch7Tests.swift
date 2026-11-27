@@ -323,6 +323,37 @@ struct ScreenshotBatch7Tests {
     #expect(h.view.announcement == "长截图不带这些标注，拼完可以在长图上标")
   }
 
+  /// P 和实际按钮都切换采集，暂停时空格不会启动自动滚动。
+  @Test func scrollPanelPauseControlsAreIndependent() throws {
+    let hud = ScrollCaptureHUD()
+    var actions: [ScrollCaptureHUD.Item] = []
+    hud.onAction = { actions.append($0) }
+    func buttons(in view: NSView) -> [NSButton] {
+      view.subviews.flatMap { ($0 as? NSButton).map { [$0] } ?? buttons(in: $0) }
+    }
+    let capture = try #require(buttons(in: hud).first { $0.toolTip == "暂停采集（P）" })
+    let auto = try #require(buttons(in: hud).first { $0.toolTip == "自动滚动（空格）" })
+    capture.performClick(nil)
+    #expect(actions == [.toggleSampling])
+    hud.sampling = .paused
+    #expect(capture.accessibilityLabel() == "继续采集（P）" && !auto.isEnabled)
+    for (code, key, repeating) in [
+      (kVK_Space, " ", false), (kVK_ANSI_P, "p", true), (kVK_ANSI_P, "p", false),
+    ] {
+      let event = try #require(
+        NSEvent.keyEvent(
+          with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0,
+          context: nil, characters: key, charactersIgnoringModifiers: key,
+          isARepeat: repeating, keyCode: UInt16(code)))
+      hud.keyDown(with: event)
+    }
+    #expect(actions == [.toggleSampling, .toggleSampling])
+    hud.sampling = .reconnecting
+    #expect(!auto.isEnabled && capture.toolTip == "暂停采集（P）")
+    hud.sampling = .capturing
+    #expect(auto.isEnabled && capture.isEnabled)
+  }
+
   /// 长截图面板：A 进标注；存储右边的 ▾ 弹「存储到「桌面」／另存为…」，点了交回 saveAs
   @MainActor @Test func scrollPanelAnnotateAndSaveMenu() throws {
     let hud = ScrollCaptureHUD()

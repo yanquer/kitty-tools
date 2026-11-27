@@ -11,12 +11,16 @@
 
 import AppKit
 import Carbon.HIToolbox
+import OSLog
 import ScreenCaptureKit
 import SwiftUI
 
 final class ScrollCapture {
   /// annotate：交给标注遮罩（AnnotateOverlay），别的三样直接出图
   enum Action { case copy, save, saveAs, annotate }
+
+  /// 采集暂停与自动滚动独立，恢复必须先接回最后的参照帧。
+  enum Sampling: Equatable { case capturing, paused, reconnecting, stopped }
 
   struct Result {
     let image: CGImage
@@ -39,7 +43,7 @@ final class ScrollCapture {
       }), area(screen.frame.intersection(region)) > 0
     else { return nil }
     let capture = try await ScrollCapture(region: region, screen: screen)
-    return await withCheckedContinuation { capture.start(continuation: $0) }
+    return await capture.collect()
   }
 
   private static func area(_ rect: CGRect) -> CGFloat {
@@ -49,14 +53,21 @@ final class ScrollCapture {
   /// 选区（点，全局坐标，对齐到像素）
   private let region: CGRect
   private let scale: CGFloat
-  private let filter: SCContentFilter
-  private let configuration: SCStreamConfiguration
+  private let grabImage: @MainActor @Sendable () async throws -> CGImage
   private var stitcher: ScrollStitcher
   private let border: NSPanel
   private let borderView: ScrollBorderView
   private let panel: ScrollCapturePanel
   private var continuation: CheckedContinuation<Result?, Never>?
   private var loop: Task<Void, Never>?
+  private let sessionID = UUID()
+  private typealias CaptureTask = Task<(image: CGImage, posted: CGFloat), any Error>
+  private var inFlight: CaptureTask?
+  private var pauseWaiter: CheckedContinuation<Void, Never>?
+  private var samplingGeneration = 0
+  private(set) var sampling: Sampling = .capturing
+  /// 当前可输出的画布高度，也用于面板读数。
+  var capturedHeight: Int { stitcher.outputHeight }
 
   // 自动滚动：跟着屏幕刷新每一帧发一小段像素滚轮，匀速滚（2026-11-05 用户：原来截一帧跳一大步，「一顿一顿」）；
   // 抓帧照旧一帧接一帧，按实测位移校准滚轮的倍率，对不上就退回、放慢，连着几帧不动就是到头了；
@@ -85,10 +96,13 @@ final class ScrollCapture {
   /// 连续几帧发了滚轮画面却没动（到头了）、连续几帧对不上
   private var stalls = 0
   private var lostStreak = 0
-  /// 截屏出错，抓帧循环已经停了（只剩拷贝、存储和取消）
-  private var captureStopped = false
-
-  private init(region: CGRect, screen: NSScreen) async throws {
+  /// 使用指定屏幕建立会话。屏外验证可用受控图像替代系统采集。
+  init(
+    region: CGRect, screen: NSScreen,
+    captureImage: (@MainActor @Sendable () async throws -> CGImage)? = nil
+  )
+    async throws
+  {
     scale = screen.backingScaleFactor
     // 对齐到像素，夹进这块屏；sourceRect：屏内坐标，点，原点在左上
     let (snapped, source) = RegionSelector.captureRect(region, in: screen.frame, scale: scale)
@@ -99,27 +113,12 @@ final class ScrollCapture {
     borderView = ScrollBorderView()
     border = Self.makeBorder(around: snapped, view: borderView)
     panel = ScrollCapturePanel(region: snapped, screen: screen)
-    let content = try await SCShareableContent.excludingDesktopWindows(
-      false, onScreenWindowsOnly: false)
-    guard let display = content.displays.first(where: { $0.displayID == screen.displayID }) else {
-      throw CaptureError.noDisplay
-    }
-    // 滤掉本 App 的全部窗口（含之后才建的轻提示）；万一列表里还是没有本 App，退回按窗口排除此刻建好的边框和面板
-    // ponytail: 退回时之后才建的轻提示会进画面；真遇到了再连它们一起换过滤器
-    if let me = content.applications.first(where: { $0.processID == getpid() }) {
-      filter = SCContentFilter(display: display, excludingApplications: [me], exceptingWindows: [])
+    if let captureImage {
+      grabImage = captureImage
     } else {
-      filter = SCContentFilter(
-        display: display,
-        excludingWindows: content.windows.filter { $0.owningApplication?.processID == getpid() })
+      grabImage = try await Self.imageCapture(screen: screen, source: source, scale: scale)
     }
-    configuration = SCStreamConfiguration()
-    configuration.sourceRect = source
-    configuration.width = Int((source.width * scale).rounded())
-    configuration.height = Int((source.height * scale).rounded())
-    configuration.showsCursor = false
-    let first = try await SCScreenshotManager.captureImage(
-      contentFilter: filter, configuration: configuration)
+    let first = try await grabImage()
     guard
       let stitcher = ScrollStitcher(
         first: first, scrollbarWidth: Int(16 * scale),
@@ -127,6 +126,36 @@ final class ScrollCapture {
     else { throw CaptureError.tooSmall }
     self.stitcher = stitcher
     gain = scale
+  }
+
+  /// 边框和 HUD 已创建后获取过滤器，后续重复采集使用相同的选区和配置。
+  private static func imageCapture(screen: NSScreen, source: CGRect, scale: CGFloat)
+    async throws -> @MainActor @Sendable () async throws -> CGImage
+  {
+    let content = try await SCShareableContent.excludingDesktopWindows(
+      false, onScreenWindowsOnly: false)
+    guard let display = content.displays.first(where: { $0.displayID == screen.displayID }) else {
+      throw CaptureError.noDisplay
+    }
+    // 滤掉本 App 的全部窗口（含之后才建的轻提示）；万一列表里还是没有本 App，退回按窗口排除此刻建好的边框和面板
+    // ponytail: 退回时之后才建的轻提示会进画面；真遇到了再连它们一起换过滤器
+    let filter: SCContentFilter
+    if let me = content.applications.first(where: { $0.processID == getpid() }) {
+      filter = SCContentFilter(display: display, excludingApplications: [me], exceptingWindows: [])
+    } else {
+      filter = SCContentFilter(
+        display: display,
+        excludingWindows: content.windows.filter { $0.owningApplication?.processID == getpid() })
+    }
+    let configuration = SCStreamConfiguration()
+    configuration.sourceRect = source
+    configuration.width = Int((source.width * scale).rounded())
+    configuration.height = Int((source.height * scale).rounded())
+    configuration.showsCursor = false
+    return {
+      try await SCScreenshotManager.captureImage(
+        contentFilter: filter, configuration: configuration)
+    }
   }
 
   private enum CaptureError: LocalizedError {
@@ -140,38 +169,52 @@ final class ScrollCapture {
     }
   }
 
-  private func start(continuation: CheckedContinuation<Result?, Never>) {
+  /// 开始当前会话并等到输出或取消，屏外验证使用同一采集循环而不展示面板。
+  func collect(presentsPanel: Bool = true) async -> Result? {
+    await withCheckedContinuation { start(continuation: $0, presentsPanel: presentsPanel) }
+  }
+
+  /// HUD 和屏外验证共用会话命令入口。
+  func perform(_ action: ScrollCaptureHUD.Item) {
+    guard continuation != nil else { return }
+    if action != .escape { disarm() }
+    switch action {
+    case .toggleAuto: toggleAutoScroll()
+    case .toggleSampling: toggleSampling()
+    case .speed(let speed): setSpeed(speed)
+    case .cancel: finish(nil)
+    case .escape: escape()
+    case .output(let output): finish(output)
+    case .saveMenu: break
+    }
+  }
+
+  private func start(continuation: CheckedContinuation<Result?, Never>, presentsPanel: Bool) {
     self.continuation = continuation
     panel.hudView.onBrowse = { [weak self] in self?.browsePreview() }
-    panel.hudView.onAction = { [unowned self] action in
-      if action != .escape { disarm() }  // 别的操作解除 Esc 的上膛
-      switch action {
-      case .toggleAuto: toggleAutoScroll()
-      case .speed(let speed): setSpeed(speed)
-      case .cancel: finish(nil)
-      case .escape: escape()
-      case .output(let output): finish(output)
-      case .saveMenu: break  // HUD 自己弹菜单，不会传上来
-      }
-    }
+    panel.hudView.onAction = { [unowned self] in perform($0) }
     panel.hudView.speed = Prefs.ScrollSpeed.current()
-    border.orderFrontRegardless()
-    panel.orderFrontRegardless()
-    panel.makeKey()
+    if presentsPanel {
+      border.orderFrontRegardless()
+      panel.orderFrontRegardless()
+      panel.makeKey()
+      listenForWheel()
+    }
     updateStatus()
     // 第一帧先摆进预览（原来要等拼上第二段才有，开头预览是空的）；预览按自己的大小出图，先布局
     panel.layoutIfNeeded()
     refreshPreview(force: true)
-    // 手动滚时静止睡着的那一觉，选区里一滚就叫醒（滚轮落在别的 App 上，global 监听收得到；落在自家面板上是往回看预览，
-    // 不管）。自动滚动自己发的滚轮这里也收得到，那时的 160 ms 一帧不能被它叫醒
+    loop = Task { await run() }
+  }
+
+  /// 手动滚动可唤醒两帧之间的等待，暂停和自动滚动期间忽略滚轮。
+  private func listenForWheel() {
     wheelMonitor = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) { [weak self] _ in
       MainActor.assumeIsolated {
-        guard let self, !self.isAutoScrolling else { return }
+        guard let self, self.sampling != .paused, !self.isAutoScrolling else { return }
         self.nap?.cancel()
       }
     }
-    // 任务持有会话，直到结束（finish 清掉 continuation）循环才退出
-    loop = Task { await run() }
   }
 
   /// 一直截选区：手动滚时尽量密（两帧之间滚得越少越容易对上），自动滚时每截一帧滚一步、等画面画完；
@@ -183,33 +226,56 @@ final class ScrollCapture {
   /// （只和上次接上的那帧比）。实录 Chrome 的帧序列回放：原来慢一倍就对不上，现在慢五倍还一路接上
   private func run() async {
     /// 正在截的下一帧和它开截时 posted 是多少
-    var next: Task<(image: CGImage, posted: CGFloat), any Error>?
-    defer { next?.cancel() }
+    var next: (generation: Int, task: CaptureTask)?
+    defer {
+      inFlight?.cancel()
+      inFlight = nil
+    }
     while continuation != nil {
-      do {
-        let shot = try await (next ?? capture()).value
+      if let pending = next, pending.generation != samplingGeneration {
+        // 等系统调用退出后才发新请求，旧代次的结果或错误只丢弃。
+        _ = await pending.task.result
+        inFlight = nil
         next = nil
-        guard continuation != nil else { return }
+        continue
+      }
+      if sampling == .paused {
+        await withCheckedContinuation { pauseWaiter = $0 }
+        continue
+      }
+      let generation = samplingGeneration
+      do {
+        let shot = try await (next?.task ?? capture()).value
+        inFlight = nil
+        next = nil
+        guard acceptsFrame(generation) else { continue }
         // 手动滚、上一帧画面在动：先开截下一帧，再算这一帧
-        if !isAutoScrolling, quietFrames == 0 { next = capture() }
-        postedAtPreviousCapture = postedAtCapture
-        postedAtCapture = shot.posted
+        if sampling == .capturing, !isAutoScrolling, quietFrames == 0 {
+          next = (generation, capture())
+        }
         let frame = await ScrollStitcher.frame(shot.image, layout: stitcher.layout)
-        guard continuation != nil else { return }
-        let outcome = stitcher.add(frame)
-        quietFrames = outcome == .unchanged ? quietFrames + 1 : 0
-        handle(outcome)
+        guard acceptsFrame(generation) else { continue }
+        accept(frame, posted: shot.posted)
       } catch {
-        guard continuation != nil else { return }
-        captureStopped = true
+        inFlight = nil
+        next = nil
+        guard acceptsFrame(generation) else { continue }
+        sampling = .stopped
         stopAutoScroll()
+        let reason = error as NSError
+        Log.capture.error(
+          "长截图采集失败 session=\(self.sessionID.uuidString, privacy: .public) domain=\(reason.domain, privacy: .public) code=\(reason.code)"
+        )
         notice = Status(text: "截屏失败，已停止：\(error.localizedDescription)", tone: .warning)
         updateStatus()
         return refreshPreview(force: true)
       }
       // 下一帧已经在截了（画面在动）就不睡
-      guard next == nil,
-        let interval = Self.interval(isAutoScrolling: isAutoScrolling, quietFrames: quietFrames)
+      let delay =
+        sampling == .reconnecting
+        ? .milliseconds(160)
+        : Self.interval(isAutoScrolling: isAutoScrolling, quietFrames: quietFrames)
+      guard next == nil, let interval = delay
       else { continue }
       // 静止时睡得久，滚轮一来就醒（不然停了一会儿再一甩，第一帧要等满 200 ms 才截、已经滚过头了）
       let nap = Task { _ = try? await Task.sleep(for: interval) }
@@ -219,15 +285,37 @@ final class ScrollCapture {
     }
   }
 
-  /// 开截一帧（记下开截时发了多少滚轮，自动滚动拿它和画面实际滚的比）
-  private func capture() -> Task<(image: CGImage, posted: CGFloat), any Error> {
-    let (posted, filter, configuration) = (self.posted, self.filter, self.configuration)
-    return Task {
-      (
-        try await SCScreenshotManager.captureImage(
-          contentFilter: filter, configuration: configuration), posted
-      )
+  /// 系统截图和后台算帧都可能在暂停或结束之后返回，只有当前代次可落图。
+  private func acceptsFrame(_ generation: Int) -> Bool {
+    continuation != nil && sampling != .paused && samplingGeneration == generation
+  }
+
+  /// 恢复阶段先用最后的参照帧确认接缝，失败时保留画布和参照。
+  private func accept(_ frame: ScrollStitcher.Frame?, posted: CGFloat) {
+    let reconnecting = sampling == .reconnecting
+    let outcome = stitcher.add(frame, requiresReference: reconnecting)
+    if reconnecting, outcome != .lost {
+      sampling = .capturing
+      isLost = false
+      Log.capture.notice("长截图已接回参照 session=\(self.sessionID.uuidString, privacy: .public)")
+    } else if reconnecting, !isLost {
+      Log.capture.notice("长截图等待重叠区域 session=\(self.sessionID.uuidString, privacy: .public)")
     }
+    postedAtPreviousCapture = postedAtCapture
+    postedAtCapture = posted
+    quietFrames = outcome == .unchanged ? quietFrames + 1 : 0
+    handle(outcome)
+  }
+
+  /// 开截一帧（记下开截时发了多少滚轮，自动滚动拿它和画面实际滚的比）
+  private func capture() -> CaptureTask {
+    let (posted, grabImage) = (self.posted, self.grabImage)
+    let task = CaptureTask { @MainActor @Sendable in
+      try Task.checkCancellation()
+      return (try await grabImage(), posted)
+    }
+    inFlight = task
+    return task
   }
 
   /// 连着几帧画面没变
@@ -323,10 +411,16 @@ final class ScrollCapture {
   /// 但对不上（没到最长，同边框变橙的条件）盖过平常色的提示：停在「已经滚到底了」后手动滚得太快，要看到橙字、听到播报。纯函数，配单测
   static func status(
     notice: Status?, isFull: Bool, isLost: Bool, isAutoScrolling: Bool, isBrowsing: Bool = false,
-    isArmed: Bool = false
+    isArmed: Bool = false, sampling: Sampling = .capturing
   ) -> Status {
     // Esc 上膛了（U3）：等着再按一次，盖过别的提示（危险色，同录制条放弃上膛）
     if isArmed { return Status(text: "再按一次 Esc 放弃这张长图", tone: .danger) }
+    if sampling == .paused { return Status(text: "采集已暂停，按 P 继续") }
+    if sampling == .reconnecting {
+      return isLost
+        ? Status(text: "尚未接上：滚回刚才的接缝", tone: .lost)
+        : Status(text: "正在寻找接缝…")
+    }
     if let notice, !(isLost && !isFull && notice.tone == .normal) { return notice }
     if isFull { return Status(text: "已经最长了，按 ↩ 拷贝") }
     if isLost { return Status(text: "对不上了：往回滚一点，再慢慢滚", tone: .lost) }
@@ -340,11 +434,14 @@ final class ScrollCapture {
   private func updateStatus() {
     let status = Self.status(
       notice: notice, isFull: isFull, isLost: isLost, isAutoScrolling: isAutoScrolling,
-      isBrowsing: panel.hudView.browseFrom != nil, isArmed: escapeArm.isArmed(at: .now))
+      isBrowsing: panel.hudView.browseFrom != nil, isArmed: escapeArm.isArmed(at: .now),
+      sampling: sampling)
+    panel.hudView.sampling = sampling
     panel.hudView.show(
-      status.text, tone: status.tone, width: stitcher.width, height: stitcher.outputHeight)
-    borderView.update(lost: isLost && !isFull, marching: isAutoScrolling)
-    if status.announces, status.text != announced {
+      status.text, tone: status.tone, width: stitcher.width, height: capturedHeight)
+    borderView.update(
+      lost: isLost && !isFull, marching: isAutoScrolling, paused: sampling == .paused)
+    if panel.isVisible, status.announces, status.text != announced {
       NSAccessibility.post(
         element: panel, notification: .announcementRequested,
         userInfo: [
@@ -352,6 +449,37 @@ final class ScrollCapture {
         ])
     }
     announced = status.announces ? status.text : nil
+  }
+
+  /// 暂停冻结画布和参照。继续只启用手动采集来寻找接缝。
+  private func toggleSampling() {
+    switch sampling {
+    case .capturing, .reconnecting:
+      sampling = .paused
+      samplingGeneration &+= 1
+      isLost = false
+      notice = nil
+      inFlight?.cancel()
+      nap?.cancel()
+      stopAutoScroll()
+      refreshPreview(force: true)
+      Log.capture.notice(
+        "长截图暂停采集 session=\(self.sessionID.uuidString, privacy: .public) height=\(self.capturedHeight) generation=\(self.samplingGeneration)"
+      )
+    case .paused:
+      sampling = .reconnecting
+      wakePausedLoop()
+      Log.capture.notice("长截图开始寻找接缝 session=\(self.sessionID.uuidString, privacy: .public)")
+    case .stopped: return
+    }
+    updateStatus()
+  }
+
+  /// 继续或结束都释放同一个暂停等待，避免会话在后台滞留。
+  private func wakePausedLoop() {
+    let waiter = pauseWaiter
+    pauseWaiter = nil
+    waiter?.resume()
   }
 
   // MARK: Esc
@@ -393,7 +521,7 @@ final class ScrollCapture {
 
   private func toggleAutoScroll() {
     if isAutoScrolling { return stopAutoScroll() }
-    guard !captureStopped else { return NSSound.beep() }
+    guard sampling == .capturing else { return }
     guard Permissions.isAccessibilityTrusted else {
       Permissions.requestAccessibility()
       notice = Status(text: "自动滚动需要「辅助功能」授权，授权后点 ▶ 开始", tone: .warning)
@@ -595,6 +723,9 @@ final class ScrollCapture {
     guard let continuation else { return }
     self.continuation = nil
     loop?.cancel()
+    inFlight?.cancel()
+    nap?.cancel()
+    wakePausedLoop()
     browseTask?.cancel()
     browseTask = nil
     wheelMonitor.map(NSEvent.removeMonitor)
@@ -640,6 +771,7 @@ final class ScrollBorderView: NSView {
   private let animates: Bool
   private var lost = false
   private var marching = false
+  private var paused = false
 
   init(animates: Bool = true) {
     self.animates = animates
@@ -672,13 +804,14 @@ final class ScrollBorderView: NSView {
     CATransaction.commit()
   }
 
-  func update(lost: Bool, marching: Bool) {
+  func update(lost: Bool, marching: Bool, paused: Bool = false) {
     if lost != self.lost {
       self.lost = lost
       applyColor()
     }
-    guard marching != self.marching else { return }
+    guard marching != self.marching || paused != self.paused else { return }
     self.marching = marching
+    self.paused = paused
     applyAmbient()
   }
 
@@ -686,7 +819,7 @@ final class ScrollBorderView: NSView {
   private func applyAmbient() {
     line.removeAnimation(forKey: "breathe")
     line.removeAnimation(forKey: "march")
-    let reduced = Style.reduceMotion || !animates
+    let reduced = Style.reduceMotion || !animates || paused
     CATransaction.begin()
     CATransaction.setDisableActions(true)
     line.lineDashPattern = marching ? [8, 6] : nil
@@ -773,7 +906,7 @@ final class ScrollCapturePanel: NSPanel {
 /// macOS 26 起是液态玻璃（mac-whisker §2「26 分支」）
 final class ScrollCaptureHUD: NSView {
   enum Item: Equatable {
-    case toggleAuto, cancel
+    case toggleAuto, toggleSampling, cancel
     /// 换了自动滚动的速度（按钮行上面那一行）
     case speed(Prefs.ScrollSpeed)
     /// 按了 Esc（✕ 是 cancel）：长图拼上过东西时第一下只上膛（第四轮体检 U3）
@@ -802,6 +935,20 @@ final class ScrollCaptureHUD: NSView {
     didSet {
       autoButton.image = Self.symbol(isAutoScrolling ? "pause.fill" : "play.fill")
       autoButton.contentTintColor = isAutoScrolling ? Style.Shot.accent : Style.HUD.text
+    }
+  }
+  /// 采集按钮给出下一步动作，恢复接缝前留出手动滚动时间。
+  var sampling: ScrollCapture.Sampling = .capturing {
+    didSet {
+      guard sampling != oldValue else { return }
+      let paused = sampling == .paused
+      let title = paused ? "继续采集（P）" : "暂停采集（P）"
+      samplingButton.image = Self.symbol(paused ? "play.circle.fill" : "pause.circle")
+      samplingButton.contentTintColor = paused ? Style.Shot.accent : Style.HUD.text
+      samplingButton.toolTip = title
+      samplingButton.setAccessibilityLabel(title)
+      samplingButton.isEnabled = sampling != .stopped
+      autoButton.isEnabled = sampling == .capturing
     }
   }
   /// 自动滚动时屏幕每刷新一帧调一次（参数是离上一帧的秒数，匀速发滚轮用）；设成 nil 停掉显示器回调
@@ -837,6 +984,7 @@ final class ScrollCaptureHUD: NSView {
   private let status = NSTextField(wrappingLabelWithString: "")
   private let reading = HeightReading()
   private var autoButton = NSButton()
+  private var samplingButton = NSButton()
   private var buttons: [(item: Item, button: NSButton)] = []
   /// 开着的存储菜单（点别处、按键时收起；别叫 menu，NSView 自己有一个同名的右键菜单属性）
   private var openMenu: HUDMenu?
@@ -975,7 +1123,7 @@ final class ScrollCaptureHUD: NSView {
       view.setContentHuggingPriority(.required, for: .vertical)
     }
 
-    // 自动滚动的速度：系统的分段控件（深色跟着材质走，读屏念「自动滚动速度」和选中的那段），和内容一样宽，贴在按钮行上面
+    // 采集开关和自动滚动速度使用同一行，保留底部操作行和面板宽度。
     speedControl.controlSize = .small
     speedControl.segmentDistribution = .fillEqually
     speedControl.refusesFirstResponder = true  // 同按钮：点了不抢第一响应者，Esc / ↩ / 空格照旧归 HUD
@@ -983,9 +1131,17 @@ final class ScrollCaptureHUD: NSView {
     speedControl.toolTip = "自动滚动的速度"
     speedControl.setAccessibilityLabel("自动滚动速度")
     speedControl.setContentHuggingPriority(.required, for: .vertical)
+    samplingButton = barButton(
+      Self.symbol("pause.circle"), tip: "暂停采集（P）", action: #selector(samplingClicked(_:)),
+      size: CGSize(width: 32, height: 32))
+    samplingButton.contentTintColor = Style.HUD.text
+    let speedRow = NSStackView(views: [speedControl, samplingButton])
+    speedRow.alignment = .centerY
+    speedRow.spacing = 8
+    speedRow.setContentHuggingPriority(.required, for: .vertical)
 
     let stack = NSStackView(views: [
-      previewContainer(width: content), readingView, statusBox, speedControl, bar,
+      previewContainer(width: content), readingView, statusBox, speedRow, bar,
     ])
     stack.orientation = .vertical
     stack.alignment = .centerX
@@ -1001,7 +1157,8 @@ final class ScrollCaptureHUD: NSView {
       stack.topAnchor.constraint(equalTo: surface.topAnchor),
       stack.bottomAnchor.constraint(equalTo: surface.bottomAnchor),
       statusBox.widthAnchor.constraint(equalToConstant: content),
-      speedControl.widthAnchor.constraint(equalToConstant: content),
+      speedRow.widthAnchor.constraint(equalToConstant: content),
+      speedControl.widthAnchor.constraint(equalToConstant: content - 40),
       statusBox.heightAnchor.constraint(equalToConstant: twoLines),
       status.leadingAnchor.constraint(equalTo: statusBox.leadingAnchor),
       status.trailingAnchor.constraint(equalTo: statusBox.trailingAnchor),
@@ -1249,6 +1406,12 @@ final class ScrollCaptureHUD: NSView {
     onAction(.speed(speed))
   }
 
+  /// 点击采集按钮先收起存储菜单，再切换采集状态。
+  @objc private func samplingClicked(_ sender: NSButton) {
+    openMenu?.dismiss()
+    onAction(.toggleSampling)
+  }
+
   @objc private func clicked(_ sender: NSButton) {
     let item = buttons[sender.tag].item
     if case .saveMenu = item { return toggleSaveMenu() }
@@ -1294,8 +1457,10 @@ final class ScrollCaptureHUD: NSView {
     case kVK_Return where flags.isEmpty, kVK_ANSI_KeypadEnter where flags.isEmpty:
       onAction(.output(.copy))
     case kVK_ANSI_A where flags.isEmpty: onAction(.output(.annotate))
+    case kVK_ANSI_P where flags.isEmpty && !event.modifierFlags.contains(.shift):
+      if !event.isARepeat, sampling != .stopped { onAction(.toggleSampling) }
     case kVK_Space where flags.isEmpty:
-      if !event.isARepeat { onAction(.toggleAuto) }  // 按住不放不反复开关
+      if !event.isARepeat, sampling == .capturing { onAction(.toggleAuto) }
     case kVK_UpArrow where flags.isEmpty:
       if !scrubber.adjust(by: -0.1) { super.keyDown(with: event) }
     case kVK_DownArrow where flags.isEmpty:

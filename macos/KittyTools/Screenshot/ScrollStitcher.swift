@@ -159,15 +159,18 @@ struct ScrollStitcher {
     Frame(image, layout: layout)
   }
 
-  /// 接一帧算好的（nil：尺寸不对、画不进位图）
-  mutating func add(_ frame: Frame?) -> Outcome {
+  /// 接一帧算好的（nil：尺寸不对、画不进位图）。暂停后先确认和最后参照重叠。
+  mutating func add(_ frame: Frame?, requiresReference: Bool = false) -> Outcome {
     guard let frame else { return .lost }
     let a = reference.hashes
     let b = frame.hashes
     let changed = (0..<height).count { a[$0] != b[$0] }
     guard changed > 0 else { return .unchanged }
     var found = Self.match(from: reference, to: frame)
-    if found == nil {
+    if found == nil, requiresReference {
+      if confirmsReferencePosition(frame) { return .unchanged }
+      found = Self.fuzzyMatch(from: reference, to: frame)
+    } else if found == nil {
       let ink = (0..<height).count { reference.ink[$0] }
       let still = (0..<height).count { reference.ink[$0] && a[$0] == b[$0] }
       if Double(changed) < Self.quietShare * Double(height)
@@ -221,6 +224,17 @@ struct ScrollStitcher {
     referenceTop = position
     lastShift = dy
     return .moved(grown: outputHeight - before)
+  }
+
+  /// 少量光标变化可保持同一位置，只在参照的有效行有充分一致证据时通过。
+  private func confirmsReferencePosition(_ frame: Frame) -> Bool {
+    let rows = movingRows.isEmpty ? 0..<height : movingRows
+    let comparable = rows.filter {
+      reference.ink[$0] && !reference.common.contains(reference.hashes[$0])
+    }
+    let still = comparable.count { reference.hashes[$0] == frame.hashes[$0] }
+    return still >= Self.minVotes
+      && Double(still) >= (1 - Self.quietShare) * Double(comparable.count)
   }
 
   // MARK: 在动的那一块

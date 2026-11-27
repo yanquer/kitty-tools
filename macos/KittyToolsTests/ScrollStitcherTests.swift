@@ -5,6 +5,7 @@
 // 和上一帧没有重叠时在已拼的画布里重新找到位置、小数像素滚动、电脑上的移动端网页（两边留白、旁边不动的面板）、
 // 整屏那么高的大选区每步滚出自动滚动允许的最大领先（半个选区高）。
 
+import AppKit
 import CoreGraphics
 import Foundation
 import Testing
@@ -364,6 +365,96 @@ struct ScrollStitcherTests {
     #expect(stitcher.add(Self.image(Self.frame(at: 900))) == .lost)
   }
 
+  /// 恢复阶段不会从画布较早的位置另起参照，回到最后一帧附近后才能续拼。
+  @Test func reconnectRequiresTheLastReference() throws {
+    let first = Self.frame(at: 0)
+    var stitcher = try Self.stitcher(first)
+    for offset in [80, 160, 240, 320, 400] {
+      #expect(stitcher.add(Self.image(Self.frame(at: offset))) == .moved(grown: 80))
+    }
+    let before = try #require(stitcher.makeImage())
+    let earlier = Self.image(Self.frame(at: 100))
+    #expect(stitcher.add(.init(earlier, layout: stitcher.layout), requiresReference: true) == .lost)
+    #expect(try Self.pixels(#require(stitcher.makeImage())) == Self.pixels(before))
+    let same = Self.image(Self.frame(at: 400, caret: true))
+    #expect(
+      stitcher.add(.init(same, layout: stitcher.layout), requiresReference: true) == .unchanged)
+    let next = Self.frame(at: 440)
+    #expect(
+      stitcher.add(.init(Self.image(next), layout: stitcher.layout), requiresReference: true)
+        == .moved(grown: 40))
+    Self.expect(
+      stitcher.makeImage(), top: 0, bottom: 640, topFrame: first, bottomFrame: next)
+  }
+
+  /// 用受控截图驱动真实采集循环，覆盖旧预取未返回时立刻继续和暂停期间出图。
+  @MainActor @Test(arguments: [false, true]) func capturePausesAndDiscardsLateWork(
+    lateError: Bool
+  ) async throws {
+    let screen = try #require(NSScreen.screens.first)
+    let first = Self.frame(at: 0)
+    let probe = ScrollFrameProbe(first: Self.image(first))
+    let region = CGRect(origin: screen.visibleFrame.origin, size: CGSize(width: 300, height: 200))
+    let capture = try await ScrollCapture(region: region, screen: screen, captureImage: probe.grab)
+    let session = Task { await capture.collect(presentsPanel: false) }
+    defer {
+      capture.perform(.cancel)
+      probe.deliver(.failure(CancellationError()))
+    }
+    try await probe.wait { probe.isWaiting }
+    probe.deliver(.success(Self.image(Self.frame(at: 80))))
+    try await probe.wait { probe.isWaiting && capture.capturedHeight == 280 }
+
+    capture.perform(.toggleSampling)
+    #expect(capture.sampling == .paused)
+    capture.perform(.toggleSampling)
+    #expect(capture.sampling == .reconnecting)
+    probe.deliver(
+      lateError ? .failure(CancellationError()) : .success(Self.image(Self.frame(at: 150))))
+    try await probe.wait { probe.isWaiting }
+    #expect(capture.sampling == .reconnecting && capture.capturedHeight == 280)
+
+    probe.deliver(.success(Self.image(Self.frame(at: 600))))
+    try await probe.wait { probe.isWaiting }
+    #expect(capture.sampling == .reconnecting && capture.capturedHeight == 280)
+    let last = Self.frame(at: 110, caret: true)
+    probe.deliver(.success(Self.image(last)))
+    try await probe.wait { capture.sampling == .capturing && probe.isWaiting }
+    #expect(capture.capturedHeight == 310)
+
+    capture.perform(.toggleSampling)
+    let count = probe.requests
+    probe.deliver(.success(Self.image(Self.frame(at: 170))))
+    try await Task.sleep(for: .milliseconds(45))
+    #expect(capture.sampling == .paused && probe.requests == count && capture.capturedHeight == 310)
+    capture.perform(.output(.copy))
+    let result = try #require(await session.value)
+    #expect(result.action == .copy)
+    Self.expect(result.image, top: 0, bottom: 310, topFrame: first, bottomFrame: last)
+  }
+
+  /// 当前代次的截图失败会停止采集，已有结果仍能输出。
+  @MainActor @Test func currentCaptureFailureKeepsTheExistingImage() async throws {
+    let screen = try #require(NSScreen.screens.first)
+    let first = Self.frame(at: 0)
+    let probe = ScrollFrameProbe(first: Self.image(first))
+    let region = CGRect(origin: screen.visibleFrame.origin, size: CGSize(width: 300, height: 200))
+    let capture = try await ScrollCapture(region: region, screen: screen, captureImage: probe.grab)
+    let session = Task { await capture.collect(presentsPanel: false) }
+    defer {
+      capture.perform(.cancel)
+      probe.deliver(.failure(CancellationError()))
+    }
+    try await probe.wait { probe.isWaiting }
+    probe.deliver(.failure(NSError(domain: "KittyTestScrollCapture", code: 17)))
+    try await probe.wait { capture.sampling == .stopped }
+    capture.perform(.toggleSampling)
+    #expect(capture.sampling == .stopped && probe.requests == 2)
+    capture.perform(.output(.copy))
+    let result = try #require(await session.value)
+    Self.expect(result.image, top: 0, bottom: Self.height, topFrame: first, bottomFrame: first)
+  }
+
   @Test func relocatesInsideTheCanvas() throws {
     // 往下拼到 400，一下滚回 100（和上一帧没有重叠）：在已经拼好的画布里找到位置，不报对不上；
     // 再一下滚到 450（和上一帧还是没有重叠，但压着画布的下沿）：从画布上接着往下拼
@@ -600,6 +691,40 @@ struct ScrollStitcherTests {
       ScrollStitcher(first: frame(0), scrollbarWidth: Self.scrollbar, maxHeight: 100_000))
     let outcome = stitcher.add(frame(47))
     #expect(outcome == .lost || outcome == .moved(grown: 47))
+  }
+}
+
+/// 可控制系统截图何时返回的单请求替身，保留实际的预取和取消顺序。
+@MainActor private final class ScrollFrameProbe {
+  private var first: CGImage?
+  private var pending: CheckedContinuation<CGImage, any Error>?
+  private(set) var requests = 0
+  var isWaiting: Bool { pending != nil }
+
+  init(first: CGImage) { self.first = first }
+
+  /// 第一帧立即返回，其余请求由用例在指定状态释放。
+  func grab() async throws -> CGImage {
+    requests += 1
+    if let first {
+      self.first = nil
+      return first
+    }
+    try #require(pending == nil, "前一个截图请求尚未退出")
+    return try await withCheckedThrowingContinuation { pending = $0 }
+  }
+
+  /// 清空当前请求后把像素或错误返回给真实采集循环。
+  func deliver(_ result: Result<CGImage, any Error>) {
+    let waiting = pending
+    pending = nil
+    waiting?.resume(with: result)
+  }
+
+  /// 等到预期入口就绪，超时明确失败。
+  func wait(_ ready: () -> Bool) async throws {
+    for _ in 0..<400 where !ready() { try await Task.sleep(for: .milliseconds(5)) }
+    try #require(ready(), "采集循环未在时限内到达预期状态")
   }
 }
 

@@ -1363,9 +1363,11 @@ struct ScreenshotSnapshotTests {
     var stitcher = try #require(ScrollStitcher(first: first, scrollbarWidth: 8, maxHeight: 30_000))
     _ = stitcher.add(second)
     #expect(stitcher.outputHeight > first.height)
-    for (name, height, dark, drag) in [
-      ("scroll-position-following", 360, false, false),
-      ("scroll-position-dragging", 260, true, true),
+    for (name, height, dark, drag, sampling) in [
+      ("scroll-position-following", 360, false, false, ScrollCapture.Sampling.capturing),
+      ("scroll-position-dragging", 260, true, true, .capturing),
+      ("scroll-sampling-paused", 260, true, false, .paused),
+      ("scroll-sampling-reconnect", 360, false, false, .reconnecting),
     ] {
       let hud = ScrollCaptureHUD()
       hud.frame = CGRect(x: 0, y: 0, width: ScrollCaptureHUD.width, height: CGFloat(height))
@@ -1377,7 +1379,11 @@ struct ScreenshotSnapshotTests {
       hud.updatePreview(stitcher: stitcher, scale: 2)
       #expect(!control.isHidden && window.canBecomeKey == false)
       hud.onBrowse = { [weak hud] in hud?.updatePreview(stitcher: stitcher, scale: 2) }
-      hud.show("在选区里滚动，或按空格自动滚动", width: stitcher.width, height: stitcher.outputHeight)
+      hud.sampling = sampling
+      let status = ScrollCapture.status(
+        notice: nil, isFull: false, isLost: sampling == .reconnecting, isAutoScrolling: false,
+        sampling: sampling)
+      hud.show(status.text, tone: status.tone, width: stitcher.width, height: stitcher.outputHeight)
       if drag {
         let point = control.convert(
           CGPoint(x: control.bounds.midX, y: control.bounds.midY), to: nil)
@@ -1391,6 +1397,7 @@ struct ScreenshotSnapshotTests {
         hud.show("双击预览回到最新", width: stitcher.width, height: stitcher.outputHeight)
       }
       window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+      RunLoop.main.run(until: Date.now.addingTimeInterval(0.35))
       let material = try #require(hud.subviews.first)
       // 液态玻璃在屏外会拦下整层绘制，直接读取实际承载控件的内容视图。
       let content: NSView

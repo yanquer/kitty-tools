@@ -179,7 +179,9 @@ struct ShotChromeTests {
     ).text
     hud.show(short, width: 1200, height: 480)
     window.layoutIfNeeded()
-    let buttons = all(hud).compactMap { $0 as? BarButton }.sorted {
+    let allButtons = all(hud).compactMap { $0 as? BarButton }
+    let sampling = try #require(allButtons.first { $0.toolTip == "暂停采集（P）" })
+    let buttons = allButtons.filter { $0 !== sampling }.sorted {
       frame($0).minX < frame($1).minX
     }
     // ▶ 标注 ｜ 存储 ▾ ｜ ✕ ✓（2026-10-26 加「标注」，另存为收进了 ▾）
@@ -201,6 +203,8 @@ struct ShotChromeTests {
     #expect(!row.hasAmbiguousLayout)
     #expect(abs(rects[0].minX - (hud.bounds.maxX - rects[5].maxX)) < 0.01)
     #expect(rects[0].minY == 10 && frame(row).height == 32)
+    #expect(frame(sampling).size == CGSize(width: 32, height: 32))
+    #expect(frame(sampling).minY >= frame(row).maxY && frame(sampling).maxX <= hud.bounds.maxX - 10)
     let preview = try #require(all(hud).first { $0 is NSImageView && !($0.superview is NSButton) })
     #expect(frame(preview).maxY == hud.bounds.maxY - 10 && frame(preview).minX == 10)
     // 状态一行 → 两行 → 一行：读数、预览、按钮都不挪；状态文字自己在两行高的区域里竖直居中
