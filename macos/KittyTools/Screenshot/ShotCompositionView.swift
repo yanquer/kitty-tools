@@ -934,6 +934,7 @@ struct ShotCompositionView: View {
           Picker("排列", selection: $model.options.layout) {
             ForEach(ShotComposition.Layout.allCases) { Text($0.title).tag($0) }
           }
+          if model.options.layout == .grid { gridColumnPicker }
           widthControls
           Stepper(
             "间距 \(Int(model.options.spacing)) 像素", value: $model.options.spacing, in: 0...64,
@@ -1047,6 +1048,24 @@ struct ShotCompositionView: View {
       model.finishReorder()
       endReorder()
     }
+  }
+
+  /// 选择器保留用户设置，并在图片不足时同时注明实际列数。
+  private var gridColumnPicker: some View {
+    let count = model.sources.count
+    return Picker("列数", selection: $model.options.gridColumns) {
+      Text("自动").tag(nil as Int?)
+      if count > 0 {
+        ForEach(1...count, id: \.self) { columns in
+          Text("\(columns) 列").tag(Optional(columns))
+        }
+      }
+      if let requested = model.options.gridColumns, requested > count {
+        Text(count == 0 ? "\(requested) 列" : "\(requested) 列（当前 \(count) 列）")
+          .tag(Optional(requested))
+      }
+    }
+    .pickerStyle(.menu)
   }
 
   /// 宽度预设和自定义共用唯一生效模式，高度由排版比例决定。

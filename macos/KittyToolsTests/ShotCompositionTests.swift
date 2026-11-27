@@ -149,6 +149,72 @@ struct ShotCompositionTests {
     #expect(!ShotComposition.accepts(Array(repeating: item, count: 21)))
   }
 
+  /// 自动保持旧排版，手动按行从左到右放置，空列与超出像素预算的尺寸都不会进入输出。
+  @Test func gridColumnsRespectOrderCountAndBudget() throws {
+    let size = CGSize(width: 120, height: 80)
+    let sizes = Array(repeating: size, count: 6)
+    let automatic = ShotComposition.Options(layout: .grid)
+    var manual = automatic
+    manual.gridColumns = 3
+    #expect(
+      try ShotComposition.plan(sizes: sizes, options: automatic)
+        == ShotComposition.plan(sizes: sizes, options: manual))
+    manual.gridColumns = 2
+    let two = try ShotComposition.plan(sizes: sizes, options: manual)
+    #expect(two.size.width < two.size.height && two.frames.count == 6)
+    #expect(two.frames[0].minX < two.frames[1].minX)
+    #expect(two.frames[0].minY == two.frames[1].minY)
+    #expect(two.frames[1].minY > two.frames[2].minY)
+    #expect(two.frames[0].minX == two.frames[2].minX)
+
+    manual.gridColumns = ShotComposition.maximumCount
+    #expect(
+      try ShotComposition.plan(sizes: Array(sizes.prefix(2)), options: manual)
+        == ShotComposition.plan(sizes: [size, size], options: .init(layout: .grid, gridColumns: 2)))
+    let many = try ShotComposition.plan(
+      sizes: Array(repeating: size, count: ShotComposition.maximumCount), options: manual)
+    #expect(many.isLimited && max(many.size.width, many.size.height) <= ShotComposition.maximumSide)
+    #expect(many.frames.count == ShotComposition.maximumCount)
+    for invalid in [0, ShotComposition.maximumCount + 1] {
+      #expect(throws: ShotComposition.Failure.self) {
+        try ShotComposition.plan(sizes: sizes, options: .init(layout: .grid, gridColumns: invalid))
+      }
+      #expect(
+        try ShotComposition.pdfPagePlan(size: size, options: .init(gridColumns: invalid))
+          == ShotComposition.pdfPagePlan(size: size, options: .init()))
+    }
+  }
+
+  /// 手动两列经缩小预览与真实 PNG 回读，逐格核对画幅和图片顺序。
+  @Test func gridColumnPreviewMatchesExportedPNG() async throws {
+    let folder = try directory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let red = try await source(image(1, 0), at: folder.appending(path: "red.png"))
+    let blue = try await source(
+      image(0, 1, size: CGSize(width: 60, height: 120)), at: folder.appending(path: "blue.png"))
+    let both = try await source(image(1, 1), at: folder.appending(path: "both.png"))
+    let sources = [red, blue, both, red, blue, both]
+    let options = ShotComposition.Options(
+      layout: .grid, gridColumns: 2, spacing: 20, margin: 12, widthMode: .custom, customWidth: 1000)
+    let plan = try ShotComposition.plan(sizes: sources.map(\.size), options: options)
+    let preview = try await ShotComposition.render(sources, options: options, maximum: 320)
+    let target = folder.appending(path: "两列.png")
+    try await ShotComposition.export(sources, options: options, pdf: false, to: target)
+    let input = try #require(CGImageSourceCreateWithURL(target as CFURL, nil))
+    let output = try #require(CGImageSourceCreateImageAtIndex(input, 0, nil))
+    #expect(output.width == 1000 && output.height == Int(plan.size.height))
+    let scale = 320 / plan.size.height
+    #expect(preview.height == 320)
+    for (index, frame) in plan.frames.enumerated() {
+      let center = CGPoint(x: frame.midX, y: frame.midY)
+      let savedPixel = try pixel(output, at: center)
+      let shownPixel = try pixel(preview, at: CGPoint(x: center.x * scale, y: center.y * scale))
+      #expect(savedPixel == shownPixel)
+      #expect((savedPixel[0] > 240) == (index % 3 != 1))
+      #expect((savedPixel[2] > 240) == (index % 3 != 0))
+    }
+  }
+
   @Test func pngAndPDFContainAllImagesInOrder() async throws {
     let folder = try directory()
     defer { try? FileManager.default.removeItem(at: folder) }

@@ -166,6 +166,8 @@ nonisolated enum ShotComposition {
   /// 每次导出固定一份选项，处理中调整界面不会改变正在输出的内容。
   struct Options: Equatable, Sendable {
     var layout = Layout.vertical
+    /// nil 沿用自动列数，手动值随编辑会话保留。
+    var gridColumns: Int? = nil
     var spacing: CGFloat = 16
     var margin: CGFloat = 16
     var cornerRadius: CGFloat = 0
@@ -183,6 +185,12 @@ nonisolated enum ShotComposition {
       case .wide: 1920
       case .custom: CGFloat(customWidth)
       }
+    }
+
+    /// 图片少于所选列数时只排有图片的列，自动继续按原来的平方根规则排版。
+    func gridColumnCount(for imageCount: Int) -> Int {
+      let count = max(1, imageCount)
+      return min(count, max(1, gridColumns ?? Int(ceil(sqrt(Double(count))))))
     }
   }
 
@@ -234,7 +242,10 @@ nonisolated enum ShotComposition {
       }
       size = CGSize(width: x - gap + margin, height: height + margin * 2)
     case .grid:
-      let columns = Int(ceil(sqrt(Double(sizes.count))))
+      if let columns = options.gridColumns, !(1...maximumCount).contains(columns) {
+        throw Failure(message: "网格列数需要在 1–\(maximumCount) 之间")
+      }
+      let columns = options.gridColumnCount(for: sizes.count)
       let rows = (sizes.count + columns - 1) / columns
       let cell: CGFloat = 1024
       size = CGSize(
@@ -504,8 +515,9 @@ nonisolated enum ShotComposition {
         }
       } else {
         let image = try await render(sources, options: options)
+        let columns = options.layout == .grid ? options.gridColumnCount(for: sources.count) : 0
         Log.storage.notice(
-          "PNG 输出尺寸 operation=\(operation, privacy: .public) widthMode=\(options.widthMode.rawValue, privacy: .public) requestedWidth=\(options.requestedWidth ?? 0) actualWidth=\(image.width) actualHeight=\(image.height)"
+          "PNG 输出尺寸 operation=\(operation, privacy: .public) layout=\(options.layout.rawValue, privacy: .public) gridColumns=\(columns) widthMode=\(options.widthMode.rawValue, privacy: .public) requestedWidth=\(options.requestedWidth ?? 0) actualWidth=\(image.width) actualHeight=\(image.height)"
         )
         try writePNG(image, to: temporary)
       }

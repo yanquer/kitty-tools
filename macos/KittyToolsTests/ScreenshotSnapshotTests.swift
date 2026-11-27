@@ -2183,6 +2183,48 @@ struct ScreenshotSnapshotTests {
       name: "composition-width-limited")
   }
 
+  /// 核对「自动」与手动列数在不同面板尺寸的选中状态及对应网格。
+  @Test(.enabled(if: directory != nil)) func renderCompositionGridColumns() async throws {
+    let folder = FileManager.default.temporaryDirectory.appending(
+      path: "kitty-compose-grid-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let model = ShotCompositionModel()
+    defer {
+      model.clear()
+      try? FileManager.default.removeItem(at: folder)
+    }
+    let desktop = try Self.desktop()
+    let urls = try (0..<6).map { index in
+      let url = folder.appending(path: "参考图-\(index + 1).png")
+      let area = CGRect(x: 120 + index * 240, y: 420, width: 610, height: 460)
+      try write(try #require(desktop.cropping(to: area)), to: url.path)
+      return url
+    }
+    model.options.layout = .grid
+    model.importFiles(urls)
+    try await waitForComposition(model)
+    let order = model.sources.map(\.id)
+    #expect(model.preview.map { $0.width > $0.height } == true)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 820, height: 620),
+      name: "composition-grid-automatic")
+    model.options.gridColumns = 2
+    model.refreshPreview()
+    try await waitForComposition(model)
+    #expect(model.preview.map { $0.width < $0.height } == true)
+    #expect(model.sources.map(\.id) == order)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 720, height: 520),
+      name: "composition-grid-manual", dark: true)
+    for source in model.sources.dropFirst() { model.remove(source.id) }
+    try await waitForComposition(model)
+    #expect(model.options.gridColumns == 2)
+    #expect(try #require(model.outputPlan).frames.count == 1)
+    try enhancement(
+      ShotCompositionView(model: model), size: NSSize(width: 720, height: 520),
+      name: "composition-grid-fewer-images", dark: true)
+  }
+
   /// 核对插入线和撤销按钮在面板中的最终位置，调用真实的本进程按钮动作。
   @Test(.enabled(if: directory != nil)) func renderCompositionHistory() async throws {
     let folder = FileManager.default.temporaryDirectory.appending(
